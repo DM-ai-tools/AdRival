@@ -1,0 +1,19 @@
+services:
+  adrival:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      PORT: "3000"
+      HOSTNAME: "0.0.0.0"
+      NODE_ENV: production
+      SOCIAVAULT_API_KEY: ${SOCIAVAULT_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    volumes:
+      - adrival-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  adrival-data:

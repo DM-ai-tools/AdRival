@@ -1,0 +1,28 @@
+# Docker build context — keep lean; Dockerfile itself is not sent via context COPY
+node_modules
+npm-debug.log*
+.next
+out
+build
+coverage
+*.tsbuildinfo
+
+# Local / secrets
+.env
+.env.*
+!.env.example
+!.env.local.example
+
+# Runtime data
+data
+
+# Dev / editor / local artifacts
+.git
+.cursor
+canvases
+SKILL*
+FRAMEWORK-COMPARISON-REPORT.md
+
+# OS
+.DS_Store
+Thumbs.db
