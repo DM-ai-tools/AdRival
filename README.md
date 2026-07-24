@@ -31,6 +31,22 @@ Required environment variables (set in the Railway service):
 | `SOCIAVAULT_API_KEY` | Yes | SociaVault API key |
 | `OPENAI_API_KEY` | Yes | OpenAI API key |
 | `PORT` | Auto | Injected by Railway (app binds `0.0.0.0:$PORT`) |
+| `HISTORY_IMPORT_SECRET` | No | Bearer secret for `/api/admin/import-history` (remove after importing) |
+
+### Import local history into production
+
+Local history lives in `data/store.json` (gitignored). After deploy:
+
+1. Attach a Railway volume at `/app/data` (so history survives redeploys)
+2. Set `HISTORY_IMPORT_SECRET` on the Railway service and redeploy
+3. From this machine:
+
+```bash
+node scripts/import-history.mjs --url https://YOUR-APP.up.railway.app --secret YOUR_SECRET
+```
+
+Use `--mode merge` to keep any production-only rows. Default is `replace`.
+Remove `HISTORY_IMPORT_SECRET` from Railway when finished.
 
 Deploy options:
 

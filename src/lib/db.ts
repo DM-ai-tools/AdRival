@@ -53,6 +53,83 @@ function writeDb(db: DatabaseShape) {
   fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), "utf8");
 }
 
+function normalizeDb(input: Partial<DatabaseShape> | null | undefined): DatabaseShape {
+  const db = emptyDb();
+  if (!input || typeof input !== "object") return db;
+  if (Array.isArray(input.jobs)) db.jobs = input.jobs;
+  if (Array.isArray(input.competitors)) db.competitors = input.competitors;
+  if (Array.isArray(input.seenPageIds)) db.seenPageIds = input.seenPageIds;
+  if (Array.isArray(input.lookupJobs)) db.lookupJobs = input.lookupJobs;
+  if (Array.isArray(input.lookupAds)) db.lookupAds = input.lookupAds;
+  return db;
+}
+
+export function getStoreStats(db: DatabaseShape = ensureDb()) {
+  return {
+    jobs: db.jobs.length,
+    competitors: db.competitors.length,
+    lookupJobs: db.lookupJobs?.length ?? 0,
+    lookupAds: db.lookupAds?.length ?? 0,
+    seenPageIds: db.seenPageIds.length,
+  };
+}
+
+/** Replace the entire JSON store (used for local → production history import). */
+export function replaceStore(payload: Partial<DatabaseShape>): {
+  before: ReturnType<typeof getStoreStats>;
+  after: ReturnType<typeof getStoreStats>;
+} {
+  const before = getStoreStats();
+  const next = normalizeDb(payload);
+  writeDb(next);
+  return { before, after: getStoreStats(next) };
+}
+
+/**
+ * Merge local history into the existing store by id (keeps production-only rows).
+ * Incoming records win on id conflicts.
+ */
+export function mergeStore(payload: Partial<DatabaseShape>): {
+  before: ReturnType<typeof getStoreStats>;
+  after: ReturnType<typeof getStoreStats>;
+} {
+  const before = getStoreStats();
+  const current = ensureDb();
+  const incoming = normalizeDb(payload);
+
+  const byId = <T extends { id: string }>(existing: T[], next: T[]) => {
+    const map = new Map<string, T>();
+    for (const row of existing) map.set(row.id, row);
+    for (const row of next) map.set(row.id, row);
+    return Array.from(map.values());
+  };
+
+  const merged: DatabaseShape = {
+    jobs: byId(current.jobs, incoming.jobs),
+    competitors: byId(current.competitors, incoming.competitors),
+    seenPageIds: Array.from(
+      new Set([...(current.seenPageIds || []), ...(incoming.seenPageIds || [])]),
+    ),
+    lookupJobs: byId(current.lookupJobs ?? [], incoming.lookupJobs ?? []),
+    lookupAds: byId(current.lookupAds ?? [], incoming.lookupAds ?? []),
+  };
+
+  // Newest-first ordering for history UIs
+  merged.jobs.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+  merged.competitors.sort((a, b) =>
+    (b.createdAt || "").localeCompare(a.createdAt || ""),
+  );
+  merged.lookupJobs!.sort((a, b) =>
+    (b.createdAt || "").localeCompare(a.createdAt || ""),
+  );
+  merged.lookupAds!.sort((a, b) =>
+    (b.createdAt || "").localeCompare(a.createdAt || ""),
+  );
+
+  writeDb(merged);
+  return { before, after: getStoreStats(merged) };
+}
+
 export function getSeenPageIds(): Set<string> {
   return new Set(ensureDb().seenPageIds);
 }
