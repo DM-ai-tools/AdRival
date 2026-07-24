@@ -37,10 +37,14 @@ COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 # Standalone Next.js server output
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+COPY --chown=nextjs:nodejs scripts/start.sh ./start.sh
+# Normalize CRLF from Windows checkouts so Alpine can exec the script
+RUN sed -i 's/\r$//' ./start.sh && chmod +x ./start.sh
 
 USER nextjs
 
 EXPOSE 3000
 
-# Railway injects PORT; Next standalone server.js respects PORT + HOSTNAME
-CMD ["node", "server.js"]
+# Railway injects PORT. Force HOSTNAME=0.0.0.0 so Next does not bind to the
+# container hostname (which breaks Railway health checks).
+CMD ["./start.sh"]
