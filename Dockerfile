@@ -25,7 +25,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 
-RUN apk add --no-cache libc6-compat \
+RUN apk add --no-cache libc6-compat su-exec \
   && addgroup --system --gid 1001 nodejs \
   && adduser --system --uid 1001 nextjs \
   && mkdir -p /app/data /app/public \
@@ -41,8 +41,8 @@ COPY --chown=nextjs:nodejs scripts/start.sh ./start.sh
 # Normalize CRLF from Windows checkouts so Alpine can exec the script
 RUN sed -i 's/\r$//' ./start.sh && chmod +x ./start.sh
 
-USER nextjs
-
+# Run entrypoint as root so it can chown the Railway volume at /app/data,
+# then drop privileges to nextjs via su-exec in start.sh.
 EXPOSE 3000
 
 # Railway injects PORT. Force HOSTNAME=0.0.0.0 so Next does not bind to the

@@ -21,11 +21,19 @@ export async function GET() {
       { status: 503 },
     );
   }
-  return NextResponse.json({
-    ok: true,
-    stats: getStoreStats(),
-    modes: ["replace", "merge"],
-  });
+  try {
+    return NextResponse.json({
+      ok: true,
+      stats: getStoreStats(),
+      modes: ["replace", "merge"],
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return NextResponse.json(
+      { error: "Failed to read store", detail: message },
+      { status: 500 },
+    );
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -50,10 +58,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid store payload" }, { status: 400 });
   }
 
-  const result = mode === "merge" ? mergeStore(payload) : replaceStore(payload);
-  return NextResponse.json({
-    ok: true,
-    mode,
-    ...result,
-  });
+  try {
+    const result = mode === "merge" ? mergeStore(payload) : replaceStore(payload);
+    return NextResponse.json({
+      ok: true,
+      mode,
+      ...result,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return NextResponse.json(
+      { error: "Failed to write store", detail: message },
+      { status: 500 },
+    );
+  }
 }
