@@ -1,5 +1,5 @@
 export const SEARCH_COUNTRIES = ["US", "AU"] as const;
-export type SearchCountry = (typeof SEARCH_COUNTRIES)[number];
+export type SearchCountry = (typeof SEARCH_COUNTRIES)[number] | string;
 
 export const TARGET_COMPETITORS = 10;
 /** Facebook: prefer ads live at least this many days (relaxed further if under target). */
@@ -32,7 +32,55 @@ export const SERVICE_LABELS = [
   "SMM",
 ] as const;
 
-export type ServiceLabel = (typeof SERVICE_LABELS)[number];
+/** Free-form service / category tags (legacy marketing labels still supported). */
+export type ServiceLabel = (typeof SERVICE_LABELS)[number] | string;
+
+/** Industry profile produced by OpenRouter / Perplexity from a business URL. */
+export interface BusinessProfile {
+  url: string;
+  businessName: string;
+  industry: string;
+  subIndustry?: string | null;
+  description: string;
+  offerings: string[];
+  targetAudience?: string | null;
+  competitorKeywords: string[];
+  positioningSummary: string;
+  /** Brand palette extracted from the site HTML/CSS */
+  brandColors?: BrandColors | null;
+  /**
+   * Snapshot of logo/links/socials pulled from the business site.
+   * Stored so recreation still works if a later live fetch is blocked (403).
+   */
+  brandAssets?: {
+    finalUrl: string;
+    siteName: string | null;
+    logoUrl: string | null;
+    faviconUrl: string | null;
+    ogImageUrl: string | null;
+    navLinks: Array<{ label: string; href: string }>;
+    footerLinks: Array<{ label: string; href: string }>;
+    socialLinks: Array<{ label: string; href: string }>;
+    images: Array<{
+      src: string;
+      alt?: string;
+      kind: "logo" | "hero" | "content" | "icon" | "og";
+    }>;
+    emails: string[];
+    phones: string[];
+  } | null;
+  analyzedAt?: string;
+}
+
+export interface BrandColors {
+  primary: string;
+  secondary: string;
+  accent: string;
+  background: string;
+  text: string;
+  muted?: string;
+  source?: string;
+}
 
 export interface AdCandidate {
   adArchiveId: string;
@@ -107,6 +155,10 @@ export interface CompetitorRecord {
     advertiserPageUrl?: string | null;
   };
   brand: BrandReview;
+  /** Landing-page offer + architecture analysis (persisted for history) */
+  pageAnalysis?: LandingPageOfferAnalysis | null;
+  /** Recreated landing page HTML for the user's brand (separate viewer page) */
+  recreatedPage?: RecreatedLandingPage | null;
   createdAt: string;
 }
 
@@ -140,6 +192,14 @@ export interface SearchJob {
   /** Multi-keyword input (keyword remains a display join for older rows) */
   keywords?: string[];
   platform?: import("./platforms").AdPlatform | string;
+  /** Geography / country code chosen for this run (e.g. US, AU, all) */
+  geo?: string | null;
+  /** Countries actually queried (Meta / LinkedIn) */
+  countries?: string[];
+  /** Business website URL entered for this search (always saved for history) */
+  businessUrl?: string | null;
+  /** Industry context from business URL analysis */
+  businessProfile?: BusinessProfile | null;
   status: JobStatus;
   progress: JobProgress;
   competitorIds: string[];
@@ -218,7 +278,61 @@ export interface LookupAdRecord {
   advertiserPageUrl?: string | null;
   /** Full SociaVault ad object as returned */
   raw: Record<string, unknown>;
+  /** Landing-page offer + architecture analysis (persisted for history) */
+  pageAnalysis?: LandingPageOfferAnalysis | null;
   createdAt: string;
+}
+
+export interface LandingPageSection {
+  name: string;
+  purpose: string;
+  summary: string;
+  keyElements?: string[];
+}
+
+export interface LandingPageOfferAnalysis {
+  status: "pending" | "completed" | "failed";
+  analyzedUrl: string;
+  analyzedAt: string;
+  offer?: {
+    headline?: string | null;
+    primaryOffer: string;
+    pricing?: string | null;
+    cta?: string | null;
+    guarantees?: string[];
+    urgency?: string | null;
+    uniqueValueProps?: string[];
+  } | null;
+  pageArchitecture?: {
+    pageType?: string | null;
+    sections: LandingPageSection[];
+  } | null;
+  audience?: string | null;
+  trustSignals?: string[];
+  conversionElements?: string[];
+  techNotes?: string[];
+  summary?: string | null;
+  error?: string | null;
+}
+
+/** Generated HTML landing page for the user's brand, inspired by a competitor. */
+export interface RecreatedLandingPage {
+  status: "pending" | "completed" | "failed";
+  createdAt: string;
+  updatedAt: string;
+  businessUrl: string;
+  businessName?: string | null;
+  keyword: string;
+  sourceCompetitorName: string;
+  sourceAnalyzedUrl: string;
+  brandColors: BrandColors;
+  /** Full self-contained HTML document */
+  html?: string | null;
+  /** Short notes on how content was differentiated */
+  differentiationNotes?: string | null;
+  /** Last user feedback applied during regenerate (if any) */
+  userFeedback?: string | null;
+  error?: string | null;
 }
 
 export type LookupHistorySummary = LookupJob & {

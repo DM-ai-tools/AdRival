@@ -12,6 +12,11 @@ export async function dispatchPlatformSearch(
   jobId: string,
   keywordInput: string | string[],
   platform: AdPlatform,
+  options?: {
+    geo?: string;
+    businessProfile?: import("../types").BusinessProfile | null;
+    businessUrl?: string | null;
+  },
 ) {
   const keywords = parseKeywords(keywordInput);
   if (keywords.length === 0) {
@@ -19,7 +24,7 @@ export async function dispatchPlatformSearch(
   }
 
   if (isMetaPlatform(platform)) {
-    await runCompetitorSearch(jobId, keywords, platform);
+    await runCompetitorSearch(jobId, keywords, platform, options);
     return;
   }
   if (isGoogleFamily(platform)) {
@@ -27,11 +32,12 @@ export async function dispatchPlatformSearch(
       jobId,
       keywords,
       platform as "google" | "youtube",
+      options,
     );
     return;
   }
   if (platform === "linkedin") {
-    await runLinkedInSearch(jobId, keywords);
+    await runLinkedInSearch(jobId, keywords, options);
     return;
   }
   throw new Error(`Unsupported platform: ${platform}`);
@@ -41,9 +47,10 @@ export async function dispatchPlatformLookup(
   lookupId: string,
   queryName: string,
   platform: AdPlatform,
+  forcedCandidate?: import("../types").LookupPageCandidate | null,
 ) {
   if (isMetaPlatform(platform)) {
-    await runCompetitorLookup(lookupId, queryName, platform);
+    await runCompetitorLookup(lookupId, queryName, platform, forcedCandidate);
     return;
   }
   if (isGoogleFamily(platform)) {
@@ -51,11 +58,12 @@ export async function dispatchPlatformLookup(
       lookupId,
       queryName,
       platform as "google" | "youtube",
+      forcedCandidate,
     );
     return;
   }
   if (platform === "linkedin") {
-    await runLinkedInLookup(lookupId, queryName);
+    await runLinkedInLookup(lookupId, queryName, forcedCandidate);
     return;
   }
   throw new Error(`Unsupported platform: ${platform}`);

@@ -5,6 +5,7 @@ import {
   RELEVANCE_THRESHOLD,
   SERVICE_LABELS,
   type AdCandidate,
+  type BusinessProfile,
   type ServiceLabel,
 } from "../types";
 
@@ -44,7 +45,37 @@ const queryExpansionSchema = z.object({
 
 export async function expandKeywordQueries(
   keyword: string,
+  businessProfile?: BusinessProfile | null,
 ): Promise<string[]> {
+  if (businessProfile) {
+    const raw = await jsonCompletion<{ queries: string[] }>(
+      `You expand Ad Library / ads-transparency search queries to find DIRECT competitors
+for a business in a specific industry (NOT marketing agencies unless the business itself is an agency).
+
+Industry context:
+- Business: ${businessProfile.businessName}
+- Industry: ${businessProfile.industry}${businessProfile.subIndustry ? ` / ${businessProfile.subIndustry}` : ""}
+- Offerings: ${(businessProfile.offerings || []).join(", ") || "n/a"}
+- Positioning: ${businessProfile.positioningSummary}
+
+Return queries that surface rivals in the SAME industry advertising similar products/services.`,
+      `Seed keyword: "${keyword}"
+Also consider these suggested competitor keywords: ${businessProfile.competitorKeywords.join(", ")}
+Return 6-10 high-yield search queries.`,
+      `{ "queries": string[] }`,
+    );
+    const parsed = queryExpansionSchema.safeParse(raw);
+    const queries = parsed.success ? parsed.data.queries : [keyword];
+    const seeded = [
+      keyword,
+      ...businessProfile.competitorKeywords,
+      ...queries,
+    ];
+    return Array.from(
+      new Set(seeded.map((q) => q.trim()).filter(Boolean)),
+    ).slice(0, 14);
+  }
+
   const raw = await jsonCompletion<{ queries: string[] }>(
     `You help find Facebook Ads Library search queries for MARKETING AGENCIES only
 (companies whose business is selling marketing services to other businesses).
@@ -123,7 +154,10 @@ const SERVICE_ALIASES: Record<string, ServiceLabel> = {
   "instagram ads": "SMM",
 };
 
-function normalizeServices(raw: string[] | string): ServiceLabel[] {
+function normalizeServices(
+  raw: string[] | string,
+  allowFreeform = false,
+): ServiceLabel[] {
   const list = Array.isArray(raw)
     ? raw
     : String(raw || "")
@@ -133,12 +167,17 @@ function normalizeServices(raw: string[] | string): ServiceLabel[] {
   const out = new Set<ServiceLabel>();
   for (const s of list) {
     const trimmed = s.trim();
+    if (!trimmed) continue;
     if ((SERVICE_LABELS as readonly string[]).includes(trimmed)) {
       out.add(trimmed as ServiceLabel);
       continue;
     }
     const mapped = SERVICE_ALIASES[trimmed.toLowerCase()];
-    if (mapped) out.add(mapped);
+    if (mapped) {
+      out.add(mapped);
+      continue;
+    }
+    if (allowFreeform) out.add(trimmed);
   }
   return Array.from(out);
 }
@@ -151,8 +190,30 @@ function normalizeScore(score: number): number {
   return Math.max(0, Math.min(1, score));
 }
 
-/** Cheap gate so we don't spend LLM credits on unrelated creatives. */
-export function hasServiceKeywordSignal(text: string): boolean {
+/**
+ * Cheap gate so we don't spend LLM credits on unrelated creatives.
+ * With a business profile, match industry / offering tokens instead of agency jargon.
+ */
+export function hasServiceKeywordSignal(
+  text: string,
+  businessProfile?: BusinessProfile | null,
+): boolean {
+  if (businessProfile) {
+    const tokens = [
+      businessProfile.industry,
+      businessProfile.subIndustry || "",
+      ...(businessProfile.offerings || []),
+      ...(businessProfile.competitorKeywords || []),
+    ]
+      .join(" ")
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((t) => t.length >= 4);
+    const blob = text.toLowerCase();
+    if (tokens.some((t) => blob.includes(t))) return true;
+    // Soft pass for longer creatives — LLM does the real filter
+    return blob.length >= 60;
+  }
   return /google\s*ads|adwords|\bppc\b|paid search|paid media|media buying|seo\b|search engine|aeo|geo\b|answer engine|generative engine|\bsmm\b|social media marketing|social media management|meta ads|facebook ads|instagram ads|gmb|google business|google maps|digital marketing|marketing agency|advertising agency|lead gen|lead generation|performance marketing|growth agency|ads agency|ads audit|free audit/i.test(
     text,
   );
@@ -171,17 +232,19 @@ export function hasAgencyPositioningSignal(text: string): boolean {
 /**
  * Analyze one advertiser using the FULL creative text from one or more ads.
  * Must read primary body / cards — never decide from headline + CTA alone.
+ * When businessProfile is set, qualify industry peers (any vertical) instead of agencies-only.
  */
 export async function analyzeAdCandidate(
   keyword: string,
   ad: AdCandidate,
   pageCategory?: string | null,
   extraAds: AdCandidate[] = [],
-  options?: { relaxed?: boolean },
+  options?: { relaxed?: boolean; businessProfile?: BusinessProfile | null },
 ): Promise<AdFilterResult> {
   const scoreFloor = options?.relaxed
     ? RELAXED_RELEVANCE_THRESHOLD
     : RELEVANCE_THRESHOLD;
+  const profile = options?.businessProfile;
   const creatives = [ad, ...extraAds].map((a, i) => ({
     index: i + 1,
     daysRunning: a.daysRunning,
@@ -200,15 +263,34 @@ export async function analyzeAdCandidate(
     0,
   );
 
-  const raw = await jsonCompletion<{
-    relevant: boolean;
-    relevanceScore: number;
-    isMarketingAgency: boolean;
-    services: string[] | string;
-    bodyEvidence?: string;
-    reason: string;
-  }>(
-    `You qualify Facebook Ad Library advertisers for a MARKETING-AGENCY competitor finder.
+  const industrySystem = profile
+    ? `You qualify Ad Library advertisers as DIRECT COMPETITORS for a specific business.
+
+SEED BUSINESS:
+- Name: ${profile.businessName}
+- URL: ${profile.url}
+- Industry: ${profile.industry}${profile.subIndustry ? ` / ${profile.subIndustry}` : ""}
+- Offerings: ${(profile.offerings || []).join(", ") || "n/a"}
+- Audience: ${profile.targetAudience || "n/a"}
+- Positioning: ${profile.positioningSummary}
+
+GOAL: Keep advertisers in the SAME industry who compete for the same customers / category.
+Reject unrelated industries and pure marketing agencies (unless the seed business itself is an agency).
+
+CRITICAL READING RULES:
+- Read fullCreativeText / primaryBody before deciding.
+- Do NOT decide from headline + CTA alone.
+- Quote bodyEvidence that proves industry overlap.
+
+Qualification for relevant=true:
+1) Keyword / category relevance to "${keyword}" and the seed industry (score 0–1).
+2) Same or adjacent industry as the seed business (isMarketingAgency may be false for normal brands — that is OK).
+3) services: short tags for what they sell (free-form OK), e.g. ["Dental implants","Invisalign"].
+
+OUTPUT:
+- isMarketingAgency=true only if they are primarily a marketing agency.
+- relevant=true when they are a credible industry competitor (agency flag is informational, not required).`
+    : `You qualify Facebook Ad Library advertisers for a MARKETING-AGENCY competitor finder.
 
 GOAL: Keep ONLY true marketing agencies / marketing consultancies. Reject ordinary businesses that merely run ads to promote themselves.
 
@@ -220,13 +302,7 @@ CRITICAL READING RULES:
 
 Qualification (ALL required for relevant=true):
 1) Keyword relevance: their agency offer relates to the user keyword (semantic OK). Score 0–1 only.
-2) MUST be a marketing agency (strict B2B positioning):
-   INCLUDE: digital marketing agencies, PPC/SEO/SMM/performance agencies, growth agencies, media-buying firms, freelance performance marketers / consultancies clearly selling managed marketing services, audits, or retainers to other companies.
-   EXCLUDE (set isMarketingAgency=false):
-   - Any restaurant, clinic, ecommerce brand, SaaS product, course/bootcamp, realtor, coach, or local business advertising its OWN product/service
-   - Businesses that mention "Google Ads" / "SEO" only as something they use for themselves, not as a service they sell
-   - Lead-gen pages for non-agency products
-   - Influencers / personal brands not selling agency services
+2) MUST be a marketing agency (strict B2B positioning).
 3) Service focus: body copy promotes selling at least one of: Google Ads, SEO, AEO/GEO, SMM (as a client service).
    Map into these labels only: ${SERVICE_LABELS.join(", ")}.
 
@@ -234,7 +310,17 @@ OUTPUT:
 - services MUST be a JSON array, e.g. ["Google Ads","SEO"].
 - relevanceScore between 0 and 1.
 - isMarketingAgency=true ONLY when the advertiser's business is providing marketing services to other businesses.
-- relevant=true ONLY when all three pass AND isMarketingAgency=true.`,
+- relevant=true ONLY when all three pass AND isMarketingAgency=true.`;
+
+  const raw = await jsonCompletion<{
+    relevant: boolean;
+    relevanceScore: number;
+    isMarketingAgency: boolean;
+    services: string[] | string;
+    bodyEvidence?: string;
+    reason: string;
+  }>(
+    industrySystem,
     JSON.stringify(
       {
         keyword,
@@ -254,6 +340,7 @@ OUTPUT:
     parsed.success
       ? parsed.data.services
       : ((raw as { services?: string[] | string }).services ?? []),
+    Boolean(profile),
   );
   const score = normalizeScore(
     parsed.success
@@ -286,15 +373,22 @@ OUTPUT:
     .join("\n");
   const agencySignal = hasAgencyPositioningSignal(creativeBlob);
 
-  // Strict: LLM must mark marketing agency; soft text signal can support but never override a false.
-  const relevant =
-    relevantFlag &&
-    isAgency &&
-    services.length > 0 &&
-    score >= scoreFloor &&
-    hasBody &&
-    // If LLM says agency but copy has zero agency positioning, be conservative
-    (agencySignal || score >= Math.max(scoreFloor, 0.55));
+  let relevant: boolean;
+  if (profile) {
+    relevant =
+      relevantFlag &&
+      services.length > 0 &&
+      score >= scoreFloor &&
+      hasBody;
+  } else {
+    relevant =
+      relevantFlag &&
+      isAgency &&
+      services.length > 0 &&
+      score >= scoreFloor &&
+      hasBody &&
+      (agencySignal || score >= Math.max(scoreFloor, 0.55));
+  }
 
   return {
     relevant,
@@ -302,13 +396,17 @@ OUTPUT:
     isMarketingAgency: isAgency,
     services,
     bodyEvidence,
-    reason: !isAgency
-      ? `${reason} (rejected: not a marketing agency)`
-      : !hasBody
+    reason: profile
+      ? !hasBody
         ? `${reason} (rejected: insufficient creative text)`
-        : !agencySignal && score < 0.55
-          ? `${reason} (rejected: weak agency positioning in ad copy)`
-          : reason,
+        : reason
+      : !isAgency
+        ? `${reason} (rejected: not a marketing agency)`
+        : !hasBody
+          ? `${reason} (rejected: insufficient creative text)`
+          : !agencySignal && score < 0.55
+            ? `${reason} (rejected: weak agency positioning in ad copy)`
+            : reason,
   };
 }
 

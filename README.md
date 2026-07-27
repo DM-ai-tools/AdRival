@@ -29,7 +29,9 @@ Required environment variables (set in the Railway service):
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `SOCIAVAULT_API_KEY` | Yes | SociaVault API key |
-| `OPENAI_API_KEY` | Yes | OpenAI API key |
+| `OPENAI_API_KEY` | Yes | OpenAI API key (ad scoring / query expansion) |
+| `OPENROUTER_API_KEY` | Yes* | OpenRouter key for Perplexity Sonar business URL analysis (`*` required for URL analyze) |
+| `OPENROUTER_MODEL` | No | Defaults to `perplexity/sonar` |
 | `PORT` | Auto | Injected by Railway (app binds `0.0.0.0:$PORT`) |
 | `HISTORY_IMPORT_SECRET` | No | Bearer secret for `/api/admin/import-history` (remove after importing) |
 

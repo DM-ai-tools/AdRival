@@ -1,12 +1,20 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
-import type { LookupAdRecord, LookupJob } from "@/lib/types";
+import type {
+  LookupAdRecord,
+  LookupJob,
+  LookupPageCandidate,
+} from "@/lib/types";
 import { formatDaysLive, type AdPlatform } from "@/lib/platforms";
+import { PageAnalysisPanel } from "@/components/PageAnalysisPanel";
 
 interface LookupResultsProps {
   job: LookupJob;
   ads: LookupAdRecord[];
+  onFetchCandidate?: (candidate: LookupPageCandidate) => void;
+  fetchingCandidateId?: string | null;
+  onAdUpdated?: (ad: LookupAdRecord) => void;
 }
 
 function fmt(n?: number | null) {
@@ -24,12 +32,59 @@ function Field({ label, value }: { label: string; value?: ReactNode }) {
   );
 }
 
-function AdCard({ ad, platform }: { ad: LookupAdRecord; platform: AdPlatform }) {
+function hasAnalyzableUrl(ad: LookupAdRecord): boolean {
+  const urls = [ad.landingPageUrl, ad.youtubeUrl, ad.advertiserPageUrl];
+  return urls.some((u) => {
+    if (!u) return false;
+    try {
+      const parsed = new URL(u.startsWith("http") ? u : `https://${u}`);
+      const hostPath = parsed.hostname + parsed.pathname;
+      return !/facebook\.com\/ads\/library|adstransparency\.google|linkedin\.com\/ad-library/i.test(
+        hostPath,
+      );
+    } catch {
+      return false;
+    }
+  });
+}
+
+function AdCard({
+  ad,
+  platform,
+  onAdUpdated,
+}: {
+  ad: LookupAdRecord;
+  platform: AdPlatform;
+  onAdUpdated?: (ad: LookupAdRecord) => void;
+}) {
   const [openRaw, setOpenRaw] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const snap = (ad.raw.snapshot ?? ad.raw) as Record<string, unknown>;
   const isMeta = platform === "facebook" || platform === "instagram";
   const isLinkedIn = platform === "linkedin";
   const isGoogle = platform === "google" || platform === "youtube";
+  const canAnalyze = hasAnalyzableUrl(ad);
+  const analysis = ad.pageAnalysis;
+
+  async function runAnalysis(force = false) {
+    setError(null);
+    setAnalyzing(true);
+    try {
+      const res = await fetch("/api/lookup/analyze-page", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ adId: ad.id, force }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Analysis failed");
+      if (data.ad) onAdUpdated?.(data.ad as LookupAdRecord);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setAnalyzing(false);
+    }
+  }
 
   return (
     <article className="lookup-ad-card">
@@ -152,13 +207,41 @@ function AdCard({ ad, platform }: { ad: LookupAdRecord; platform: AdPlatform }) 
         )}
       </dl>
 
-      <button
-        type="button"
-        className="ghost-btn raw-toggle"
-        onClick={() => setOpenRaw((v) => !v)}
-      >
-        {openRaw ? "Hide raw JSON" : "Show full SociaVault JSON"}
-      </button>
+      <div className="lookup-ad-actions">
+        <button
+          type="button"
+          className="search-btn lookup-analyze-btn"
+          disabled={!canAnalyze || analyzing}
+          title={
+            canAnalyze
+              ? "Fetch landing page and extract offer + page architecture"
+              : "No landing page URL on this ad"
+          }
+          onClick={() => void runAnalysis(Boolean(analysis?.status === "completed"))}
+        >
+          {analyzing
+            ? "Analyzing page…"
+            : analysis?.status === "completed"
+              ? "Refresh offer & page details"
+              : "Get offer & page details"}
+        </button>
+        <button
+          type="button"
+          className="ghost-btn raw-toggle"
+          onClick={() => setOpenRaw((v) => !v)}
+        >
+          {openRaw ? "Hide raw JSON" : "Show full SociaVault JSON"}
+        </button>
+      </div>
+
+      {error && (
+        <p className="error-text" role="alert">
+          {error}
+        </p>
+      )}
+
+      {analysis && <PageAnalysisPanel analysis={analysis} />}
+
       {openRaw && (
         <pre className="lookup-raw-json">{JSON.stringify(ad.raw, null, 2)}</pre>
       )}
@@ -166,10 +249,31 @@ function AdCard({ ad, platform }: { ad: LookupAdRecord; platform: AdPlatform }) 
   );
 }
 
-export function LookupResults({ job, ads }: LookupResultsProps) {
+export function LookupResults({
+  job,
+  ads,
+  onFetchCandidate,
+  fetchingCandidateId,
+  onAdUpdated,
+}: LookupResultsProps) {
   const page = job.selectedPage;
   const running = job.status === "running";
   const platform = (job.platform || "facebook") as AdPlatform;
+  const isLinkedIn = platform === "linkedin";
+  const liFollowers =
+    page?.raw?.linkedinFollowers != null
+      ? Number(page.raw.linkedinFollowers)
+      : null;
+  const liEmployees =
+    page?.raw?.linkedinEmployees != null
+      ? Number(page.raw.linkedinEmployees)
+      : null;
+  const ytSubs =
+    page?.raw?.youtubeSubscribers != null
+      ? Number(page.raw.youtubeSubscribers)
+      : null;
+
+  const others = job.candidates.filter((c) => c.pageId !== page?.pageId);
 
   return (
     <div className="lookup-results">
@@ -225,9 +329,22 @@ export function LookupResults({ job, ads }: LookupResultsProps) {
             </div>
           </div>
           <dl className="lookup-fields">
-            <Field label="Likes" value={fmt(page.likes)} />
-            <Field label="Instagram" value={page.igUsername} />
-            <Field label="IG followers" value={fmt(page.igFollowers)} />
+            <Field
+              label={isLinkedIn ? "LI followers" : "Likes"}
+              value={fmt(isLinkedIn ? liFollowers ?? page.likes : page.likes)}
+            />
+            {!isLinkedIn && (
+              <Field label="Instagram" value={page.igUsername} />
+            )}
+            {!isLinkedIn && (
+              <Field label="IG followers" value={fmt(page.igFollowers)} />
+            )}
+            {isLinkedIn && (
+              <Field label="LI employees" value={fmt(liEmployees)} />
+            )}
+            {ytSubs != null && (
+              <Field label="YT subscribers" value={fmt(ytSubs)} />
+            )}
             <Field label="Alias" value={page.pageAlias} />
             <Field
               label="LLM confidence"
@@ -240,23 +357,40 @@ export function LookupResults({ job, ads }: LookupResultsProps) {
             <Field label="Why this page" value={job.llmReason} />
           </dl>
 
-          {job.candidates.length > 1 && (
+          {others.length > 0 && (
             <div className="lookup-candidates">
               <h3>Other name matches considered</h3>
-              <ul>
-                {job.candidates
-                  .filter((c) => c.pageId !== page.pageId)
-                  .map((c) => (
-                    <li key={c.pageId}>
-                      <strong>{c.name}</strong>
-                      <span className="muted">
-                        {" "}
-                        · {c.pageId}
-                        {c.category ? ` · ${c.category}` : ""}
-                        {c.likes != null ? ` · ${fmt(c.likes)} likes` : ""}
-                      </span>
+              <ul className="lookup-candidate-list">
+                {others.map((c) => {
+                  const busy =
+                    fetchingCandidateId === c.pageId ||
+                    (running && fetchingCandidateId != null);
+                  return (
+                    <li key={c.pageId} className="lookup-candidate-row">
+                      <div className="lookup-candidate-meta">
+                        <strong>{c.name}</strong>
+                        <span className="muted">
+                          {" "}
+                          · {c.pageId}
+                          {c.category ? ` · ${c.category}` : ""}
+                          {c.likes != null ? ` · ${fmt(c.likes)} likes` : ""}
+                        </span>
+                      </div>
+                      {onFetchCandidate && (
+                        <button
+                          type="button"
+                          className="ghost-btn lookup-fetch-btn"
+                          disabled={busy || running}
+                          onClick={() => onFetchCandidate(c)}
+                        >
+                          {fetchingCandidateId === c.pageId
+                            ? "Starting…"
+                            : "Fetch ads"}
+                        </button>
+                      )}
                     </li>
-                  ))}
+                  );
+                })}
               </ul>
             </div>
           )}
@@ -294,7 +428,12 @@ export function LookupResults({ job, ads }: LookupResultsProps) {
         ) : (
           <div className="lookup-ad-list">
             {ads.map((ad) => (
-              <AdCard key={ad.id} ad={ad} platform={platform} />
+              <AdCard
+                key={ad.id}
+                ad={ad}
+                platform={platform}
+                onAdUpdated={onAdUpdated}
+              />
             ))}
           </div>
         )}

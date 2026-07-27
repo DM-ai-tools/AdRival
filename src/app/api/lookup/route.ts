@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { v4 as uuidv4 } from "uuid";
 import { dispatchPlatformLookup } from "@/lib/pipeline/dispatch";
 import { AD_PLATFORMS, type AdPlatform } from "@/lib/platforms";
+import type { LookupPageCandidate } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -25,6 +26,21 @@ export async function POST(request: Request) {
         : "facebook"
     ) as AdPlatform;
 
+    const forcedCandidate =
+      body.forcedCandidate && typeof body.forcedCandidate === "object"
+        ? (body.forcedCandidate as LookupPageCandidate)
+        : null;
+
+    if (
+      forcedCandidate &&
+      (!forcedCandidate.pageId || !forcedCandidate.name)
+    ) {
+      return NextResponse.json(
+        { error: "forcedCandidate requires pageId and name" },
+        { status: 400 },
+      );
+    }
+
     if (!process.env.SOCIAVAULT_API_KEY) {
       return NextResponse.json(
         { error: "SOCIAVAULT_API_KEY is not configured" },
@@ -39,12 +55,23 @@ export async function POST(request: Request) {
     }
 
     const lookupId = uuidv4();
+    const queryName = forcedCandidate?.name || name;
 
     after(() => {
-      void dispatchPlatformLookup(lookupId, name, platform);
+      void dispatchPlatformLookup(
+        lookupId,
+        queryName,
+        platform,
+        forcedCandidate,
+      );
     });
 
-    return NextResponse.json({ lookupId, queryName: name, platform });
+    return NextResponse.json({
+      lookupId,
+      queryName,
+      platform,
+      forced: Boolean(forcedCandidate),
+    });
   } catch (err) {
     return NextResponse.json(
       { error: (err as Error).message },

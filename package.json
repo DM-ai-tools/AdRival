@@ -10,12 +10,19 @@
     "build": "next build",
     "start": "next start --hostname 0.0.0.0 --port ${PORT:-3000}",
     "start:standalone": "HOSTNAME=0.0.0.0 node server.js",
-    "lint": "next lint"
+    "lint": "next lint",
+    "postinstall": "playwright install chromium",
+    "playwright:install": "playwright install chromium"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
+    "cheerio": "^1.0.0",
     "exceljs": "^4.4.0",
     "next": "^15.3.0",
     "openai": "^4.96.0",
+    "pixelmatch": "^7.2.0",
+    "playwright": "^1.62.0",
+    "pngjs": "^7.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "uuid": "^11.1.0",
@@ -25,6 +32,7 @@
     "@eslint/eslintrc": "^3",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/pngjs": "^6.0.5",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/uuid": "^10.0.0",

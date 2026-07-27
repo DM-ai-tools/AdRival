@@ -200,6 +200,18 @@ export function getCompetitor(id: string): CompetitorRecord | null {
   return ensureDb().competitors.find((c) => c.id === id) ?? null;
 }
 
+export function updateCompetitor(
+  id: string,
+  patch: Partial<CompetitorRecord>,
+): CompetitorRecord | null {
+  const db = ensureDb();
+  const idx = db.competitors.findIndex((c) => c.id === id);
+  if (idx < 0) return null;
+  db.competitors[idx] = { ...db.competitors[idx], ...patch };
+  writeDb(db);
+  return db.competitors[idx];
+}
+
 export function listAllCompetitors(limit = 100): CompetitorRecord[] {
   return ensureDb().competitors.slice(0, limit);
 }
@@ -287,13 +299,37 @@ export function saveLookupAd(ad: LookupAdRecord) {
   const db = ensureDb();
   if (!db.lookupAds) db.lookupAds = [];
   if (!db.lookupJobs) db.lookupJobs = [];
-  db.lookupAds.unshift(ad);
+  const existing = db.lookupAds.findIndex((a) => a.id === ad.id);
+  if (existing >= 0) {
+    db.lookupAds[existing] = ad;
+  } else {
+    db.lookupAds.unshift(ad);
+  }
   const job = db.lookupJobs.find((j) => j.id === ad.lookupId);
   if (job && !job.adIds.includes(ad.id)) {
     job.adIds.push(ad.id);
     job.updatedAt = new Date().toISOString();
   }
   writeDb(db);
+}
+
+export function getLookupAd(adId: string): LookupAdRecord | null {
+  return (ensureDb().lookupAds ?? []).find((a) => a.id === adId) ?? null;
+}
+
+export function updateLookupAd(
+  adId: string,
+  patch: Partial<LookupAdRecord>,
+): LookupAdRecord | null {
+  const db = ensureDb();
+  if (!db.lookupAds) db.lookupAds = [];
+  const idx = db.lookupAds.findIndex((a) => a.id === adId);
+  if (idx < 0) return null;
+  db.lookupAds[idx] = { ...db.lookupAds[idx], ...patch };
+  const job = db.lookupJobs?.find((j) => j.id === db.lookupAds![idx].lookupId);
+  if (job) job.updatedAt = new Date().toISOString();
+  writeDb(db);
+  return db.lookupAds[idx];
 }
 
 export function getLookupAds(lookupId: string): LookupAdRecord[] {

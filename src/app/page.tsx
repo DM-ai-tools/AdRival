@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { SearchForm } from "@/components/SearchForm";
 import { ProgressPanel } from "@/components/ProgressPanel";
 import { CompetitorTable } from "@/components/CompetitorTable";
@@ -16,6 +16,7 @@ import type {
   CompetitorRecord,
   LookupAdRecord,
   LookupJob,
+  LookupPageCandidate,
   SearchJob,
 } from "@/lib/types";
 
@@ -57,6 +58,20 @@ export default function HomePage() {
     [],
   );
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [fetchingCandidateId, setFetchingCandidateId] = useState<string | null>(
+    null,
+  );
+  const historyReportRef = useRef<HTMLDivElement | null>(null);
+
+  const scrollToHistoryReport = useCallback(() => {
+    // Wait a frame so the report panel has content before scrolling
+    requestAnimationFrame(() => {
+      historyReportRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+  }, []);
 
   const pollSearch = useCallback(async (id: string) => {
     const res = await fetch(`/api/search/status?jobId=${id}`);
@@ -86,25 +101,33 @@ export default function HomePage() {
     }
   }, []);
 
-  const loadHistoryItem = useCallback(async (run: UnifiedHistoryItem) => {
-    setSelectedHistory(run);
-    setHistoryJob(null);
-    setHistoryCompetitors([]);
-    setHistoryLookupJob(null);
-    setHistoryLookupAds([]);
-    const res = await fetch(
-      `/api/history/unified?runId=${encodeURIComponent(run.id)}&kind=${run.kind}`,
-    );
-    if (!res.ok) return;
-    const data = await res.json();
-    if (data.kind === "lookup") {
-      setHistoryLookupJob(data.job ?? null);
-      setHistoryLookupAds(data.ads ?? []);
-    } else {
-      setHistoryJob(data.job ?? null);
-      setHistoryCompetitors(data.competitors ?? []);
-    }
-  }, []);
+  const loadHistoryItem = useCallback(
+    async (run: UnifiedHistoryItem) => {
+      setSelectedHistory(run);
+      setHistoryJob(null);
+      setHistoryCompetitors([]);
+      setHistoryLookupJob(null);
+      setHistoryLookupAds([]);
+      // Immediate scroll so the user sees the report region loading
+      scrollToHistoryReport();
+
+      const res = await fetch(
+        `/api/history/unified?runId=${encodeURIComponent(run.id)}&kind=${run.kind}`,
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.kind === "lookup") {
+        setHistoryLookupJob(data.job ?? null);
+        setHistoryLookupAds(data.ads ?? []);
+      } else {
+        setHistoryJob(data.job ?? null);
+        setHistoryCompetitors(data.competitors ?? []);
+      }
+      // Scroll again after content paints
+      setTimeout(() => scrollToHistoryReport(), 80);
+    },
+    [scrollToHistoryReport],
+  );
 
   const deleteHistoryItem = useCallback(
     async (run: UnifiedHistoryItem) => {
@@ -127,6 +150,38 @@ export default function HomePage() {
       }
     },
     [selectedHistory, loadHistory],
+  );
+
+  const startLookupForCandidate = useCallback(
+    async (candidate: LookupPageCandidate, plat: AdPlatform) => {
+      setFetchingCandidateId(candidate.pageId);
+      try {
+        const res = await fetch("/api/lookup", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name: candidate.name,
+            platform: plat,
+            forcedCandidate: candidate,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Lookup failed");
+        setMode("lookup");
+        setPlatform(plat);
+        setLookupId(data.lookupId);
+        setLookupQuery(data.queryName || candidate.name);
+        setLookupJob(null);
+        setLookupAds([]);
+        setSelectedHistory(null);
+      } catch (err) {
+        console.error(err);
+        alert((err as Error).message);
+      } finally {
+        setFetchingCandidateId(null);
+      }
+    },
+    [],
   );
 
   const clearAllHistory = useCallback(async () => {
@@ -184,9 +239,9 @@ export default function HomePage() {
           <p className="brand">AdRival</p>
           <h1>Competitive ad intelligence</h1>
           <p className="lede">
-            Glass-clear workspace to find agency competitors and pull creatives
-            across Meta, Google, YouTube, and LinkedIn — search and lookup in
-            one place.
+            Paste any business URL to understand its industry, then find
+            competitors advertising across Meta, Google, YouTube, and LinkedIn —
+            search and lookup in one place.
           </p>
         </div>
       </header>
@@ -293,7 +348,14 @@ export default function HomePage() {
             </div>
 
             {resultsView === "preview" ? (
-              <CompetitorTable competitors={competitors} />
+              <CompetitorTable
+                competitors={competitors}
+                onCompetitorUpdated={(updated) => {
+                  setCompetitors((prev) =>
+                    prev.map((c) => (c.id === updated.id ? updated : c)),
+                  );
+                }}
+              />
             ) : (
               <BrandReviewPanel competitors={competitors} />
             )}
@@ -317,7 +379,24 @@ export default function HomePage() {
               }}
             />
           </section>
-          {lookupJob && <LookupResults job={lookupJob} ads={lookupAds} />}
+          {lookupJob && (
+            <LookupResults
+              job={lookupJob}
+              ads={lookupAds}
+              fetchingCandidateId={fetchingCandidateId}
+              onFetchCandidate={(c) =>
+                void startLookupForCandidate(
+                  c,
+                  (lookupJob.platform || platform) as AdPlatform,
+                )
+              }
+              onAdUpdated={(ad) => {
+                setLookupAds((prev) =>
+                  prev.map((a) => (a.id === ad.id ? ad : a)),
+                );
+              }}
+            />
+          )}
           {!lookupJob && lookupQuery && (
             <p className="empty-hint">Starting lookup for {lookupQuery}…</p>
           )}
@@ -326,7 +405,7 @@ export default function HomePage() {
 
       {mode === "history" && (
         <section className="history-layout">
-          <div className="panel history-sidebar">
+          <div className="panel history-list-panel">
             <div className="results-head">
               <h2>Unified history</h2>
               <button
@@ -351,14 +430,48 @@ export default function HomePage() {
             />
           </div>
 
-          <div className="panel history-detail">
+          <div
+            className="panel history-report-panel"
+            ref={historyReportRef}
+            id="history-report"
+            tabIndex={-1}
+          >
+            <div className="results-head">
+              <h2>Report</h2>
+              {selectedHistory && (
+                <span className="muted-inline">
+                  {selectedHistory.kind === "lookup" ? "Lookup" : "Search"} ·{" "}
+                  {selectedHistory.title}
+                  {historyJob?.businessProfile?.businessName
+                    ? ` · ${historyJob.businessProfile.businessName}`
+                    : ""}
+                  {historyJob?.businessUrl || historyJob?.businessProfile?.url
+                    ? ` · ${historyJob.businessUrl || historyJob.businessProfile?.url}`
+                    : ""}
+                </span>
+              )}
+            </div>
             {!selectedHistory ? (
               <p className="empty-hint">
-                Select a search or lookup run. Platform badges show where each
-                run came from.
+                Select a search or lookup run above to open its report.
               </p>
             ) : selectedHistory.kind === "lookup" && historyLookupJob ? (
-              <LookupResults job={historyLookupJob} ads={historyLookupAds} />
+              <LookupResults
+                job={historyLookupJob}
+                ads={historyLookupAds}
+                fetchingCandidateId={fetchingCandidateId}
+                onFetchCandidate={(c) =>
+                  void startLookupForCandidate(
+                    c,
+                    (historyLookupJob.platform || platform) as AdPlatform,
+                  )
+                }
+                onAdUpdated={(ad) => {
+                  setHistoryLookupAds((prev) =>
+                    prev.map((a) => (a.id === ad.id ? ad : a)),
+                  );
+                }}
+              />
             ) : historyJob ? (
               <>
                 <div className="results-head">
@@ -393,13 +506,20 @@ export default function HomePage() {
                   </button>
                 </div>
                 {historyResultsView === "preview" ? (
-                  <CompetitorTable competitors={historyCompetitors} />
+                  <CompetitorTable
+                    competitors={historyCompetitors}
+                    onCompetitorUpdated={(updated) => {
+                      setHistoryCompetitors((prev) =>
+                        prev.map((c) => (c.id === updated.id ? updated : c)),
+                      );
+                    }}
+                  />
                 ) : (
                   <BrandReviewPanel competitors={historyCompetitors} />
                 )}
               </>
             ) : (
-              <p className="empty-hint">Loading run…</p>
+              <p className="empty-hint">Loading report…</p>
             )}
           </div>
         </section>

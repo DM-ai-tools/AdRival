@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
 import {
   extractGoogleAds,
+  extractGoogleAdsEstimate,
   extractGoogleAdvertisers,
   extractGoogleCursor,
   extractGoogleWebsites,
@@ -47,10 +48,82 @@ import {
   normalizeWebsiteUrl,
   sanitizeBrandForPlatform,
 } from "./linkGuards";
+import { enrichLookupPageMetrics } from "./lookupEnrichment";
+import { googleRegionFromGeo } from "../geo";
 
 const MAX_DOMAIN_AD_PAGES = 10;
-const MAX_ADS_PAGES = 10;
+const MAX_ADS_PAGES = 15;
 const MAX_DOMAINS_PER_QUERY = 12;
+/** Transparency region that returns creatives across countries (US alone under-counts). */
+const GOOGLE_ADS_REGION = "all";
+
+function normalizeDomainQuery(query: string): string | null {
+  const q = query
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//i, "")
+    .replace(/^www\./i, "")
+    .replace(/\/.*$/, "")
+    .replace(/\s+/g, "");
+  if (!q.includes(".")) return null;
+  if (!/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(q)) return null;
+  return q;
+}
+
+function creativeKey(ad: GoogleAdCreative): string {
+  return (
+    String(ad.creativeId || "") ||
+    String(ad.adUrl || "") ||
+    `${ad.advertiserId || ""}:${ad.firstShown || ""}:${ad.format || ""}`
+  );
+}
+
+async function fetchGoogleAdsPages(params: {
+  advertiser_id?: string;
+  domain?: string;
+  region?: string;
+  maxPages?: number;
+  onPage?: (info: {
+    page: number;
+    batch: number;
+    total: number;
+    estimate: number | null;
+  }) => void;
+}): Promise<{ ads: GoogleAdCreative[]; estimate: number | null }> {
+  const out: GoogleAdCreative[] = [];
+  const seen = new Set<string>();
+  let cursor: string | null = null;
+  let pages = 0;
+  let estimate: number | null = null;
+  const maxPages = params.maxPages ?? MAX_ADS_PAGES;
+
+  do {
+    const res = await getGoogleCompanyAds({
+      advertiser_id: params.advertiser_id,
+      domain: params.domain,
+      region: params.region ?? GOOGLE_ADS_REGION,
+      cursor,
+    });
+    const batch = extractGoogleAds(res);
+    estimate = extractGoogleAdsEstimate(res) ?? estimate;
+    for (const ad of batch) {
+      const key = creativeKey(ad);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(ad);
+    }
+    cursor = extractGoogleCursor(res);
+    pages += 1;
+    params.onPage?.({
+      page: pages,
+      batch: batch.length,
+      total: out.length,
+      estimate,
+    });
+  } while (cursor && pages < maxPages);
+
+  return { ads: out, estimate };
+}
 
 function domainFromUrl(url?: string | null): string | null {
   if (!url) return null;
@@ -152,7 +225,7 @@ async function discoverAndVerifyDomains(args: {
       // Prefer company-ads by domain — proves ads exist
       const adsRes = await getGoogleCompanyAds({
         domain,
-        region: "US",
+        region: GOOGLE_ADS_REGION,
       });
       let ads = extractGoogleAds(adsRes);
       if (platform === "youtube") {
@@ -280,20 +353,12 @@ function websiteUrl(domain: string): string {
   return `https://${d}`;
 }
 
-async function fetchAdsForDomain(domain: string, region = "US") {
-  const ads: GoogleAdCreative[] = [];
-  let cursor: string | null = null;
-  let pages = 0;
-  do {
-    const res = await getGoogleCompanyAds({
-      domain,
-      region,
-      cursor,
-    });
-    ads.push(...extractGoogleAds(res));
-    cursor = extractGoogleCursor(res);
-    pages += 1;
-  } while (cursor && pages < MAX_DOMAIN_AD_PAGES);
+async function fetchAdsForDomain(domain: string, region = GOOGLE_ADS_REGION) {
+  const { ads } = await fetchGoogleAdsPages({
+    domain,
+    region,
+    maxPages: MAX_DOMAIN_AD_PAGES,
+  });
   return ads;
 }
 
@@ -308,14 +373,26 @@ export async function runGoogleFamilySearch(
   jobId: string,
   keywordInput: string | string[],
   platform: Extract<AdPlatform, "google" | "youtube">,
+  options?: {
+    geo?: string;
+    businessProfile?: import("../types").BusinessProfile | null;
+    businessUrl?: string | null;
+  },
 ) {
   const keywords = parseKeywords(keywordInput);
   const now = new Date().toISOString();
+  const geo = options?.geo || "all";
+  const businessProfile = options?.businessProfile || null;
+  const businessUrl =
+    (options?.businessUrl || businessProfile?.url || "").trim() || null;
   const job: SearchJob = {
     id: jobId,
     keyword: keywords.join(", "),
     keywords,
     platform,
+    geo,
+    businessUrl,
+    businessProfile,
     status: "running",
     progress: {
       stage: "expanding_queries",
@@ -324,7 +401,9 @@ export async function runGoogleFamilySearch(
       accepted: 0,
       target: TARGET_COMPETITORS,
       rejected: 0,
-      message: `Discovering ${platform} advertiser domains…`,
+      message: businessProfile
+        ? `Discovering ${platform} competitors for ${businessProfile.industry}…`
+        : `Discovering ${platform} advertiser domains…`,
     },
     competitorIds: [],
     createdAt: now,
@@ -341,7 +420,8 @@ export async function runGoogleFamilySearch(
     const queries = new Set<string>(keywords);
     for (const kw of keywords) {
       try {
-        for (const q of await expandKeywordQueries(kw)) queries.add(q);
+        for (const q of await expandKeywordQueries(kw, businessProfile))
+          queries.add(q);
       } catch {
         /* keep seed */
       }
@@ -407,7 +487,7 @@ export async function runGoogleFamilySearch(
           try {
             const adsRes = await getGoogleCompanyAds({
               advertiser_id: id,
-              region: adv.region ? String(adv.region) : "US",
+              region: GOOGLE_ADS_REGION,
             });
             let ads = extractGoogleAds(adsRes);
             if (platform === "youtube") {
@@ -448,7 +528,10 @@ export async function runGoogleFamilySearch(
 
         let ads: GoogleAdCreative[] = [];
         try {
-          ads = await fetchAdsForDomain(domain, "US");
+          ads = await fetchAdsForDomain(
+            domain,
+            googleRegionFromGeo(job.geo || "all"),
+          );
           job.progress.scannedPages += 1;
         } catch (err) {
           job.progress.rejected += 1;
@@ -614,14 +697,17 @@ async function tryAcceptFromAds(args: {
       primary,
       null,
       enriched.filter((a) => a.adArchiveId !== primary.adArchiveId).slice(0, 3),
-      { relaxed: true },
+      { relaxed: true, businessProfile: job.businessProfile },
     );
   } catch {
     job.progress.rejected += 1;
     return;
   }
 
-  if (!filter.relevant || !filter.isMarketingAgency) {
+  if (
+    !filter.relevant ||
+    (!job.businessProfile && !filter.isMarketingAgency)
+  ) {
     job.progress.rejected += 1;
     return;
   }
@@ -710,6 +796,7 @@ export async function runGoogleFamilyLookup(
   lookupId: string,
   queryName: string,
   platform: Extract<AdPlatform, "google" | "youtube">,
+  forcedCandidate?: LookupPageCandidate | null,
 ) {
   const now = new Date().toISOString();
   const job: LookupJob = {
@@ -736,8 +823,16 @@ export async function runGoogleFamilyLookup(
     const res = await searchGoogleAdvertisers(queryName);
     const advertisers = extractGoogleAdvertisers(res);
     const websites = extractGoogleWebsites(res);
+    const domainQuery = normalizeDomainQuery(queryName);
 
     const candidates: LookupPageCandidate[] = [
+      ...websites.map((domain) => ({
+        pageId: `domain:${domain}`,
+        name: domain,
+        category: "Website domain",
+        country: null,
+        raw: { domain } as Record<string, unknown>,
+      })),
       ...advertisers
         .map((a) => ({
           pageId: String(a.advertiser_id || ""),
@@ -747,14 +842,32 @@ export async function runGoogleFamilyLookup(
           raw: a as Record<string, unknown>,
         }))
         .filter((c) => c.pageId && c.name),
-      ...websites.map((domain) => ({
-        pageId: `domain:${domain}`,
-        name: domain,
-        category: "Website domain",
-        country: "US",
-        raw: { domain } as Record<string, unknown>,
-      })),
     ].slice(0, 24);
+
+    // Prefer exact domain match when the user typed a domain (search-advertisers
+    // often returns unrelated same-name advertisers in other regions).
+    if (forcedCandidate?.pageId) {
+      const rest = candidates.filter((c) => c.pageId !== forcedCandidate.pageId);
+      candidates.splice(0, candidates.length, forcedCandidate, ...rest);
+    } else if (domainQuery) {
+      const exact =
+        candidates.find((c) => c.pageId === `domain:${domainQuery}`) ||
+        candidates.find(
+          (c) => c.name.toLowerCase().replace(/^www\./, "") === domainQuery,
+        );
+      if (exact) {
+        const rest = candidates.filter((c) => c.pageId !== exact.pageId);
+        candidates.splice(0, candidates.length, exact, ...rest);
+      } else {
+        candidates.unshift({
+          pageId: `domain:${domainQuery}`,
+          name: domainQuery,
+          category: "Website domain",
+          country: null,
+          raw: { domain: domainQuery },
+        });
+      }
+    }
 
     job.candidates = candidates;
     job.progress.candidatesFound = candidates.length;
@@ -771,108 +884,220 @@ export async function runGoogleFamilyLookup(
       return;
     }
 
-    const pick = await pickCompanyPageMatch(
-      queryName,
-      candidates.map((c) => ({
-        pageId: c.pageId,
-        name: c.name,
-        category: c.category,
-        likes: null,
-        verification: null,
-        igUsername: null,
-        pageAlias: null,
-      })),
-    );
+    let selected = candidates[0];
+    let pickReason = "Top domain/advertiser match";
+    let pickConfidence = 0.7;
 
-    const selected =
-      candidates.find((c) => c.pageId === pick.selectedPageId) || candidates[0];
+    if (forcedCandidate?.pageId) {
+      selected =
+        candidates.find((c) => c.pageId === forcedCandidate.pageId) ||
+        forcedCandidate;
+      pickReason = `User selected alternate match "${selected.name}"`;
+      pickConfidence = 1;
+    } else if (domainQuery && selected.pageId.startsWith("domain:")) {
+      pickReason = `Matched website domain "${domainQuery}" from search-advertisers`;
+      pickConfidence = 0.95;
+    } else {
+      const pick = await pickCompanyPageMatch(
+        queryName,
+        candidates.map((c) => ({
+          pageId: c.pageId,
+          name: c.name,
+          category: c.category,
+          likes: c.likes,
+          verification: null,
+          igUsername: null,
+          pageAlias: null,
+        })),
+      );
+      selected =
+        candidates.find((c) => c.pageId === pick.selectedPageId) ||
+        candidates[0];
+      pickReason = pick.reason;
+      pickConfidence = pick.confidence;
+    }
+
     job.selectedPage = selected;
-    job.llmReason = pick.reason;
-    job.llmConfidence = pick.confidence;
+    job.llmReason = pickReason;
+    job.llmConfidence = pickConfidence;
     job.progress.stage = "fetching_ads";
     job.progress.message = `Fetching ads for ${selected.name}…`;
     saveLookupJob(job);
 
-    let cursor: string | null = null;
-    let pages = 0;
-    const stored: LookupAdRecord[] = [];
-    const seen = new Set<string>();
     const isDomain = selected.pageId.startsWith("domain:");
     const domain = isDomain
       ? selected.pageId.replace(/^domain:/, "")
       : selected.name.includes(".")
-        ? selected.name
-        : null;
+        ? selected.name.replace(/^www\./i, "").toLowerCase()
+        : domainQuery;
 
-    do {
-      const adsRes = await getGoogleCompanyAds({
-        advertiser_id: isDomain ? undefined : selected.pageId,
-        domain: domain || undefined,
-        region: selected.country || "US",
-        cursor,
-      });
-      let ads = extractGoogleAds(adsRes);
-      if (platform === "youtube") {
-        ads = ads.filter((ad) => isYouTubeCreative(ad));
-      }
-      cursor = extractGoogleCursor(adsRes);
-      pages += 1;
-      job.progress.pagesScanned += 1;
+    // Flow: domain/advertiser → company-ads (region=all) → resolve advertiser_id
+    // → company-ads by advertiser_id → ad-details per creative URL.
+    let creatives: GoogleAdCreative[] = [];
+    let estimate: number | null = null;
 
-      for (const ad of ads) {
-        const id = String(ad.creativeId || "");
-        if (!id || seen.has(id)) continue;
-        seen.add(id);
-        const details = await enrichGoogleAd(ad);
-        if (platform === "youtube" && !isYouTubeCreative(ad, details)) {
-          continue;
-        }
-
-        const mapped = mapGoogleCreativeToCandidate(ad, details);
-        const sample = sampleAdFromGoogleCandidate(
-          mapped,
-          platform,
-          domain,
-        );
-        const record: LookupAdRecord = {
-          id: uuidv4(),
-          lookupId: job.id,
-          adArchiveId: id,
-          pageId: selected.pageId,
-          pageName: selected.name,
-          country: selected.country || "US",
-          isActive: true,
-          title: sample.title,
-          body: sample.body,
-          ctaText: sample.ctaText,
-          landingPageUrl: sample.landingPageUrl,
-          startDateString: sample.startDate,
-          endDateString: sample.endDate,
-          daysRunning: sample.daysRunning,
-          adLibraryUrl: sample.adLibraryUrl,
-          format: sample.format,
-          imageUrl: sample.imageUrl,
-          youtubeUrl: sample.youtubeUrl,
-          domain: sample.domain || domain,
-          visibleUrl: sample.visibleUrl,
-          raw: { ...ad, details } as Record<string, unknown>,
-          createdAt: new Date().toISOString(),
-        };
-        saveLookupAd(record);
-        stored.push(record);
-        job.adIds.push(record.id);
-      }
-
-      job.progress.adsFetched = stored.length;
-      job.progress.message = `Fetched ${stored.length} ${platform} ads…`;
+    if (isDomain && domain) {
+      job.progress.message = `Loading company ads for domain ${domain}…`;
       saveLookupJob(job);
-    } while (cursor && pages < MAX_ADS_PAGES);
+      const byDomain = await fetchGoogleAdsPages({
+        domain,
+        region: GOOGLE_ADS_REGION,
+        onPage: ({ page, total, estimate: est }) => {
+          job.progress.pagesScanned = page;
+          job.progress.adsFetched = total;
+          estimate = est ?? estimate;
+          job.progress.message = `Domain ${domain}: ${total} ads${est != null ? ` (est. ${est})` : ""}…`;
+          saveLookupJob(job);
+        },
+      });
+      creatives = byDomain.ads;
+      estimate = byDomain.estimate ?? estimate;
+    } else if (!isDomain) {
+      const byAdv = await fetchGoogleAdsPages({
+        advertiser_id: selected.pageId,
+        region: GOOGLE_ADS_REGION,
+        onPage: ({ page, total, estimate: est }) => {
+          job.progress.pagesScanned = page;
+          job.progress.adsFetched = total;
+          estimate = est ?? estimate;
+          job.progress.message = `Advertiser ads: ${total}${est != null ? ` (est. ${est})` : ""}…`;
+          saveLookupJob(job);
+        },
+      });
+      creatives = byAdv.ads;
+      estimate = byAdv.estimate ?? estimate;
+    }
+
+    const advertiserIds = Array.from(
+      new Set(
+        creatives
+          .map((ad) => String(ad.advertiserId || "").trim())
+          .filter(Boolean),
+      ),
+    );
+
+    // Prefer advertiser_id fetch for a complete creative list (user-described flow)
+    if (advertiserIds.length > 0) {
+      const merged = new Map<string, GoogleAdCreative>();
+      for (const ad of creatives) merged.set(creativeKey(ad), ad);
+
+      for (const advertiserId of advertiserIds.slice(0, 5)) {
+        job.progress.message = `Fetching all creatives for advertiser ${advertiserId}…`;
+        saveLookupJob(job);
+        const byAdv = await fetchGoogleAdsPages({
+          advertiser_id: advertiserId,
+          region: GOOGLE_ADS_REGION,
+          onPage: ({ page, total, estimate: est }) => {
+            job.progress.pagesScanned += 1;
+            estimate = est ?? estimate;
+            job.progress.message = `Advertiser ${advertiserId}: page ${page}, ${total} ads${est != null ? ` (est. ${est})` : ""}…`;
+            saveLookupJob(job);
+          },
+        });
+        for (const ad of byAdv.ads) merged.set(creativeKey(ad), ad);
+        estimate = byAdv.estimate ?? estimate;
+      }
+      creatives = Array.from(merged.values());
+
+      if (advertiserIds.length === 1) {
+        const primary = creatives.find((a) => a.advertiserId === advertiserIds[0]);
+        job.selectedPage = {
+          ...selected,
+          pageId: advertiserIds[0],
+          name:
+            String(primary?.advertiserName || selected.name || domain || "").trim() ||
+            selected.name,
+          category: selected.category || "Google advertiser",
+          country: selected.country,
+          raw: {
+            ...(selected.raw || {}),
+            advertiser_id: advertiserIds[0],
+            domain: domain || undefined,
+            resolvedFromDomain: isDomain,
+          },
+        };
+        selected = job.selectedPage;
+      }
+    }
+
+    // Pull FB likes / IG followers for the resolved advertiser via Meta endpoints
+    job.progress.message = `Fetching profile metrics for "${selected.name}"…`;
+    saveLookupJob(job);
+    selected = await enrichLookupPageMetrics(selected, {
+      platform,
+      websiteHint: domain ? `https://${domain}` : null,
+    });
+    job.selectedPage = selected;
+    const selectedIds = new Set(
+      [selected.pageId, domain ? `domain:${domain}` : ""].filter(Boolean),
+    );
+    job.candidates = [
+      selected,
+      ...job.candidates.filter((c) => !selectedIds.has(c.pageId)),
+    ];
+    saveLookupJob(job);
+
+    if (platform === "youtube") {
+      creatives = creatives.filter((ad) => isYouTubeCreative(ad));
+    }
+
+    job.progress.adsFetched = creatives.length;
+    job.progress.message = `Enriching ${creatives.length} ${platform} ads${estimate != null ? ` (est. ${estimate})` : ""}…`;
+    saveLookupJob(job);
+
+    const stored: LookupAdRecord[] = [];
+    const seen = new Set<string>();
+
+    for (const ad of creatives) {
+      const id = String(ad.creativeId || creativeKey(ad));
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+
+      const details = await enrichGoogleAd(ad);
+      if (platform === "youtube" && !isYouTubeCreative(ad, details)) {
+        continue;
+      }
+
+      const mapped = mapGoogleCreativeToCandidate(ad, details);
+      const sample = sampleAdFromGoogleCandidate(mapped, platform, domain);
+      const record: LookupAdRecord = {
+        id: uuidv4(),
+        lookupId: job.id,
+        adArchiveId: id,
+        pageId: selected.pageId,
+        pageName: selected.name,
+        country: selected.country || "ALL",
+        isActive: true,
+        title: sample.title,
+        body: sample.body,
+        ctaText: sample.ctaText,
+        landingPageUrl: sample.landingPageUrl,
+        startDateString: sample.startDate,
+        endDateString: sample.endDate,
+        daysRunning: sample.daysRunning,
+        adLibraryUrl: sample.adLibraryUrl,
+        format: sample.format,
+        imageUrl: sample.imageUrl,
+        youtubeUrl: sample.youtubeUrl,
+        domain: sample.domain || domain,
+        visibleUrl: sample.visibleUrl,
+        raw: { ...ad, details } as Record<string, unknown>,
+        createdAt: new Date().toISOString(),
+      };
+      saveLookupAd(record);
+      stored.push(record);
+      job.adIds.push(record.id);
+      job.progress.adsFetched = stored.length;
+      job.progress.message = `Loaded ${stored.length}/${creatives.length} ${platform} ads…`;
+      saveLookupJob(job);
+    }
 
     job.status = stored.length > 0 ? "completed" : "partial";
     job.progress.stage = "done";
+    job.progress.adsFetched = stored.length;
     job.progress.message =
       stored.length > 0
-        ? `Loaded ${stored.length} ads for "${selected.name}".`
+        ? `Loaded ${stored.length} ads for "${selected.name}"${estimate != null ? ` (Transparency est. ${estimate})` : ""}.`
         : `Matched "${selected.name}" but found no public ${platform} ads.`;
     job.updatedAt = new Date().toISOString();
     saveLookupJob(job);

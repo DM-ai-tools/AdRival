@@ -21,8 +21,17 @@ import {
   type LookupJobProgress,
   type LookupPageCandidate,
 } from "../types";
+import { enrichLookupPageMetrics } from "./lookupEnrichment";
 
 const MAX_AD_PAGES_PER_COUNTRY = 25;
+
+function safeNum(n: unknown): number | null {
+  if (typeof n === "number" && Number.isFinite(n)) return n;
+  if (typeof n === "string" && n.trim() && !Number.isNaN(Number(n))) {
+    return Number(n);
+  }
+  return null;
+}
 
 function updateLookup(job: LookupJob, patch: Partial<LookupJob>) {
   Object.assign(job, patch, { updatedAt: new Date().toISOString() });
@@ -45,10 +54,10 @@ function toCandidate(
     pageId,
     name,
     category: raw.category != null ? String(raw.category) : null,
-    likes: typeof raw.likes === "number" ? raw.likes : null,
+    likes: safeNum(raw.likes),
     verification: raw.verification != null ? String(raw.verification) : null,
     igUsername: raw.ig_username != null ? String(raw.ig_username) : null,
-    igFollowers: typeof raw.ig_followers === "number" ? raw.ig_followers : null,
+    igFollowers: safeNum(raw.ig_followers),
     pageAlias: raw.page_alias != null ? String(raw.page_alias) : null,
     imageUri: raw.image_uri != null ? String(raw.image_uri) : null,
     country: raw.country != null ? String(raw.country) : null,
@@ -60,6 +69,7 @@ export async function runCompetitorLookup(
   lookupId: string,
   queryName: string,
   platform: import("../platforms").AdPlatform = "facebook",
+  forcedCandidate?: LookupPageCandidate | null,
 ) {
   const now = new Date().toISOString();
   const job: LookupJob = {
@@ -96,16 +106,21 @@ export async function runCompetitorLookup(
     for (const c of candidates) {
       if (!byId.has(c.pageId)) byId.set(c.pageId, c);
     }
+    if (forcedCandidate?.pageId && !byId.has(forcedCandidate.pageId)) {
+      byId.set(forcedCandidate.pageId, forcedCandidate);
+    }
     const unique = Array.from(byId.values()).slice(0, 20);
 
     job.candidates = unique;
     setProgress(job, {
       candidatesFound: unique.length,
       stage: "verifying_page",
-      message: `Found ${unique.length} page(s). LLM verifying best match…`,
+      message: forcedCandidate
+        ? `Using selected match "${forcedCandidate.name}"…`
+        : `Found ${unique.length} page(s). LLM verifying best match…`,
     });
 
-    if (unique.length === 0) {
+    if (unique.length === 0 && !forcedCandidate) {
       updateLookup(job, {
         status: "failed",
         error: `No Facebook Ad Library pages found for "${queryName}"`,
@@ -118,40 +133,63 @@ export async function runCompetitorLookup(
       return;
     }
 
-    const pick = await pickCompanyPageMatch(
-      queryName,
-      unique.map((c) => ({
-        pageId: c.pageId,
-        name: c.name,
-        category: c.category,
-        likes: c.likes,
-        verification: c.verification,
-        igUsername: c.igUsername,
-        pageAlias: c.pageAlias,
-      })),
-    );
+    let selected: LookupPageCandidate | null = null;
+    let pickReason = "";
+    let pickConfidence = 0;
 
-    const selected =
-      unique.find((c) => c.pageId === pick.selectedPageId) ?? null;
+    if (forcedCandidate?.pageId) {
+      selected =
+        unique.find((c) => c.pageId === forcedCandidate.pageId) ||
+        forcedCandidate;
+      pickReason = `User selected alternate match "${selected.name}"`;
+      pickConfidence = 1;
+    } else {
+      const pick = await pickCompanyPageMatch(
+        queryName,
+        unique.map((c) => ({
+          pageId: c.pageId,
+          name: c.name,
+          category: c.category,
+          likes: c.likes,
+          verification: c.verification,
+          igUsername: c.igUsername,
+          pageAlias: c.pageAlias,
+        })),
+      );
+      selected =
+        unique.find((c) => c.pageId === pick.selectedPageId) ?? null;
+      pickReason = pick.reason;
+      pickConfidence = pick.confidence;
+    }
 
     if (!selected) {
       updateLookup(job, {
         status: "failed",
-        llmReason: pick.reason,
-        llmConfidence: pick.confidence,
+        llmReason: pickReason,
+        llmConfidence: pickConfidence,
         error: "LLM could not confidently match a page for this competitor name",
         progress: {
           ...job.progress,
           stage: "failed",
-          message: pick.reason,
+          message: pickReason,
         },
       });
       return;
     }
 
+    setProgress(job, {
+      stage: "verifying_page",
+      message: `Enriching profile metrics for "${selected.name}"…`,
+    });
+    selected = await enrichLookupPageMetrics(selected, { platform });
+    // Keep candidates list in sync for the selected row
+    job.candidates = job.candidates.map((c) =>
+      c.pageId === selected!.pageId ? selected! : c,
+    );
+
     job.selectedPage = selected;
-    job.llmReason = pick.reason;
-    job.llmConfidence = pick.confidence;
+    job.llmReason = pickReason;
+    job.llmConfidence = pickConfidence;
     setProgress(job, {
       stage: "fetching_ads",
       message: `Matched "${selected.name}" (${selected.pageId}). Fetching ads…`,

@@ -15,7 +15,7 @@ const display = Fraunces({
 export const metadata: Metadata = {
   title: "AdRival — Competitive Ad Intelligence",
   description:
-    "Find marketing agency competitors across Facebook, Instagram, Google, YouTube, and LinkedIn ad libraries.",
+    "Analyze any business URL, detect its industry, and find advertising competitors across Facebook, Instagram, Google, YouTube, and LinkedIn.",
 };
 
 export default function RootLayout({

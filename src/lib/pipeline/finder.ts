@@ -29,6 +29,7 @@ import {
   TARGET_COMPETITORS,
   type AdCandidate,
   type BrandReview,
+  type BusinessProfile,
   type CompetitorRecord,
   type JobProgress,
   type SearchCountry,
@@ -37,6 +38,7 @@ import {
 } from "../types";
 import type { AdPlatform } from "../platforms";
 import { parseKeywords, getPlatformAdThresholds, meetsDurationThreshold } from "../platforms";
+import { metaCountriesFromGeo } from "../geo";
 
 /** Lightweight English check — only drop obvious non-English creatives */
 function looksLikeEnglish(text: string): boolean {
@@ -257,15 +259,29 @@ export async function runCompetitorSearch(
   jobId: string,
   keywordInput: string | string[],
   platform: AdPlatform = "facebook",
+  options?: {
+    geo?: string;
+    businessProfile?: BusinessProfile | null;
+    businessUrl?: string | null;
+  },
 ) {
   const keywords = parseKeywords(keywordInput);
   const primaryKeyword = keywords[0] || String(keywordInput);
+  const geo = options?.geo || "US";
+  const countries = metaCountriesFromGeo(geo);
+  const businessProfile = options?.businessProfile || null;
+  const businessUrl =
+    (options?.businessUrl || businessProfile?.url || "").trim() || null;
   const now = new Date().toISOString();
   const job: SearchJob = {
     id: jobId,
     keyword: keywords.join(", "),
     keywords,
     platform,
+    geo,
+    countries,
+    businessUrl,
+    businessProfile,
     status: "running",
     progress: {
       stage: "expanding_queries",
@@ -274,7 +290,9 @@ export async function runCompetitorSearch(
       accepted: 0,
       target: TARGET_COMPETITORS,
       rejected: 0,
-      message: `Expanding ${keywords.length} keyword(s) for ${platform}…`,
+      message: businessProfile
+        ? `Finding ${platform} competitors for ${businessProfile.industry}…`
+        : `Expanding ${keywords.length} keyword(s) for ${platform}…`,
       rejectReasons: {
         inactive: 0,
         shortDuration: 0,
@@ -411,7 +429,7 @@ export async function runCompetitorSearch(
     for (const kw of keywords.length ? keywords : [primaryKeyword]) {
       querySet.add(kw);
       try {
-        const expanded = await expandKeywordQueries(kw);
+            const expanded = await expandKeywordQueries(kw, businessProfile);
         for (const q of expanded) querySet.add(q);
       } catch {
         // keep seed keyword
@@ -426,7 +444,7 @@ export async function runCompetitorSearch(
     let pageBudget = 0;
 
     outer: for (const query of queries) {
-      for (const country of SEARCH_COUNTRIES) {
+          for (const country of countries as SearchCountry[]) {
         let cursor: string | null = null;
         let pagesForQuery = 0;
 
@@ -513,7 +531,7 @@ export async function runCompetitorSearch(
               bumpReason("noLandingPage");
               continue;
             }
-            if (!hasServiceKeywordSignal(signalText)) {
+            if (!hasServiceKeywordSignal(signalText, businessProfile)) {
               bumpReason("noServiceSignal");
               continue;
             }
@@ -549,7 +567,10 @@ export async function runCompetitorSearch(
             const pageText = pageAds
               .map((a) => `${a.pageName}\n${a.title}\n${a.body}\n${a.fullText}`)
               .join("\n");
-            if (!hasAgencyPositioningSignal(pageText)) {
+            if (
+              !businessProfile &&
+              !hasAgencyPositioningSignal(pageText)
+            ) {
               rejectedPages.add(pageId);
               bumpReason("llmReject");
               setProgress(job, {
@@ -565,7 +586,9 @@ export async function runCompetitorSearch(
 
             setProgress(job, {
               stage: "analyzing_ad",
-              message: `LLM reviewing agency candidate ${primary.pageName} (${pageAds.length} creatives, ${bodyChars} chars)…`,
+              message: businessProfile
+                ? `LLM reviewing industry competitor ${primary.pageName} (${pageAds.length} creatives)…`
+                : `LLM reviewing agency candidate ${primary.pageName} (${pageAds.length} creatives, ${bodyChars} chars)…`,
             });
 
             let filter: AdFilterResult;
@@ -575,7 +598,7 @@ export async function runCompetitorSearch(
                 primary,
                 primary.pageCategories?.[0] ?? null,
                 extras,
-                { relaxed: thr.relaxedLlm },
+                { relaxed: thr.relaxedLlm, businessProfile },
               );
             } catch (err) {
               setProgress(job, {
@@ -586,12 +609,15 @@ export async function runCompetitorSearch(
               continue;
             }
 
-            if (!filter.relevant || !filter.isMarketingAgency) {
+            if (
+              !filter.relevant ||
+              (!businessProfile && !filter.isMarketingAgency)
+            ) {
               rejectedPages.add(pageId);
               bumpReason("llmReject");
               setProgress(job, {
                 message: `Rejected ${primary.pageName}: ${
-                  !filter.isMarketingAgency
+                  !businessProfile && !filter.isMarketingAgency
                     ? "not a marketing agency — "
                     : ""
                 }${filter.reason}${

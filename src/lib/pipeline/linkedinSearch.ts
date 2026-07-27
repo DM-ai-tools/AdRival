@@ -31,6 +31,8 @@ import {
   pickBestLinkedInCandidate,
   sampleAdFromLinkedInCandidate,
 } from "./adMappers";
+import { enrichLookupPageMetrics } from "./lookupEnrichment";
+import { linkedInCountriesFromGeo } from "../geo";
 
 const MAX_LI_PAGES = 12;
 const MAX_COMPANY_COUNT_PAGES = 8;
@@ -80,14 +82,28 @@ async function countLinkedInCompanyAds(companyName: string): Promise<{
 export async function runLinkedInSearch(
   jobId: string,
   keywordInput: string | string[],
+  options?: {
+    geo?: string;
+    businessProfile?: import("../types").BusinessProfile | null;
+    businessUrl?: string | null;
+  },
 ) {
   const keywords = parseKeywords(keywordInput);
   const now = new Date().toISOString();
+  const geo = options?.geo || "US";
+  const businessProfile = options?.businessProfile || null;
+  const businessUrl =
+    (options?.businessUrl || businessProfile?.url || "").trim() || null;
+  const liCountries = linkedInCountriesFromGeo(geo);
   const job: SearchJob = {
     id: jobId,
     keyword: keywords.join(", "),
     keywords,
     platform: "linkedin",
+    geo,
+    countries: liCountries.split(","),
+    businessUrl,
+    businessProfile,
     status: "running",
     progress: {
       stage: "searching_ads",
@@ -96,7 +112,9 @@ export async function runLinkedInSearch(
       accepted: 0,
       target: TARGET_COMPETITORS,
       rejected: 0,
-      message: "Searching LinkedIn Ad Library…",
+      message: businessProfile
+        ? `Searching LinkedIn for ${businessProfile.industry} competitors…`
+        : "Searching LinkedIn Ad Library…",
     },
     competitorIds: [],
     createdAt: now,
@@ -113,7 +131,8 @@ export async function runLinkedInSearch(
     const queries = new Set<string>(keywords);
     for (const kw of keywords) {
       try {
-        for (const q of await expandKeywordQueries(kw)) queries.add(q);
+        for (const q of await expandKeywordQueries(kw, businessProfile))
+          queries.add(q);
       } catch {
         /* seed only */
       }
@@ -132,7 +151,7 @@ export async function runLinkedInSearch(
         try {
           res = await searchLinkedInAds({
             keyword: query,
-            countries: "US,AU",
+            countries: liCountries,
             paginationToken: token,
           });
         } catch (err) {
@@ -165,7 +184,7 @@ export async function runLinkedInSearch(
           const pool = pageAds;
           let primary = pickBestLinkedInCandidate(pool);
           const signal = `${primary.title}\n${primary.body}\n${primary.fullText}`;
-          if (!hasServiceKeywordSignal(signal)) {
+          if (!hasServiceKeywordSignal(signal, businessProfile)) {
             job.progress.rejected += 1;
             continue;
           }
@@ -177,14 +196,17 @@ export async function runLinkedInSearch(
               primary,
               null,
               pool.filter((a) => a.adArchiveId !== primary.adArchiveId).slice(0, 3),
-              { relaxed: true },
+              { relaxed: true, businessProfile },
             );
           } catch {
             job.progress.rejected += 1;
             continue;
           }
 
-          if (!filter.relevant || !filter.isMarketingAgency) {
+          if (
+            !filter.relevant ||
+            (!businessProfile && !filter.isMarketingAgency)
+          ) {
             job.progress.rejected += 1;
             continue;
           }
@@ -288,34 +310,43 @@ export async function runLinkedInSearch(
   }
 }
 
-export async function runLinkedInLookup(lookupId: string, queryName: string) {
+export async function runLinkedInLookup(
+  lookupId: string,
+  queryName: string,
+  forcedCandidate?: LookupPageCandidate | null,
+) {
+  const name = forcedCandidate?.name || queryName;
   const now = new Date().toISOString();
   const job: LookupJob = {
     id: lookupId,
-    queryName,
+    queryName: name,
     platform: "linkedin",
     status: "running",
     progress: {
       stage: "fetching_ads",
-      message: `Searching LinkedIn Ad Library for "${queryName}"…`,
+      message: `Searching LinkedIn Ad Library for "${name}"…`,
       candidatesFound: 1,
       adsFetched: 0,
       pagesScanned: 0,
     },
-    selectedPage: {
-      pageId: queryName,
-      name: queryName,
+    selectedPage: forcedCandidate || {
+      pageId: name,
+      name,
       category: "LinkedIn company",
     },
-    candidates: [
-      {
-        pageId: queryName,
-        name: queryName,
-        category: "LinkedIn company",
-      } satisfies LookupPageCandidate,
-    ],
-    llmReason: "LinkedIn lookup uses company name search directly.",
-    llmConfidence: 0.7,
+    candidates: forcedCandidate
+      ? [forcedCandidate]
+      : [
+          {
+            pageId: name,
+            name,
+            category: "LinkedIn company",
+          } satisfies LookupPageCandidate,
+        ],
+    llmReason: forcedCandidate
+      ? `User selected alternate match "${name}"`
+      : "LinkedIn lookup uses company name search directly.",
+    llmConfidence: forcedCandidate ? 1 : 0.7,
     adIds: [],
     createdAt: now,
     updatedAt: now,
@@ -330,7 +361,7 @@ export async function runLinkedInLookup(lookupId: string, queryName: string) {
 
     do {
       const res = await searchLinkedInAds({
-        company: queryName,
+        company: name,
         countries: "US,AU",
         paginationToken: token,
       });
@@ -350,8 +381,8 @@ export async function runLinkedInLookup(lookupId: string, queryName: string) {
           id: uuidv4(),
           lookupId: job.id,
           adArchiveId: id,
-          pageId: mapped.pageId || queryName,
-          pageName: mapped.pageName || queryName,
+          pageId: mapped.pageId || name,
+          pageName: mapped.pageName || name,
           country: "US",
           isActive: true,
           title: sample.title,
@@ -380,6 +411,9 @@ export async function runLinkedInLookup(lookupId: string, queryName: string) {
           pageId: stored[0].pageId,
           name: stored[0].pageName,
           category: "LinkedIn advertiser",
+          raw: {
+            advertiserPageUrl: stored[0].advertiserPageUrl || null,
+          },
         };
       }
 
@@ -388,12 +422,25 @@ export async function runLinkedInLookup(lookupId: string, queryName: string) {
       saveLookupJob(job);
     } while (token && pages < MAX_LI_PAGES);
 
+    if (job.selectedPage) {
+      job.progress.message = `Fetching profile metrics for "${job.selectedPage.name}"…`;
+      saveLookupJob(job);
+      job.selectedPage = await enrichLookupPageMetrics(job.selectedPage, {
+        platform: "linkedin",
+        linkedinUrlHint:
+          job.selectedPage.raw?.advertiserPageUrl != null
+            ? String(job.selectedPage.raw.advertiserPageUrl)
+            : null,
+      });
+      saveLookupJob(job);
+    }
+
     job.status = stored.length > 0 ? "completed" : "partial";
     job.progress.stage = "done";
     job.progress.message =
       stored.length > 0
-        ? `Loaded ${stored.length} LinkedIn ads for "${queryName}".`
-        : `No LinkedIn ads found for "${queryName}".`;
+        ? `Loaded ${stored.length} LinkedIn ads for "${name}".`
+        : `No LinkedIn ads found for "${name}".`;
     saveLookupJob(job);
   } catch (err) {
     job.status = "failed";

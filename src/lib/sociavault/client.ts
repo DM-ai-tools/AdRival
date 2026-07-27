@@ -279,11 +279,16 @@ export function normalizeList<T>(value: unknown): T[] {
   if (!value) return [];
   if (Array.isArray(value)) return value as T[];
   if (typeof value === "object") {
-    const entries = Object.entries(value as Record<string, T>)
+    const record = value as Record<string, T>;
+    const numeric = Object.entries(record)
       .filter(([k]) => /^\d+$/.test(k))
       .sort((a, b) => Number(a[0]) - Number(b[0]))
       .map(([, v]) => v);
-    if (entries.length > 0) return entries;
+    if (numeric.length > 0) return numeric;
+    // Some SociaVault payloads key lists by id (creativeId / advertiser_id)
+    return Object.values(record).filter(
+      (v) => v != null && typeof v === "object",
+    ) as T[];
   }
   return [];
 }
@@ -554,12 +559,14 @@ export async function getGoogleCompanyAds(params: {
     data?: {
       ads?: GoogleAdCreative[] | Record<string, GoogleAdCreative>;
       cursor?: string | null;
+      number_of_ads_estimate?: number | string | null;
       [key: string]: unknown;
     };
   }>("/v1/scrape/google-ad-library/company-ads", {
     advertiser_id: params.advertiser_id,
     domain: params.domain,
-    region: params.region ?? "US",
+    // "all" returns creatives across regions — US-only often under-counts agencies
+    region: params.region ?? "all",
     topic: params.topic ?? "all",
     start_date: params.start_date,
     end_date: params.end_date,
@@ -578,6 +585,15 @@ export function extractGoogleCursor(
 ): string | null {
   const c = response.data?.cursor;
   return c ? String(c) : null;
+}
+
+export function extractGoogleAdsEstimate(
+  response: Awaited<ReturnType<typeof getGoogleCompanyAds>>,
+): number | null {
+  const raw = response.data?.number_of_ads_estimate;
+  if (raw == null || raw === "") return null;
+  const n = typeof raw === "number" ? raw : Number(raw);
+  return Number.isFinite(n) ? n : null;
 }
 
 export async function getGoogleAdDetails(url: string) {

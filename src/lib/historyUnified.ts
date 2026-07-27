@@ -31,9 +31,22 @@ export function listUnifiedHistory(limit = 150): UnifiedHistoryItem[] {
       updatedAt: run.updatedAt,
       count: run.competitorCount,
       countLabel: "competitors",
-      subtitle: run.keywords?.length
-        ? `${run.keywords.length} keywords`
-        : undefined,
+      subtitle: (() => {
+        const parts: string[] = [];
+        if (run.businessProfile?.businessName) {
+          parts.push(run.businessProfile.businessName);
+        } else if (run.businessUrl) {
+          try {
+            parts.push(new URL(run.businessUrl).hostname.replace(/^www\./, ""));
+          } catch {
+            parts.push(run.businessUrl);
+          }
+        }
+        if (run.keywords?.length) {
+          parts.push(`${run.keywords.length} keywords`);
+        }
+        return parts.length ? parts.join(" · ") : undefined;
+      })(),
     };
   });
 
