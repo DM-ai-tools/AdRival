@@ -70,20 +70,10 @@ export function findSafeFooterRoot($: any): any {
   return best || $();
 }
 
-/**
- * Replace competitor footer with a brand-only footer.
- * If no safe footer node exists, append a new <footer> — never empty the page body.
- */
-export function rebuildBrandFooter(
-  html: string,
+function filterFooterLinks(
   assets: BrandSiteAssets,
-  brandName: string,
   businessUrl: string,
-): { html: string; rebuilt: boolean; linkCount: number; socialCount: number } {
-  const $ = cheerio.load(html);
-  const $footer = findSafeFooterRoot($);
-
-  const year = new Date().getFullYear();
+): Array<{ label: string; href: string }> {
   const footerLinks = assets.footerLinks
     .filter((l) => {
       if (!l.href || !l.label) return false;
@@ -124,101 +114,244 @@ export function rebuildBrandFooter(
       uniqueLinks.push(l);
     }
   }
+  return uniqueLinks;
+}
 
-  const socials = assets.socialLinks
-    .filter((s) =>
-      /facebook\.com|instagram\.com|linkedin\.com|youtube\.com|youtu\.be|tiktok\.com|twitter\.com|x\.com|pinterest\.com|threads\.net/i.test(
-        s.href,
-      ),
-    )
-    .slice(0, 8);
-
-  const mid = Math.ceil(uniqueLinks.length / 2) || 0;
-  const col1 = uniqueLinks.slice(0, mid);
-  const col2 = uniqueLinks.slice(mid);
-
-  const linkList = (links: typeof uniqueLinks) =>
-    links
-      .map(
-        (l) =>
-          `<li style="margin:0 0 8px;list-style:none;"><a href="${escapeHtml(l.href)}" style="color:inherit;text-decoration:none;">${escapeHtml(l.label)}</a></li>`,
-      )
-      .join("");
-
-  const socialHtml = socials.length
-    ? `<div data-adrival-social="1" style="margin-top:18px;">
-        <div style="font-weight:600;margin-bottom:8px;">Follow us</div>
-        <div style="display:flex;flex-wrap:wrap;gap:14px;">
-          ${socials
-            .map(
-              (s) =>
-                `<a href="${escapeHtml(s.href)}" target="_blank" rel="noopener noreferrer" data-adrival-social-link="1" style="color:inherit;text-decoration:underline;">${escapeHtml(s.label)}</a>`,
-            )
-            .join("")}
-        </div>
-      </div>`
-    : "";
-
-  const contactBits: string[] = [];
-  if (assets.emails[0]) {
-    contactBits.push(
-      `<a href="mailto:${escapeHtml(assets.emails[0])}" style="color:inherit;">${escapeHtml(assets.emails[0])}</a>`,
-    );
+function setAnchorLabel($: any, $el: any, text: string): void {
+  if ($el.children().length === 0) {
+    $el.text(text);
+    return;
   }
-  if (assets.phones[0]) {
-    contactBits.push(
-      `<a href="tel:${escapeHtml(assets.phones[0])}" style="color:inherit;">${escapeHtml(assets.phones[0])}</a>`,
-    );
+  const $textChild = $el
+    .children("span, p, strong, em, label")
+    .filter((_: number, c: any) => {
+      const $c = $(c);
+      if ($c.is("svg, i, img")) return false;
+      return normalizeText($c.text()).length > 0 || $c.children().length === 0;
+    })
+    .first();
+  if ($textChild.length) {
+    $textChild.text(text);
+    return;
   }
+  let replaced = false;
+  $el.contents().each((_: number, child: any) => {
+    if (child.type === "text" && normalizeText(child.data || "").length > 0) {
+      if (!replaced) {
+        child.data = text;
+        replaced = true;
+      } else {
+        child.data = "";
+      }
+    }
+  });
+  if (!replaced) $el.prepend(text);
+}
 
-  const logoBlock = assets.logoUrl
-    ? `<a href="${escapeHtml(businessUrl)}" data-adrival-footer-logo="1" style="display:inline-block;margin-bottom:16px;"><img src="${escapeHtml(assets.logoUrl)}" alt="${escapeHtml(brandName)}" style="max-height:40px;width:auto;object-fit:contain;" /></a>`
-    : `<a href="${escapeHtml(businessUrl)}" style="font-weight:700;font-size:18px;color:inherit;text-decoration:none;display:inline-block;margin-bottom:16px;">${escapeHtml(brandName)}</a>`;
+/**
+ * Patch footer in place: keep competitor layout/columns; remap logo, links, socials.
+ * Falls back to a generic injected footer only when no safe footer root exists.
+ */
+export function rebuildBrandFooter(
+  html: string,
+  assets: BrandSiteAssets,
+  brandName: string,
+  businessUrl: string,
+  options?: { disclaimer?: string | null },
+): {
+  html: string;
+  rebuilt: boolean;
+  inPlace: boolean;
+  linkCount: number;
+  socialCount: number;
+} {
+  const $ = cheerio.load(html);
+  const $footer = findSafeFooterRoot($);
+  const uniqueLinks = filterFooterLinks(assets, businessUrl);
+  const socials = (assets.socialLinks || []).filter(
+    (s) => s.href && detectSocialNetwork(s.href, s.label),
+  );
+  const year = new Date().getFullYear();
 
-  const footerInner = `
-    <div data-adrival-brand-footer="1" style="padding:28px 20px 20px;font:14px/1.5 system-ui,sans-serif;color:inherit;">
-      ${logoBlock}
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:20px 32px;margin:8px 0 20px;">
-        ${col1.length ? `<ul style="margin:0;padding:0;">${linkList(col1)}</ul>` : ""}
-        ${col2.length ? `<ul style="margin:0;padding:0;">${linkList(col2)}</ul>` : ""}
-      </div>
-      ${contactBits.length ? `<p style="margin:0 0 12px;">${contactBits.join(" · ")}</p>` : ""}
-      ${socialHtml}
-      <p style="margin:20px 0 8px;opacity:.85;">© ${year} ${escapeHtml(brandName)}. All rights reserved.</p>
-      <p style="margin:0;font-size:12px;opacity:.7;max-width:720px;">Information on this page is general in nature. Speak with ${escapeHtml(brandName)} for advice suited to your situation.</p>
-    </div>
-  `;
-
+  // --- Preferred: in-place remap ---
   if ($footer.length) {
-    $footer.empty();
-    $footer.append(footerInner);
-  } else if ($("body").length) {
-    $("body").append(
-      `<footer role="contentinfo" data-adrival-brand-footer-root="1" style="margin-top:48px;border-top:1px solid rgba(0,0,0,.08);">${footerInner}</footer>`,
-    );
-  } else {
+    let linkCount = 0;
+    let socialCount = 0;
+
+    // Logo in footer
+    if (assets.logoUrl) {
+      $footer.find("img").each((_: number, el: any) => {
+        const $el = $(el);
+        const hay = `${$el.attr("src") || ""} ${$el.attr("alt") || ""} ${$el.attr("class") || ""}`;
+        if (!/logo|brand|wordmark/i.test(hay) && !$el.closest("a").is(".logo, [class*='logo']")) {
+          return;
+        }
+        $el.attr("src", assets.logoUrl!);
+        $el.removeAttr("srcset");
+        $el.attr("alt", brandName);
+        $el.attr("data-adrival-footer-logo", "1");
+      });
+    }
+
+    // Social anchors inside footer
+    const socialByNet = new Map<string, string>();
+    for (const s of socials) {
+      const net = detectSocialNetwork(s.href, s.label);
+      if (net && !socialByNet.has(net)) socialByNet.set(net, s.href);
+    }
+
+    $footer.find("a[href]").each((_: number, el: any) => {
+      const $el = $(el);
+      const href = ($el.attr("href") || "").trim();
+      const label = normalizeText($el.text());
+      const net = detectSocialNetwork(href, label, $el.attr("class") || "");
+      if (net) {
+        const brandHref = socialByNet.get(net);
+        if (brandHref) {
+          $el.attr("href", brandHref);
+          $el.attr("data-adrival-footer-social", net);
+          socialCount += 1;
+        } else {
+          $el.remove();
+        }
+        return;
+      }
+    });
+
+    // Non-social footer links by label / order
+    const usedLink = new Set<number>();
+    const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+    $footer.find("a[href]").each((_: number, el: any) => {
+      const $el = $(el);
+      if ($el.attr("data-adrival-footer-social")) return;
+      const href = ($el.attr("href") || "").trim();
+      if (!href || /^mailto:|^tel:|^#|^javascript:/i.test(href)) return;
+      if (detectSocialNetwork(href, normalizeText($el.text()))) return;
+
+      const label = normalizeText($el.text());
+      let idx = uniqueLinks.findIndex(
+        (l, i) => !usedLink.has(i) && norm(l.label) === norm(label),
+      );
+      if (idx < 0) {
+        idx = uniqueLinks.findIndex((l, i) => {
+          if (usedLink.has(i)) return false;
+          const a = norm(l.label);
+          const b = norm(label);
+          return a.length >= 3 && b.length >= 3 && (a.includes(b) || b.includes(a));
+        });
+      }
+      if (idx < 0) {
+        idx = uniqueLinks.findIndex((_, i) => !usedLink.has(i));
+      }
+      if (idx < 0) {
+        // No inventory left — point remaining competitor-host links home
+        try {
+          const host = new URL(href).hostname.replace(/^www\./i, "");
+          // leave external non-competitor alone if we can't tell
+          void host;
+          $el.attr("href", businessUrl);
+        } catch {
+          $el.attr("href", businessUrl);
+        }
+        return;
+      }
+      usedLink.add(idx);
+      const link = uniqueLinks[idx];
+      $el.attr("href", link.href);
+      if (link.label) setAnchorLabel($, $el, link.label);
+      $el.attr("data-adrival-footer-link", "1");
+      linkCount += 1;
+    });
+
+    // Disclaimer / copyright blurb — update obvious copyright lines if provided
+    if (options?.disclaimer) {
+      $footer
+        .find("p, small, span, div")
+        .filter((_: number, el: any) => {
+          const t = normalizeText($(el).text());
+          return /©|copyright|all rights reserved/i.test(t) && t.length < 280;
+        })
+        .first()
+        .each((_: number, el: any) => {
+          $(el).text(options.disclaimer!);
+        });
+    } else {
+      $footer
+        .find("p, small, span")
+        .filter((_: number, el: any) => {
+          const t = normalizeText($(el).text());
+          return /©|copyright|all rights reserved/i.test(t) && t.length < 200;
+        })
+        .first()
+        .each((_: number, el: any) => {
+          $(el).text(`© ${year} ${brandName}. All rights reserved.`);
+        });
+    }
+
+    $footer.attr("data-adrival-brand-footer", "1");
+
+    // Strip competitor socials left outside the remapped footer
+    $("a[href]").each((_: number, el: any) => {
+      const $el = $(el);
+      if ($el.closest("[data-adrival-brand-footer]").length) return;
+      const href = $el.attr("href") || "";
+      const net = detectSocialNetwork(href, normalizeText($el.text()));
+      if (!net) return;
+      if (socialByNet.has(net)) {
+        $el.attr("href", socialByNet.get(net)!);
+      } else {
+        $el.remove();
+      }
+    });
+
     return {
-      html,
-      rebuilt: false,
-      linkCount: uniqueLinks.length,
-      socialCount: socials.length,
+      html: $.html(),
+      rebuilt: true,
+      inPlace: true,
+      linkCount,
+      socialCount,
     };
   }
 
-  $("a[href]").each((_: number, el: any) => {
-    const $el = $(el);
-    if ($el.closest("[data-adrival-brand-footer]").length) return;
-    const href = $el.attr("href") || "";
-    const label = normalizeText($el.text());
-    const className = `${$el.attr("class") || ""} ${$el.parent().attr("class") || ""}`;
-    if (detectSocialNetwork(href, label, className)) {
-      $el.remove();
-    }
-  });
+  // --- Fallback: inject generic footer ---
+  const linkHtml = uniqueLinks
+    .map(
+      (l) =>
+        `<a href="${escapeHtml(l.href)}" style="color:inherit;text-decoration:underline;margin:0 8px 6px 0;display:inline-block;">${escapeHtml(l.label)}</a>`,
+    )
+    .join("");
+  const socialHtml = socials
+    .map(
+      (s) =>
+        `<a href="${escapeHtml(s.href)}" style="color:inherit;margin-right:10px;text-decoration:none;">${escapeHtml(s.label)}</a>`,
+    )
+    .join("");
+  const disclaimer =
+    options?.disclaimer?.trim() ||
+    `© ${year} ${escapeHtml(brandName)}. All rights reserved.`;
+
+  const footerInner = `
+    <div data-adrival-brand-footer="1" style="padding:28px 20px;font-family:system-ui,sans-serif;font-size:14px;line-height:1.5;border-top:1px solid rgba(0,0,0,.08);">
+      ${
+        assets.logoUrl
+          ? `<div style="margin-bottom:14px;"><img src="${escapeHtml(assets.logoUrl)}" alt="${escapeHtml(brandName)}" style="max-height:40px;width:auto;" /></div>`
+          : `<div style="font-weight:700;margin-bottom:12px;">${escapeHtml(brandName)}</div>`
+      }
+      <div style="display:flex;flex-wrap:wrap;gap:4px 0;margin-bottom:12px;">${linkHtml}</div>
+      ${socialHtml ? `<div style="margin-bottom:12px;">${socialHtml}</div>` : ""}
+      <div style="opacity:.75;font-size:12px;">${escapeHtml(disclaimer)}</div>
+    </div>`;
+
+  if ($("body").length) {
+    $("body").append(
+      `<footer role="contentinfo" data-adrival-brand-footer-root="1">${footerInner}</footer>`,
+    );
+  }
 
   return {
     html: $.html(),
     rebuilt: true,
+    inPlace: false,
     linkCount: uniqueLinks.length,
     socialCount: socials.length,
   };

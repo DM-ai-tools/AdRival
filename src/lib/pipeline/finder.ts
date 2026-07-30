@@ -14,22 +14,26 @@ import {
   expandKeywordQueries,
   hasAgencyPositioningSignal,
   hasServiceKeywordSignal,
+  serviceKeywordOverlapScore,
   type AdFilterResult,
 } from "../openai/analyzer";
 import { runBrandReview, newId } from "./brandReview";
-import { markPageSeen, saveCompetitor, saveJob } from "../db";
+import { markPageSeen, saveCompetitor, saveJob, updateCompetitor } from "../db";
+import {
+  cheapLocationFromText,
+  locationRankScore,
+  resolveAndMatchCompetitorLocation,
+} from "./competitorLocation";
+import type { SearchDispatchOptions } from "./searchOptions";
 import {
   MAX_PAGES_PER_QUERY,
   MAX_SEARCH_PAGES,
-  MIN_ACTIVE_ADS,
-  MIN_AD_DURATION_DAYS,
   RELAXED_MIN_ACTIVE_ADS,
   RELAXED_MIN_AD_DURATION_DAYS,
   SEARCH_COUNTRIES,
   TARGET_COMPETITORS,
   type AdCandidate,
   type BrandReview,
-  type BusinessProfile,
   type CompetitorRecord,
   type JobProgress,
   type SearchCountry,
@@ -63,47 +67,38 @@ function looksLikeEnglish(text: string): boolean {
 }
 
 function currentThresholds(acceptedCount: number, platform: AdPlatform) {
-  // Instagram (+ other non-Facebook Meta): fixed platform thresholds
+  // Keep LLM strict early; only relax after we have a solid local/relevant core
+  const relaxedLlm = acceptedCount >= 5;
+
   if (platform !== "facebook") {
     const t = getPlatformAdThresholds(platform);
+    if (platform === "instagram") {
+      return {
+        minDays: RELAXED_MIN_AD_DURATION_DAYS,
+        minActiveAds: RELAXED_MIN_ACTIVE_ADS,
+        requireDaysGreaterThan: true,
+        skipDuration: false,
+        relaxedLlm,
+        requireLanding: acceptedCount < 5,
+      };
+    }
     return {
       minDays: t.minDaysExclusive,
-      minActiveAds: t.minActiveAds,
+      minActiveAds: Math.min(t.minActiveAds, RELAXED_MIN_ACTIVE_ADS),
       requireDaysGreaterThan: t.requireDaysGreaterThan,
       skipDuration: t.skipDuration,
-      relaxedLlm: acceptedCount >= 5,
-      requireLanding: acceptedCount < 8,
+      relaxedLlm,
+      requireLanding: acceptedCount < 5,
     };
   }
 
-  // Progressive loosen as we struggle to fill the roster (Facebook only)
-  if (acceptedCount >= 8) {
-    return {
-      minDays: RELAXED_MIN_AD_DURATION_DAYS,
-      minActiveAds: RELAXED_MIN_ACTIVE_ADS,
-      requireDaysGreaterThan: false,
-      skipDuration: false,
-      relaxedLlm: true,
-      requireLanding: false,
-    };
-  }
-  if (acceptedCount >= 5) {
-    return {
-      minDays: Math.min(MIN_AD_DURATION_DAYS, 7),
-      minActiveAds: Math.min(MIN_ACTIVE_ADS, 5),
-      requireDaysGreaterThan: false,
-      skipDuration: false,
-      relaxedLlm: true,
-      requireLanding: true,
-    };
-  }
   return {
-    minDays: MIN_AD_DURATION_DAYS,
-    minActiveAds: MIN_ACTIVE_ADS,
+    minDays: RELAXED_MIN_AD_DURATION_DAYS,
+    minActiveAds: RELAXED_MIN_ACTIVE_ADS,
     requireDaysGreaterThan: false,
     skipDuration: false,
-    relaxedLlm: false,
-    requireLanding: true,
+    relaxedLlm,
+    requireLanding: acceptedCount < 3,
   };
 }
 
@@ -197,11 +192,54 @@ function toCandidate(
   };
 }
 
-/** Prefer the richest creative that still has a real landing page URL. */
-function pickSampleAd(ads: AdCandidate[]): AdCandidate | null {
-  const withLp = ads.filter((a) => isLandingPageUrl(a.landingPageUrl));
-  if (withLp.length === 0) return null;
-  return richestAd(withLp);
+/** Prefer creatives with keyword/service overlap + local geo mentions, then richest copy. */
+function pickSampleAd(
+  ads: AdCandidate[],
+  opts?: {
+    requireLanding?: boolean;
+    signalOptions?: Parameters<typeof serviceKeywordOverlapScore>[1];
+    targets?: SearchDispatchOptions["targetLocations"];
+    geoMode?: SearchDispatchOptions["geoMode"];
+  },
+): AdCandidate | null {
+  const pool = opts?.requireLanding === false
+    ? ads
+    : ads.filter((a) => isLandingPageUrl(a.landingPageUrl));
+  if (pool.length === 0) return null;
+
+  const targets = opts?.targets || [];
+  const geoMode = opts?.geoMode || "countrywide";
+
+  return [...pool].sort((a, b) => {
+    const textA = `${a.title}\n${a.body}\n${a.fullText}`;
+    const textB = `${b.title}\n${b.body}\n${b.fullText}`;
+    const kwA = serviceKeywordOverlapScore(textA, opts?.signalOptions);
+    const kwB = serviceKeywordOverlapScore(textB, opts?.signalOptions);
+    const geoA = locationRankScore(
+      cheapLocationFromText({
+        pageName: a.pageName,
+        adText: textA,
+        landingUrl: a.landingPageUrl,
+        targets,
+        geoMode: geoMode || "countrywide",
+      }).locationStatus,
+    );
+    const geoB = locationRankScore(
+      cheapLocationFromText({
+        pageName: b.pageName,
+        adText: textB,
+        landingUrl: b.landingPageUrl,
+        targets,
+        geoMode: geoMode || "countrywide",
+      }).locationStatus,
+    );
+    return (
+      kwB - kwA ||
+      geoB - geoA ||
+      (b.fullText?.length || 0) - (a.fullText?.length || 0) ||
+      (b.body?.length || 0) - (a.body?.length || 0)
+    );
+  })[0];
 }
 
 function richestAd(ads: AdCandidate[]): AdCandidate {
@@ -259,11 +297,7 @@ export async function runCompetitorSearch(
   jobId: string,
   keywordInput: string | string[],
   platform: AdPlatform = "facebook",
-  options?: {
-    geo?: string;
-    businessProfile?: BusinessProfile | null;
-    businessUrl?: string | null;
-  },
+  options?: SearchDispatchOptions,
 ) {
   const keywords = parseKeywords(keywordInput);
   const primaryKeyword = keywords[0] || String(keywordInput);
@@ -272,6 +306,16 @@ export async function runCompetitorSearch(
   const businessProfile = options?.businessProfile || null;
   const businessUrl =
     (options?.businessUrl || businessProfile?.url || "").trim() || null;
+  const geoMode = options?.geoMode || "countrywide";
+  const targetLocations = options?.targetLocations || [];
+  const selectedCategory = options?.selectedCategory || null;
+  const preferLocalGeo =
+    geoMode === "company_locations" || geoMode === "keyword_location";
+  const signalOptions = {
+    businessProfile,
+    searchKeywords: keywords,
+    selectedCategory,
+  };
   const now = new Date().toISOString();
   const job: SearchJob = {
     id: jobId,
@@ -279,6 +323,10 @@ export async function runCompetitorSearch(
     keywords,
     platform,
     geo,
+    geoMode,
+    selectedCategory,
+    targetLocations,
+    keywordLocation: options?.keywordLocation || null,
     countries,
     businessUrl,
     businessProfile,
@@ -325,8 +373,12 @@ export async function runCompetitorSearch(
     activeCount: number;
     brand?: BrandReview;
     score: number;
+    reason: "lowActiveAds" | "geoMismatch";
   };
   const nearMisses: NearMiss[] = [];
+
+  const matchedLocalCount = () =>
+    accepted.filter((c) => c.locationStatus === "matched").length;
 
   const bumpReason = (
     key: keyof NonNullable<JobProgress["rejectReasons"]>,
@@ -357,33 +409,26 @@ export async function runCompetitorSearch(
     brandInput?: BrandReview,
     countryFallback?: SearchCountry,
   ) => {
-    let brand = brandInput;
-    if (!brand) {
-      setProgress(job, {
-        stage: "brand_review",
-        message: `Brand review for ${primary.pageName}…`,
-      });
-      try {
-        brand = await runBrandReview({
-          pageId,
-          pageName: primary.pageName,
-          pageProfileUri: primary.pageProfileUri,
-        });
-      } catch (err) {
-        brand = {
-          facebookUrl: primary.pageProfileUri || null,
-        };
-        setProgress(job, {
-          message: `Partial brand review for ${primary.pageName}: ${(err as Error).message}`,
-        });
-      }
-    }
+    // 1) Cheap geo (no network) — provisional label only
+    const provisional = cheapLocationFromText({
+      pageName: primary.pageName,
+      adText: primary.fullText || primary.body,
+      landingUrl: primary.landingPageUrl,
+      targets: targetLocations,
+      geoMode,
+    });
 
     const sampleBody =
       primary.body ||
       primary.fullText ||
       extras.map((e) => e.body).find(Boolean) ||
       "";
+
+    // 2) Save immediately with minimal brand so the roster fills fast
+    let brand: BrandReview = brandInput || {
+      facebookUrl: primary.pageProfileUri || null,
+      website: primary.landingPageUrl || null,
+    };
 
     const competitor: CompetitorRecord = {
       id: newId(),
@@ -392,6 +437,12 @@ export async function runCompetitorSearch(
       pageName: primary.pageName,
       country: primary.country || countryFallback || "US",
       platform,
+      locationLabel: provisional.locationLabel,
+      locationCity: provisional.locationCity,
+      locationSuburb: provisional.locationSuburb,
+      locationCountry: provisional.locationCountry,
+      locationStatus: provisional.locationStatus,
+      locationSource: provisional.locationSource,
       activeAdsCount: activeCount,
       services: filter.services as ServiceLabel[],
       sampleAd: {
@@ -420,7 +471,81 @@ export async function runCompetitorSearch(
 
     setProgress(job, {
       accepted: accepted.length,
-      message: `Accepted ${primary.pageName} (${accepted.length}/${TARGET_COMPETITORS}) — services: ${filter.services.join(", ")}`,
+      message: `Accepted ${primary.pageName} (${accepted.length}/${TARGET_COMPETITORS}) — location pending…`,
+    });
+    saveJob(job);
+
+    // 3) Enrich brand + full location after accept (never discard the row)
+    setProgress(job, {
+      stage: "brand_review",
+      message: `Enriching brand for ${primary.pageName}…`,
+    });
+    try {
+      brand = await runBrandReview({
+        pageId,
+        pageName: primary.pageName,
+        pageProfileUri: primary.pageProfileUri,
+      });
+    } catch (err) {
+      setProgress(job, {
+        message: `Partial brand review for ${primary.pageName}: ${(err as Error).message}`,
+      });
+    }
+
+    setProgress(job, {
+      stage: "location_check",
+      message: `Resolving location for ${primary.pageName}…`,
+    });
+    let loc = provisional;
+    try {
+      const locResult = await resolveAndMatchCompetitorLocation({
+        pageName: primary.pageName,
+        website: brand.website,
+        facebookUrl: brand.facebookUrl || primary.pageProfileUri,
+        linkedinUrl: brand.linkedinUrl,
+        geoMode,
+        targetLocations,
+        provisional,
+        skipPerplexityIfResolved: provisional.locationStatus === "matched",
+      });
+      loc = locResult.location;
+    } catch (err) {
+      console.warn("[finder] location enrich failed", err);
+    }
+
+    const enriched: CompetitorRecord = {
+      ...competitor,
+      brand,
+      locationLabel: loc.locationLabel,
+      locationCity: loc.locationCity,
+      locationSuburb: loc.locationSuburb,
+      locationCountry: loc.locationCountry,
+      locationStatus: loc.locationStatus,
+      locationSource: loc.locationSource,
+    };
+    updateCompetitor(competitor.id, {
+      brand,
+      locationLabel: loc.locationLabel,
+      locationCity: loc.locationCity,
+      locationSuburb: loc.locationSuburb,
+      locationCountry: loc.locationCountry,
+      locationStatus: loc.locationStatus,
+      locationSource: loc.locationSource,
+    });
+    const idx = accepted.findIndex((c) => c.id === competitor.id);
+    if (idx >= 0) accepted[idx] = enriched;
+
+    const locNote =
+      loc.locationStatus === "unknown"
+        ? " · location unknown"
+        : loc.locationStatus === "mismatch"
+          ? ` · location mismatch${loc.locationLabel ? ` (${loc.locationLabel})` : ""}`
+          : loc.locationLabel
+            ? ` · ${loc.locationLabel}`
+            : "";
+    setProgress(job, {
+      accepted: accepted.length,
+      message: `Accepted ${primary.pageName} (${accepted.length}/${TARGET_COMPETITORS})${locNote} — services: ${filter.services.join(", ")}`,
     });
   };
 
@@ -429,16 +554,35 @@ export async function runCompetitorSearch(
     for (const kw of keywords.length ? keywords : [primaryKeyword]) {
       querySet.add(kw);
       try {
-            const expanded = await expandKeywordQueries(kw, businessProfile);
+        const expanded = await expandKeywordQueries(kw, businessProfile, {
+          geoMode,
+          targetLocations,
+          selectedCategory,
+        });
         for (const q of expanded) querySet.add(q);
       } catch {
         // keep seed keyword
       }
     }
-    const queries = Array.from(querySet).slice(0, 16);
+    // Seed geo-qualified variants even if expansion failed
+    if (preferLocalGeo && targetLocations.length) {
+      for (const loc of targetLocations.slice(0, 4)) {
+        const place = loc.suburb || loc.city || loc.label;
+        if (!place) continue;
+        for (const kw of keywords.slice(0, 4)) {
+          querySet.add(`${kw} ${place}`);
+        }
+        if (selectedCategory?.label) {
+          querySet.add(`${selectedCategory.label} ${place}`);
+        }
+      }
+    }
+    const queries = Array.from(querySet).slice(0, 28);
     setProgress(job, {
       stage: "searching_ads",
-      message: `Searching ${platform} Ad Library with ${queries.length} queries…`,
+      message: `Searching ${platform} Ad Library with ${queries.length} queries${
+        preferLocalGeo ? " (geo-prefer)" : ""
+      }…`,
     });
 
     let pageBudget = 0;
@@ -531,7 +675,12 @@ export async function runCompetitorSearch(
               bumpReason("noLandingPage");
               continue;
             }
-            if (!hasServiceKeywordSignal(signalText, businessProfile)) {
+            if (
+              !hasServiceKeywordSignal(signalText, {
+                ...signalOptions,
+                softPass: thresholds.relaxedLlm,
+              })
+            ) {
               bumpReason("noServiceSignal");
               continue;
             }
@@ -540,7 +689,28 @@ export async function runCompetitorSearch(
             byPage.set(candidate.pageId, list);
           }
 
-          for (const [pageId, pageAds] of byPage) {
+          // Analyze geo-local + keyword-strong pages first
+          const pageEntries = Array.from(byPage.entries()).sort((a, b) => {
+            const scorePage = (pageAds: AdCandidate[]) => {
+              const blob = pageAds
+                .map((x) => `${x.pageName}\n${x.title}\n${x.body}\n${x.fullText}`)
+                .join("\n");
+              const kw = serviceKeywordOverlapScore(blob, signalOptions);
+              const geo = locationRankScore(
+                cheapLocationFromText({
+                  pageName: pageAds[0]?.pageName,
+                  adText: blob,
+                  landingUrl: pageAds[0]?.landingPageUrl,
+                  targets: targetLocations,
+                  geoMode,
+                }).locationStatus,
+              );
+              return kw * 2 + geo;
+            };
+            return scorePage(b[1]) - scorePage(a[1]);
+          });
+
+          for (const [pageId, pageAds] of pageEntries) {
             if (accepted.length >= TARGET_COMPETITORS) break outer;
             if (
               seen.has(pageId) ||
@@ -553,7 +723,12 @@ export async function runCompetitorSearch(
             analyzedPages.add(pageId);
             const thr = currentThresholds(accepted.length, platform);
             const primary =
-              pickSampleAd(pageAds) ||
+              pickSampleAd(pageAds, {
+                requireLanding: thr.requireLanding,
+                signalOptions,
+                targets: targetLocations,
+                geoMode,
+              }) ||
               (!thr.requireLanding ? richestAd(pageAds) : null);
             if (!primary) {
               bumpReason("noLandingPage");
@@ -597,8 +772,13 @@ export async function runCompetitorSearch(
                 primaryKeyword,
                 primary,
                 primary.pageCategories?.[0] ?? null,
-                extras,
-                { relaxed: thr.relaxedLlm, businessProfile },
+                extras.slice(0, 5),
+                {
+                  relaxed: thr.relaxedLlm,
+                  businessProfile,
+                  searchKeywords: keywords,
+                  selectedCategory,
+                },
               );
             } catch (err) {
               setProgress(job, {
@@ -629,6 +809,32 @@ export async function runCompetitorSearch(
               continue;
             }
 
+            const cheapGeo = cheapLocationFromText({
+              pageName: primary.pageName,
+              adText: pageText,
+              landingUrl: primary.landingPageUrl,
+              targets: targetLocations,
+              geoMode,
+            });
+
+            // Prefer locals: hold clear geo mismatches until the fill pass
+            if (preferLocalGeo && cheapGeo.locationStatus === "mismatch") {
+              nearMisses.push({
+                pageId,
+                primary,
+                extras,
+                filter,
+                activeCount: 0,
+                score:
+                  filter.relevanceScore +
+                  locationRankScore(cheapGeo.locationStatus),
+                reason: "geoMismatch",
+              });
+              setProgress(job, {
+                message: `Holding ${primary.pageName}: relevant but outside target geo (${cheapGeo.locationLabel || "other city"}) — seeking locals first`,
+              });
+              continue;
+            }
             setProgress(job, {
               stage: "counting_ads",
               message: `Checking active ads for ${primary.pageName}…`,
@@ -652,15 +858,23 @@ export async function runCompetitorSearch(
                 : activeCount >= thr.minActiveAds;
 
             if (!adsOk) {
-              // Facebook only: queue confirmed agencies with low ad volume for fill
-              if (platform === "facebook" && activeCount > 0) {
+              // Queue relevant rivals with low ad volume for fill (prefer locals in sort)
+              if (activeCount > 0) {
                 nearMisses.push({
                   pageId,
                   primary,
                   extras,
                   filter,
                   activeCount,
-                  score: filter.relevanceScore + activeCount / 100,
+                  score:
+                    filter.relevanceScore +
+                    activeCount / 100 +
+                    locationRankScore(cheapGeo.locationStatus) +
+                    serviceKeywordOverlapScore(
+                      `${primary.title}\n${primary.body}\n${primary.fullText}`,
+                      signalOptions,
+                    ),
+                  reason: "lowActiveAds",
                 });
               } else {
                 rejectedPages.add(pageId);
@@ -690,35 +904,46 @@ export async function runCompetitorSearch(
       } // country
     } // query
 
-    // Fill remaining slots only from confirmed marketing agencies held for low ad volume (Facebook)
-    if (
-      platform === "facebook" &&
-      accepted.length < TARGET_COMPETITORS &&
-      nearMisses.length > 0
-    ) {
+    // Fill remaining slots: locals + keyword-strong first; geo mismatches last
+    if (accepted.length < TARGET_COMPETITORS && nearMisses.length > 0) {
       setProgress(job, {
         stage: "filling_quota",
-        message: `Filling remaining slots from ${nearMisses.length} confirmed agencies…`,
+        message: `Filling remaining slots from ${nearMisses.length} held candidates (prefer geo-local)…`,
       });
 
-      nearMisses.sort((a, b) => b.score - a.score);
+      const fillFrom = async (pool: NearMiss[]) => {
+        const ranked = [...pool].sort((a, b) => b.score - a.score);
+        for (const miss of ranked) {
+          if (accepted.length >= TARGET_COMPETITORS) break;
+          if (seen.has(miss.pageId) || rejectedPages.has(miss.pageId)) continue;
+          if (!miss.filter.relevant) continue;
+          if (!businessProfile && !miss.filter.isMarketingAgency) continue;
 
-      for (const miss of nearMisses) {
-        if (accepted.length >= TARGET_COMPETITORS) break;
-        if (seen.has(miss.pageId) || rejectedPages.has(miss.pageId)) continue;
-        if (!miss.filter.isMarketingAgency || !miss.filter.relevant) continue;
+          let activeCount = Math.max(miss.activeCount, 1);
+          if (miss.activeCount <= 0) {
+            try {
+              activeCount = await getActiveAdsCount(miss.pageId);
+            } catch {
+              activeCount = 1;
+            }
+            if (activeCount <= 0) continue;
+          }
 
-        const activeCount = Math.max(miss.activeCount, 1);
+          await acceptCompetitor(
+            miss.pageId,
+            miss.primary,
+            miss.extras,
+            miss.filter,
+            activeCount,
+            undefined,
+            miss.primary.country as SearchCountry | undefined,
+          );
+        }
+      };
 
-        await acceptCompetitor(
-          miss.pageId,
-          miss.primary,
-          miss.extras,
-          miss.filter,
-          activeCount,
-          undefined,
-          miss.primary.country as SearchCountry | undefined,
-        );
+      await fillFrom(nearMisses.filter((m) => m.reason !== "geoMismatch"));
+      if (accepted.length < TARGET_COMPETITORS) {
+        await fillFrom(nearMisses.filter((m) => m.reason === "geoMismatch"));
       }
     }
 
@@ -729,7 +954,11 @@ export async function runCompetitorSearch(
           ...job.progress,
           stage: "done",
           accepted: accepted.length,
-          message: `Found ${accepted.length} competitors.`,
+          message: `Found ${accepted.length} competitors${
+            preferLocalGeo && matchedLocalCount()
+              ? ` (${matchedLocalCount()} geo-matched)`
+              : ""
+          }.`,
         },
       });
     } else {

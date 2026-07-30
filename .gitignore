@@ -39,6 +39,9 @@ yarn-error.log*
 /data
 !/data/.gitkeep
 
+# generated landing-page images (Runway)
+/public/generated
+
 # typescript
 *.tsbuildinfo
 

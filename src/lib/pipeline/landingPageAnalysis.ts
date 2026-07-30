@@ -9,6 +9,7 @@ import type {
 import {
   getCompetitor,
   getLookupAd,
+  getLookupAds,
   updateCompetitor,
   updateLookupAd,
 } from "../db";
@@ -21,6 +22,10 @@ import {
   getAnthropicModel,
 } from "../anthropic/client";
 import { fetchRawLandingHtml, normalizeLandingUrl } from "./htmlFetch";
+import {
+  collectSameLandingPageAds,
+  collectSameLandingPageAdsFromLookup,
+} from "./sameLandingPageAds";
 
 const MAX_TEXT_CHARS = 22_000;
 
@@ -699,6 +704,19 @@ export async function analyzeLookupAdLandingPage(
       adBody: ad.body,
     });
 
+    let sameLandingPageAds = null;
+    try {
+      const siblings = getLookupAds(ad.lookupId);
+      sameLandingPageAds = await collectSameLandingPageAdsFromLookup({
+        ad,
+        siblings,
+        analyzedUrl: page.finalUrl,
+        pageOffer: llm.offer?.primaryOffer,
+      });
+    } catch (err) {
+      console.warn("[page-analysis] same-LP ads (lookup) failed", err);
+    }
+
     const analysis: LandingPageOfferAnalysis = {
       status: "completed",
       analyzedUrl: page.finalUrl,
@@ -716,6 +734,7 @@ export async function analyzeLookupAdLandingPage(
       ],
       summary: llm.summary ?? null,
       error: null,
+      sameLandingPageAds,
     };
 
     const updated = updateLookupAd(adId, { pageAnalysis: analysis });
@@ -806,6 +825,17 @@ export async function analyzeCompetitorLandingPage(
       platform: String(competitor.platform || "facebook"),
     });
 
+    let sameLandingPageAds = null;
+    try {
+      sameLandingPageAds = await collectSameLandingPageAds({
+        competitor,
+        analyzedUrl: page.finalUrl,
+        pageOffer: llm.offer?.primaryOffer,
+      });
+    } catch (err) {
+      console.warn("[page-analysis] same-LP ads failed", err);
+    }
+
     const analysis: LandingPageOfferAnalysis = {
       status: "completed",
       analyzedUrl: page.finalUrl,
@@ -823,6 +853,7 @@ export async function analyzeCompetitorLandingPage(
       ],
       summary: llm.summary ?? null,
       error: null,
+      sameLandingPageAds,
     };
 
     const updated = updateCompetitor(competitorId, { pageAnalysis: analysis });

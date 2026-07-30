@@ -4,6 +4,7 @@ import { buildColorMap } from "./brandTokens";
 import type { ArchivedPage } from "./capturePage";
 import { detectSocialNetwork } from "../brandAssets";
 import { replaceColorEverywhere } from "./colorReplace";
+import { injectBrandColorOverlay } from "../brandColorOverlay";
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -26,6 +27,7 @@ export function applyBrandDeterministic(input: {
     fonts: 0,
     links: 0,
     socials: 0,
+    images: 0,
   };
 
   let html = input.html;
@@ -78,7 +80,10 @@ export function applyBrandDeterministic(input: {
   // Fonts: swap font-family declarations + inject @font-face stack hint
   if (input.brand.fonts[0]) {
     const family = input.brand.fonts[0];
+    const heading =
+      input.brand.design?.typography?.fontFamilies?.heading || family;
     const stack = `"${family}", system-ui, -apple-system, Segoe UI, Roboto, sans-serif`;
+    const headingStack = `"${heading}", ${stack}`;
     $("style").each((_, el) => {
       const css = $(el).html() || "";
       const next = css.replace(
@@ -98,10 +103,78 @@ export function applyBrandDeterministic(input: {
       );
       stats.fonts += 1;
     });
-    // Inject brand font preference
+    // Inject brand font preference + Firecrawl button/radius tokens + Google Fonts
+    const radius =
+      input.brand.design?.components?.buttonPrimary?.borderRadius ||
+      input.brand.design?.spacing?.borderRadius ||
+      input.brand.borderRadii[0] ||
+      null;
+    const btnBg =
+      input.brand.design?.components?.buttonPrimary?.background ||
+      input.brand.colors.accent ||
+      input.brand.colors.primary;
+    const btnFg =
+      input.brand.design?.components?.buttonPrimary?.textColor || "#FFFFFF";
+    const btnSecFg =
+      input.brand.design?.components?.buttonSecondary?.textColor ||
+      input.brand.colors.accent ||
+      input.brand.colors.primary;
+    const btnSecBorder =
+      input.brand.design?.components?.buttonSecondary?.borderColor ||
+      btnSecFg;
+
+    const radiusCss = radius
+      ? `button,.btn,a.btn,.button,[class*='btn'],[class*='cta']{border-radius:${radius}!important}`
+      : "";
+    const btnCss = `button.btn-primary,.btn-primary,a.btn-primary,[class*='btn-primary'],[class*='cta-primary']{background:${btnBg}!important;color:${btnFg}!important;border-color:${btnBg}!important}
+button.btn-secondary,.btn-secondary,a.btn-secondary,[class*='btn-secondary'],[class*='cta-secondary']{color:${btnSecFg}!important;border-color:${btnSecBorder}!important}`;
+
+    const fontFamilies = Array.from(
+      new Set(
+        [family, heading, ...(input.brand.fonts || [])].filter(Boolean),
+      ),
+    ).slice(0, 4);
+    const googleFonts = fontFamilies
+      .filter((f) => !/^(arial|helvetica|system-ui|sans-serif|serif|roboto|georgia|times)/i.test(f))
+      .map((f) => f.replace(/\s+/g, "+"))
+      .join("&family=");
+    const fontLink = googleFonts
+      ? `<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=${googleFonts}:wght@400;500;600;700&display=swap" rel="stylesheet">`
+      : "";
+
+    $("head").append(fontLink);
     $("head").append(
-      `<style id="adrival-font-swap">html,body,button,input,textarea,select{font-family:${stack}!important}</style>`,
+      `<style id="adrival-font-swap">html,body,button,input,textarea,select{font-family:${stack}!important}h1,h2,h3,h4,h5,h6{font-family:${headingStack}!important}${radiusCss}${btnCss}</style>`,
     );
+  } else if (
+    input.brand.design?.spacing?.borderRadius ||
+    input.brand.design?.components?.buttonPrimary
+  ) {
+    const radius =
+      input.brand.design?.components?.buttonPrimary?.borderRadius ||
+      input.brand.design?.spacing?.borderRadius ||
+      null;
+    const btnBg =
+      input.brand.design?.components?.buttonPrimary?.background ||
+      input.brand.colors.accent;
+    const btnFg =
+      input.brand.design?.components?.buttonPrimary?.textColor || "#FFFFFF";
+    const parts: string[] = [];
+    if (radius) {
+      parts.push(
+        `button,.btn,a.btn,.button,[class*='btn'],[class*='cta']{border-radius:${radius}!important}`,
+      );
+    }
+    if (btnBg) {
+      parts.push(
+        `button.btn-primary,.btn-primary,a.btn-primary,[class*='btn-primary']{background:${btnBg}!important;color:${btnFg}!important}`,
+      );
+    }
+    if (parts.length) {
+      $("head").append(
+        `<style id="adrival-brand-components">${parts.join("")}</style>`,
+      );
+    }
   }
 
   // Logo: replace src only — preserve width/height/style
@@ -138,6 +211,106 @@ export function applyBrandDeterministic(input: {
           stats.logos += 1;
         });
     }
+    // Inject logo if none found
+    if (logoHits === 0 && stats.logos === 0) {
+      const $header = $(
+        "header, [role='banner'], .navbar, .site-header, .masthead, nav",
+      ).first();
+      if ($header.length) {
+        $header.prepend(
+          `<a href="${input.businessUrl}" data-adrival-logo="1" style="display:inline-flex;align-items:center;padding:8px 12px;"><img src="${input.brand.logoUrl}" alt="${input.brandName}" style="max-height:48px;width:auto;object-fit:contain;" /></a>`,
+        );
+        stats.logos += 1;
+      }
+    }
+  }
+
+  // Hero / large content image swaps from brand assets (never icons/footer)
+  // Skip slots reserved for Runway generation (`data-adrival-gen-id`).
+  const brandImages = input.brand.siteAssets?.images || [];
+  const heroPool = [
+    ...(input.brand.siteAssets?.ogImageUrl
+      ? [{ src: input.brand.siteAssets.ogImageUrl, kind: "og" as const }]
+      : []),
+    ...brandImages.filter((i) => i.kind === "hero" || i.kind === "og"),
+  ];
+  const contentPool = brandImages.filter((i) => i.kind === "content");
+  const pickHero = heroPool[0]?.src || contentPool[0]?.src || null;
+  const pickContent = contentPool[0]?.src || heroPool[0]?.src || null;
+
+  if (pickHero || pickContent) {
+    let heroSwapped = false;
+    $("img").each((_, el) => {
+      if (stats.images >= 4) return;
+      const $el = $(el);
+      if ($el.attr("data-adrival-logo")) return;
+      if ($el.attr("data-adrival-gen-id")) return;
+      const src = $el.attr("src") || "";
+      const alt = $el.attr("alt") || "";
+      const className = `${$el.attr("class") || ""} ${$el.parent().attr("class") || ""}`;
+      const hay = `${src} ${alt} ${className}`.toLowerCase();
+      if (
+        /icon|sprite|bullet|check|tick|star|badge|payment|flag|social|emoji|avatar|pixel|tracking|logo|wordmark/i.test(
+          hay,
+        )
+      ) {
+        return;
+      }
+      if (
+        $el.closest(
+          "li, ul, ol, footer, [role='contentinfo'], [class*='Footer']",
+        ).length
+      ) {
+        return;
+      }
+      const width = Number($el.attr("width") || 0);
+      const height = Number($el.attr("height") || 0);
+      if ((width > 0 && width <= 96) || (height > 0 && height <= 96)) return;
+
+      const inHero =
+        $el.closest(
+          ".hero, .banner, .jumbotron, [class*='hero'], [class*='Hero'], [class*='banner'], [class*='masthead'], section:first-of-type",
+        ).length > 0;
+      const looksLarge =
+        width >= 280 ||
+        height >= 200 ||
+        /hero|banner|cover|main-image|featured/i.test(hay);
+
+      if (!inHero && !looksLarge) return;
+
+      let next: string | null = null;
+      if (inHero && !heroSwapped && pickHero) {
+        next = pickHero;
+        heroSwapped = true;
+      } else if (looksLarge && pickContent && stats.images < 3) {
+        next = pickContent;
+      }
+      if (!next || next === src) return;
+      $el.attr("src", next);
+      $el.removeAttr("srcset");
+      $el.attr("data-adrival-image", "1");
+      stats.images += 1;
+    });
+
+    if (pickHero) {
+      $(
+        ".hero, [class*='hero'], [class*='Hero'], .banner, [class*='banner']",
+      ).each((_, el) => {
+        const $el = $(el);
+        if ($el.attr("data-adrival-gen-id")) return;
+        const style = $el.attr("style") || "";
+        if (!/url\(/i.test(style)) return;
+        if ($el.closest("header, nav, footer").length) return;
+        const nextStyle = style.replace(
+          /url\(\s*(['"]?)([^)'"]+)\1\s*\)/gi,
+          `url("${pickHero}")`,
+        );
+        if (nextStyle !== style) {
+          $el.attr("style", nextStyle);
+          stats.images += 1;
+        }
+      });
+    }
   }
 
   // Links: domain swap + CTA routing; socials only to real brand handles
@@ -154,6 +327,44 @@ export function applyBrandDeterministic(input: {
     const net = detectSocialNetwork(s.href, s.label);
     if (net && !brandSocialByNet.has(net)) brandSocialByNet.set(net, s.href);
   }
+
+  const pageLinks = [
+    ...(input.brand.siteAssets?.navLinks || []),
+    ...(input.brand.siteAssets?.footerLinks || []),
+  ];
+  const pageByLabel = new Map<string, string>();
+  const pageBySlug = new Map<string, string>();
+  for (const l of pageLinks) {
+    const key = (l.label || "").toLowerCase().replace(/\s+/g, " ").trim();
+    if (key && !pageByLabel.has(key)) pageByLabel.set(key, l.href);
+    try {
+      const slug = new URL(l.href).pathname.replace(/\/$/, "").toLowerCase();
+      if (slug && slug !== "/" && !pageBySlug.has(slug)) pageBySlug.set(slug, l.href);
+    } catch {
+      // ignore
+    }
+  }
+
+  const resolveBrandPageHref = (label: string, competitorPath: string): string => {
+    const lab = label.toLowerCase().replace(/\s+/g, " ").trim();
+    if (lab && pageByLabel.has(lab)) return pageByLabel.get(lab)!;
+    // fuzzy label contains
+    for (const [k, href] of pageByLabel) {
+      if (lab && (k.includes(lab) || lab.includes(k)) && lab.length >= 4) {
+        return href;
+      }
+    }
+    const path = (competitorPath || "").replace(/\/$/, "").toLowerCase();
+    if (path && path !== "/" && pageBySlug.has(path)) return pageBySlug.get(path)!;
+    // slug tail match
+    const tail = path.split("/").filter(Boolean).pop();
+    if (tail) {
+      for (const [slug, href] of pageBySlug) {
+        if (slug.endsWith(`/${tail}`) || slug === `/${tail}`) return href;
+      }
+    }
+    return input.businessUrl;
+  };
 
   $("a[href]").each((_, el) => {
     const $el = $(el);
@@ -181,8 +392,7 @@ export function applyBrandDeterministic(input: {
       const u = new URL(href, input.archive.finalUrl);
       const host = u.hostname.replace(/^www\./i, "").toLowerCase();
       if (competitorHost && host.includes(competitorHost)) {
-        // Domain swap → user site (same path when possible is skipped; route home)
-        $el.attr("href", input.businessUrl);
+        $el.attr("href", resolveBrandPageHref(label, u.pathname));
         stats.links += 1;
         return;
       }
@@ -200,44 +410,11 @@ export function applyBrandDeterministic(input: {
     }
   });
 
-  // Rebuild a clean social row if we have brand socials and footer exists
-  const $footer = $("footer, [role='contentinfo']").first();
-  if ($footer.length && input.brand.socialLinks.length) {
-    $footer.find("[data-adrival-social]").remove();
-    const socialHtml = input.brand.socialLinks
-      .slice(0, 8)
-      .map(
-        (s) =>
-          `<a href="${s.href}" target="_blank" rel="noopener noreferrer" data-adrival-social-link="1" style="margin-right:12px;">${s.label}</a>`,
-      )
-      .join("");
-    $footer.append(
-      `<div data-adrival-social="1" style="padding:12px 0;">${socialHtml}</div>`,
-    );
-  }
+  // Socials remapped above; footer in-place pass owns footer social row — do not append a duplicate
 
-  // Brand CSS variables overlay (surgical, layout-preserving)
-  const c = input.brand.colors;
-  const overlay = `<style id="adrival-brand-tokens">
-:root{
-  --adrival-primary:${c.primary};
-  --adrival-secondary:${c.secondary};
-  --adrival-accent:${c.accent};
-  --primary:${c.primary};
-  --brand:${c.primary};
-  --accent:${c.accent};
-}
-</style>
-<meta name="theme-color" content="${c.primary}">
-<meta name="adrival-brand-source" content="${(c.source || "brand").replace(/"/g, "")}">`;
-
+  // Brand CSS variables + scoped CTA chrome (not every heading/link)
   let out = $.html();
-  out = out.replace(/<style id="adrival-brand-tokens">[\s\S]*?<\/style>/gi, "");
-  if (/<\/head>/i.test(out)) {
-    out = out.replace(/<\/head>/i, `${overlay}</head>`);
-  } else {
-    out = overlay + out;
-  }
+  out = injectBrandColorOverlay(out, input.brand.colors);
 
   void escapeRegExp;
   return { html: out, stats };

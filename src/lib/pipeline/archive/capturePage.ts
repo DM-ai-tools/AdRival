@@ -131,12 +131,66 @@ async function inlineDocumentResources(page: Page): Promise<void> {
     }
   });
 
-  // Strip scripts / service workers noise for a static archival document
-  await page.evaluate(() => {
-    document.querySelectorAll("script, link[rel='preload'][as='script']").forEach((n) => n.remove());
+  // Preserve interactive JS (FAQ/accordions/tabs). Strip only trackers.
+  // Inline same-origin/external scripts so srcDoc previews still work offline.
+  await page.evaluate(async () => {
+    const TRACKING =
+      /google-analytics|googletagmanager|gtag\/|facebook\.net|connect\.facebook|hotjar|segment\.(com|io)|clarity\.ms|doubleclick|linkedin\.com\/px|analytics\.tiktok|hubspot|intercom|fullstory|mixpanel|montecarlo|sentry\.io\/api|cdn\.amplitude|heap-api|optimizely|newrelic|nr-data\.net|googlesyndication|adservice|scorecardresearch/i;
+
+    const scripts = Array.from(document.querySelectorAll("script"));
+    for (const script of scripts) {
+      const src = script.getAttribute("src") || "";
+      const body = script.textContent || "";
+      if ((src && TRACKING.test(src)) || (body && TRACKING.test(body))) {
+        script.remove();
+        continue;
+      }
+      // Skip JSON-LD / application types — keep as-is
+      const type = (script.getAttribute("type") || "").toLowerCase();
+      if (type && type !== "text/javascript" && type !== "module" && type !== "application/javascript") {
+        continue;
+      }
+      if (src && !src.startsWith("data:") && !src.startsWith("blob:")) {
+        try {
+          const abs = new URL(src, location.href).toString();
+          const res = await fetch(abs, { credentials: "omit" });
+          if (!res.ok) {
+            script.setAttribute("src", abs);
+            continue;
+          }
+          let code = await res.text();
+          if (TRACKING.test(code)) {
+            script.remove();
+            continue;
+          }
+          // Prevent premature script end while inlining
+          code = code.replace(/<\/script/gi, "<\\/script");
+          const inline = document.createElement("script");
+          inline.setAttribute("data-adrival-archived-js", abs);
+          if (type === "module") inline.setAttribute("type", "module");
+          inline.textContent = code;
+          script.replaceWith(inline);
+        } catch {
+          try {
+            script.setAttribute("src", new URL(src, location.href).toString());
+          } catch {
+            // leave as-is
+          }
+        }
+      }
+    }
+
+    // Neutralize remote iframes (ads/embeds) but keep layout box
     document.querySelectorAll("iframe").forEach((n) => {
-      // keep layout box but neutralize remote docs
+      const src = n.getAttribute("src") || "";
+      if (/youtube|vimeo|maps\.google|google\.com\/maps/i.test(src)) return;
+      n.setAttribute("data-adrival-iframe-src", src);
       n.setAttribute("src", "about:blank");
+    });
+
+    // Ensure details/summary remain interactive
+    document.querySelectorAll("details").forEach((d) => {
+      d.setAttribute("data-adrival-details", "1");
     });
   });
 }

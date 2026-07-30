@@ -5,9 +5,96 @@ import {
   RELEVANCE_THRESHOLD,
   SERVICE_LABELS,
   type AdCandidate,
+  type BusinessCategory,
+  type BusinessLocation,
   type BusinessProfile,
+  type SearchGeoMode,
   type ServiceLabel,
 } from "../types";
+
+const KEYWORD_STOPWORDS = new Set([
+  "with",
+  "from",
+  "that",
+  "this",
+  "your",
+  "ours",
+  "their",
+  "about",
+  "into",
+  "over",
+  "under",
+  "than",
+  "then",
+  "when",
+  "what",
+  "which",
+  "while",
+  "where",
+  "have",
+  "has",
+  "been",
+  "were",
+  "will",
+  "would",
+  "could",
+  "should",
+  "service",
+  "services",
+  "business",
+  "company",
+  "online",
+  "local",
+  "best",
+  "free",
+  "near",
+  "area",
+  "city",
+  "town",
+]);
+
+function tokenizeSignal(raw: string): string[] {
+  return raw
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 4 && !KEYWORD_STOPWORDS.has(t));
+}
+
+export type ServiceSignalOptions = {
+  businessProfile?: BusinessProfile | null;
+  searchKeywords?: string[] | null;
+  selectedCategory?: BusinessCategory | null;
+  /** When true, allow longer creatives without token hit (fill/relaxed only). */
+  softPass?: boolean;
+};
+
+/** Tokens used for cheap keyword/service gates and sample-ad scoring. */
+export function serviceSignalTokens(options?: ServiceSignalOptions): string[] {
+  const parts: string[] = [
+    ...(options?.searchKeywords || []),
+    options?.selectedCategory?.label || "",
+    options?.businessProfile?.industry || "",
+    options?.businessProfile?.subIndustry || "",
+    ...(options?.businessProfile?.offerings || []),
+    ...(options?.businessProfile?.competitorKeywords || []),
+  ];
+  return Array.from(new Set(tokenizeSignal(parts.join(" "))));
+}
+
+/** 0–1 overlap of signal tokens present in ad copy. */
+export function serviceKeywordOverlapScore(
+  text: string,
+  options?: ServiceSignalOptions,
+): number {
+  const tokens = serviceSignalTokens(options);
+  if (!tokens.length) return 0;
+  const blob = text.toLowerCase();
+  let hits = 0;
+  for (const t of tokens) {
+    if (blob.includes(t)) hits += 1;
+  }
+  return Math.min(1, hits / Math.min(4, tokens.length));
+}
 
 function getClient() {
   const key = process.env.OPENAI_API_KEY;
@@ -46,7 +133,21 @@ const queryExpansionSchema = z.object({
 export async function expandKeywordQueries(
   keyword: string,
   businessProfile?: BusinessProfile | null,
+  geoOptions?: {
+    geoMode?: SearchGeoMode | null;
+    targetLocations?: BusinessLocation[] | null;
+    selectedCategory?: BusinessCategory | null;
+  },
 ): Promise<string[]> {
+  const locLabels = (geoOptions?.targetLocations || [])
+    .map((l) => l.suburb || l.city || l.label)
+    .filter(Boolean)
+    .slice(0, 4) as string[];
+  const wantLocal =
+    geoOptions?.geoMode === "company_locations" ||
+    geoOptions?.geoMode === "keyword_location";
+  const categoryLabel = geoOptions?.selectedCategory?.label || "";
+
   if (businessProfile) {
     const raw = await jsonCompletion<{ queries: string[] }>(
       `You expand Ad Library / ads-transparency search queries to find DIRECT competitors
@@ -56,24 +157,37 @@ Industry context:
 - Business: ${businessProfile.businessName}
 - Industry: ${businessProfile.industry}${businessProfile.subIndustry ? ` / ${businessProfile.subIndustry}` : ""}
 - Offerings: ${(businessProfile.offerings || []).join(", ") || "n/a"}
+- Selected category: ${categoryLabel || "n/a"}
 - Positioning: ${businessProfile.positioningSummary}
+${wantLocal && locLabels.length ? `- Target markets: ${locLabels.join(", ")} — include location-qualified queries` : ""}
 
-Return queries that surface rivals in the SAME industry advertising similar products/services.`,
+Return queries that surface rivals in the SAME industry advertising similar products/services.
+Prefer precise service phrases from the seed keyword and offerings — avoid generic words like "business" or "online".`,
       `Seed keyword: "${keyword}"
 Also consider these suggested competitor keywords: ${businessProfile.competitorKeywords.join(", ")}
-Return 6-10 high-yield search queries.`,
+Return 8-12 high-yield search queries.${wantLocal && locLabels.length ? ` Include several with city/suburb: ${locLabels.join(", ")}.` : ""}`,
       `{ "queries": string[] }`,
     );
     const parsed = queryExpansionSchema.safeParse(raw);
     const queries = parsed.success ? parsed.data.queries : [keyword];
+    const geoSeeded =
+      wantLocal && locLabels.length
+        ? locLabels.flatMap((loc) => [
+            `${keyword} ${loc}`,
+            categoryLabel ? `${categoryLabel} ${loc}` : "",
+            `${businessProfile.industry} ${loc}`,
+          ])
+        : [];
     const seeded = [
       keyword,
+      categoryLabel,
       ...businessProfile.competitorKeywords,
+      ...geoSeeded,
       ...queries,
     ];
     return Array.from(
       new Set(seeded.map((q) => q.trim()).filter(Boolean)),
-    ).slice(0, 14);
+    ).slice(0, 20);
   }
 
   const raw = await jsonCompletion<{ queries: string[] }>(
@@ -192,27 +306,35 @@ function normalizeScore(score: number): number {
 
 /**
  * Cheap gate so we don't spend LLM credits on unrelated creatives.
- * With a business profile, match industry / offering tokens instead of agency jargon.
+ * With a business profile / search keywords, require real token overlap —
+ * not a soft pass on long copy (that let wrong industries through).
  */
 export function hasServiceKeywordSignal(
   text: string,
-  businessProfile?: BusinessProfile | null,
+  businessProfileOrOptions?: BusinessProfile | null | ServiceSignalOptions,
 ): boolean {
-  if (businessProfile) {
-    const tokens = [
-      businessProfile.industry,
-      businessProfile.subIndustry || "",
-      ...(businessProfile.offerings || []),
-      ...(businessProfile.competitorKeywords || []),
-    ]
-      .join(" ")
-      .toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .filter((t) => t.length >= 4);
-    const blob = text.toLowerCase();
-    if (tokens.some((t) => blob.includes(t))) return true;
-    // Soft pass for longer creatives — LLM does the real filter
-    return blob.length >= 60;
+  const options: ServiceSignalOptions =
+    businessProfileOrOptions &&
+    typeof businessProfileOrOptions === "object" &&
+    ("businessProfile" in businessProfileOrOptions ||
+      "searchKeywords" in businessProfileOrOptions ||
+      "selectedCategory" in businessProfileOrOptions ||
+      "softPass" in businessProfileOrOptions)
+      ? (businessProfileOrOptions as ServiceSignalOptions)
+      : { businessProfile: businessProfileOrOptions as BusinessProfile | null };
+
+  const profile = options.businessProfile;
+  const hasSearchContext =
+    Boolean(profile) ||
+    Boolean(options.searchKeywords?.length) ||
+    Boolean(options.selectedCategory);
+
+  if (hasSearchContext) {
+    const overlap = serviceKeywordOverlapScore(text, options);
+    if (overlap > 0) return true;
+    // Soft pass only when explicitly filling / relaxed — never the default gate
+    if (options.softPass && text.trim().length >= 120) return true;
+    return false;
   }
   return /google\s*ads|adwords|\bppc\b|paid search|paid media|media buying|seo\b|search engine|aeo|geo\b|answer engine|generative engine|\bsmm\b|social media marketing|social media management|meta ads|facebook ads|instagram ads|gmb|google business|google maps|digital marketing|marketing agency|advertising agency|lead gen|lead generation|performance marketing|growth agency|ads agency|ads audit|free audit/i.test(
     text,
@@ -239,12 +361,19 @@ export async function analyzeAdCandidate(
   ad: AdCandidate,
   pageCategory?: string | null,
   extraAds: AdCandidate[] = [],
-  options?: { relaxed?: boolean; businessProfile?: BusinessProfile | null },
+  options?: {
+    relaxed?: boolean;
+    businessProfile?: BusinessProfile | null;
+    searchKeywords?: string[] | null;
+    selectedCategory?: BusinessCategory | null;
+  },
 ): Promise<AdFilterResult> {
   const scoreFloor = options?.relaxed
     ? RELAXED_RELEVANCE_THRESHOLD
     : RELEVANCE_THRESHOLD;
   const profile = options?.businessProfile;
+  const searchKeywords = options?.searchKeywords || [];
+  const selectedCategory = options?.selectedCategory || null;
   const creatives = [ad, ...extraAds].map((a, i) => ({
     index: i + 1,
     daysRunning: a.daysRunning,
@@ -263,6 +392,12 @@ export async function analyzeAdCandidate(
     0,
   );
 
+  const keywordList = Array.from(
+    new Set(
+      [keyword, ...searchKeywords, selectedCategory?.label || ""].filter(Boolean),
+    ),
+  ).join(", ");
+
   const industrySystem = profile
     ? `You qualify Ad Library advertisers as DIRECT COMPETITORS for a specific business.
 
@@ -271,25 +406,33 @@ SEED BUSINESS:
 - URL: ${profile.url}
 - Industry: ${profile.industry}${profile.subIndustry ? ` / ${profile.subIndustry}` : ""}
 - Offerings: ${(profile.offerings || []).join(", ") || "n/a"}
+- Selected category: ${selectedCategory?.label || "n/a"}
 - Audience: ${profile.targetAudience || "n/a"}
 - Positioning: ${profile.positioningSummary}
+- Search keywords the user is matching on: ${keywordList}
 
-GOAL: Keep advertisers in the SAME industry who compete for the same customers / category.
-Reject unrelated industries and pure marketing agencies (unless the seed business itself is an agency).
+GOAL: Keep advertisers who sell the SAME (or clearly competing) service/product category.
+Reject: unrelated industries, vague "local business" ads, pure marketing agencies (unless the seed is an agency), and ads that only share a broad vertical without the same offering.
 
 CRITICAL READING RULES:
 - Read fullCreativeText / primaryBody before deciding.
 - Do NOT decide from headline + CTA alone.
-- Quote bodyEvidence that proves industry overlap.
+- Quote bodyEvidence that proves the SAME service/keywords — not just the same city or industry umbrella.
+- relevanceScore must reflect keyword/service overlap with: ${keywordList}
 
 Qualification for relevant=true:
-1) Keyword / category relevance to "${keyword}" and the seed industry (score 0–1).
-2) Same or adjacent industry as the seed business (isMarketingAgency may be false for normal brands — that is OK).
+1) Ad copy clearly relates to "${keyword}" / selected category and seed offerings (score 0–1).
+2) Same or tightly adjacent competitor — not a distant cousin in a huge industry.
 3) services: short tags for what they sell (free-form OK), e.g. ["Dental implants","Invisalign"].
+
+Reject (relevant=false) when:
+- Body is generic branding with no service/product match to the keywords
+- They are a different specialty (e.g. orthodontics vs general dentistry when keywords are specific)
+- They are a marketing agency advertising agency services (unless seed is an agency)
 
 OUTPUT:
 - isMarketingAgency=true only if they are primarily a marketing agency.
-- relevant=true when they are a credible industry competitor (agency flag is informational, not required).`
+- relevant=true only for credible same-service competitors.`
     : `You qualify Facebook Ad Library advertisers for a MARKETING-AGENCY competitor finder.
 
 GOAL: Keep ONLY true marketing agencies / marketing consultancies. Reject ordinary businesses that merely run ads to promote themselves.
@@ -324,6 +467,8 @@ OUTPUT:
     JSON.stringify(
       {
         keyword,
+        searchKeywords,
+        selectedCategory: selectedCategory?.label || null,
         pageName: ad.pageName,
         pageCategory: pageCategory ?? null,
         combinedCreativeChars: combinedLength,
@@ -372,14 +517,23 @@ OUTPUT:
     .map((c) => c.fullCreativeText || "")
     .join("\n");
   const agencySignal = hasAgencyPositioningSignal(creativeBlob);
+  const keywordOverlap = serviceKeywordOverlapScore(creativeBlob, {
+    businessProfile: profile,
+    searchKeywords,
+    selectedCategory,
+  });
 
   let relevant: boolean;
   if (profile) {
+    // Require some keyword/service overlap unless score is clearly high
+    const keywordOk =
+      keywordOverlap > 0 || score >= Math.max(scoreFloor + 0.15, 0.55);
     relevant =
       relevantFlag &&
       services.length > 0 &&
       score >= scoreFloor &&
-      hasBody;
+      hasBody &&
+      keywordOk;
   } else {
     relevant =
       relevantFlag &&
@@ -399,7 +553,9 @@ OUTPUT:
     reason: profile
       ? !hasBody
         ? `${reason} (rejected: insufficient creative text)`
-        : reason
+        : keywordOverlap <= 0 && score < Math.max(scoreFloor + 0.15, 0.55)
+          ? `${reason} (rejected: weak keyword/service overlap in ad copy)`
+          : reason
       : !isAgency
         ? `${reason} (rejected: not a marketing agency)`
         : !hasBody

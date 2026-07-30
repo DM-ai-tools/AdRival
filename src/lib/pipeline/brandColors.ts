@@ -1,15 +1,9 @@
 import type { BrandColors } from "../types";
 import { fetchRawLandingHtml } from "./htmlFetch";
-
-const DEFAULT_COLORS: BrandColors = {
-  primary: "#0F7A6C",
-  secondary: "#134E4A",
-  accent: "#F59E0B",
-  background: "#FFFFFF",
-  text: "#0F172A",
-  muted: "#64748B",
-  source: "fallback",
-};
+import {
+  harmonizeBrandPalette,
+  isJunkBrandHex,
+} from "./paletteHarmonize";
 
 export type RankedColor = { hex: string; weight: number; sat: number; lum: number };
 
@@ -63,7 +57,7 @@ export function luminance(hex: string): number {
   return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
 }
 
-function saturation(hex: string): number {
+export function saturation(hex: string): number {
   const h = hex.replace("#", "");
   const r = parseInt(h.slice(0, 2), 16) / 255;
   const g = parseInt(h.slice(2, 4), 16) / 255;
@@ -92,6 +86,7 @@ export function collectRankedColors(cssOrHtml: string): RankedColor[] {
   const bump = (raw: string, weight = 1) => {
     const n = normalizeHex(raw);
     if (!n || isNearWhiteOrBlack(n)) return;
+    if (isJunkBrandHex(n)) return; // skip CSS pure red/blue/green junk
     found.set(n, (found.get(n) || 0) + weight);
   };
 
@@ -166,35 +161,66 @@ export function parseCssColorToHex(value: string): string | null {
 }
 
 function pickPalette(ranked: RankedColor[], source: string): BrandColors {
-  const chromatic = ranked.filter((c) => !isGrayish(c.hex));
-  const pool = chromatic.length ? chromatic : ranked;
+  const chromatic = ranked.filter(
+    (c) => !isGrayish(c.hex) && !isJunkBrandHex(c.hex),
+  );
+  const pool = chromatic.length
+    ? chromatic
+    : ranked.filter((c) => !isJunkBrandHex(c.hex));
 
-  if (!pool.length) return { ...DEFAULT_COLORS, source };
+  if (!pool.length) {
+    throw new Error(
+      `No usable brand colors found in page CSS/HTML for ${source}`,
+    );
+  }
 
-  const primary = pool[0].hex;
+  const byBrandStrength = [...pool].sort((a, b) => {
+    const score = (c: RankedColor) =>
+      c.weight * (1 + c.sat * 3) * (1 - Math.abs(c.lum - 0.45));
+    return score(b) - score(a);
+  });
+  const primary = byBrandStrength[0].hex;
+
   const secondary =
     pool.find(
       (c) =>
-        c.hex !== primary && Math.abs(c.lum - pool[0].lum) > 0.12,
+        c.hex !== primary &&
+        !isJunkBrandHex(c.hex) &&
+        (c.lum < 0.25 || Math.abs(c.lum - byBrandStrength[0].lum) > 0.12),
     )?.hex ||
-    pool[1]?.hex ||
-    DEFAULT_COLORS.secondary;
+    pool.find((c) => c.hex !== primary && !isJunkBrandHex(c.hex))?.hex ||
+    primary;
+
   const accent =
-    pool.find((c) => c.hex !== primary && c.hex !== secondary)?.hex ||
-    DEFAULT_COLORS.accent;
+    pool.find(
+      (c) =>
+        c.hex !== primary &&
+        c.hex !== secondary &&
+        !isJunkBrandHex(c.hex) &&
+        c.sat >= 0.2,
+    )?.hex || primary;
 
   const bgCandidate = ranked.find((c) => c.lum > 0.85 && isGrayish(c.hex));
-  const textCandidate = ranked.find((c) => c.lum < 0.25);
+  const textCandidate = ranked.find(
+    (c) => c.lum < 0.25 && !isJunkBrandHex(c.hex),
+  );
+  const mutedCandidate = ranked.find(
+    (c) =>
+      isGrayish(c.hex) && c.lum > 0.35 && c.lum < 0.7 && !isJunkBrandHex(c.hex),
+  );
 
-  return {
-    primary,
-    secondary,
-    accent,
-    background: bgCandidate?.hex || "#FFFFFF",
-    text: textCandidate?.hex || "#0F172A",
-    muted: DEFAULT_COLORS.muted,
-    source,
-  };
+  return harmonizeBrandPalette(
+    {
+      primary,
+      secondary,
+      accent,
+      background: bgCandidate?.hex || "#FFFFFF",
+      text: textCandidate?.hex || "#0F172A",
+      muted: mutedCandidate?.hex || "#64748B",
+      source,
+    },
+    ranked.map((c) => c.hex),
+  );
 }
 
 async function fetchLinkedStylesheets(

@@ -1,4 +1,4 @@
-import type { BrandColors } from "../../types";
+import type { BrandColors, BrandDesignSystem, BusinessProfile } from "../../types";
 import {
   normalizeHex,
   parseCssColorToHex,
@@ -6,7 +6,14 @@ import {
 } from "../brandColors";
 import type { BrandSiteAssets } from "../brandAssets";
 import { resolveBrandBundle } from "../resolveBrandBundle";
+import { reconcilePaletteWithHtmlEvidence } from "../brandColorSources";
+import {
+  harmonizeBrandPalette,
+  isJunkBrandHex,
+  isWeakOrJunkPalette,
+} from "../paletteHarmonize";
 import type { ArchivedPage } from "./capturePage";
+import { fetchRawLandingHtml } from "../htmlFetch";
 
 export type BrandTokens = {
   colors: BrandColors;
@@ -18,6 +25,8 @@ export type BrandTokens = {
   socialLinks: Array<{ label: string; href: string }>;
   /** Full site asset scrape when available — used to rebuild footer. */
   siteAssets: BrandSiteAssets | null;
+  /** Firecrawl design system (typography, spacing, button styles). */
+  design: BrandDesignSystem | null;
   source: string;
   warnings: string[];
 };
@@ -41,6 +50,25 @@ function cssColorToHex(css: string): string | null {
     return rgbToHex(Number(rgb[1]), Number(rgb[2]), Number(rgb[3]));
   }
   return normalizeHex(css);
+}
+
+function isWeakSource(source?: string | null): boolean {
+  const s = (source || "").toLowerCase();
+  return !s || s === "fallback" || s.startsWith("llm") || s === "default";
+}
+
+function isSiteGroundedSource(source?: string | null): boolean {
+  const s = (source || "").toLowerCase();
+  return (
+    s.startsWith("html") ||
+    s.startsWith("firecrawl") ||
+    s.startsWith("playwright") ||
+    s.startsWith("deterministic") ||
+    s.includes("html-evidence") ||
+    s.startsWith("site") ||
+    s.startsWith("css") ||
+    s.startsWith("brandfetch")
+  );
 }
 
 /**
@@ -87,9 +115,11 @@ async function fetchBrandfetch(domain: string): Promise<{
   const byType = (t: string) =>
     (data.colors || []).find((c) => (c.type || "").toLowerCase() === t);
 
+  // Prefer brand/dark over accent — accent is often a highlight, not the site primary
   const primary =
-    normalizeHex(byType("accent")?.hex || "") ||
     normalizeHex(byType("brand")?.hex || "") ||
+    normalizeHex(byType("dark")?.hex || "") ||
+    normalizeHex(byType("accent")?.hex || "") ||
     hexes[0] ||
     null;
   const secondary =
@@ -97,6 +127,7 @@ async function fetchBrandfetch(domain: string): Promise<{
     hexes.find((h) => h !== primary) ||
     primary;
   const accent =
+    normalizeHex(byType("accent")?.hex || "") ||
     normalizeHex(byType("light")?.hex || "") ||
     hexes.find((h) => h !== primary && h !== secondary) ||
     primary;
@@ -142,12 +173,16 @@ async function fetchBrandfetch(domain: string): Promise<{
 
 /**
  * Extract brand tokens from the user's business URL.
- * Prefer Brandfetch; supplement with Playwright computed tokens + HTML/CSS.
+ * Primary: Firecrawl branding (colors, fonts, logo, socials, spacing).
+ * Brandfetch / competitor-computed tokens fill gaps only.
  */
 export async function extractBrandTokens(input: {
   businessUrl: string;
   archivedCompetitor?: ArchivedPage | null;
   profileName?: string | null;
+  profile?: BusinessProfile | null;
+  /** Phase-1 stored palette — preferred when site-grounded */
+  preferredColors?: BrandColors | null;
 }): Promise<BrandTokens> {
   const warnings: string[] = [];
   const domain = domainOf(input.businessUrl);
@@ -158,62 +193,128 @@ export async function extractBrandTokens(input: {
   } catch (err) {
     warnings.push(`Brandfetch failed: ${(err as Error).message}`);
   }
-  if (!brandfetch && !process.env.BRANDFETCH_API_KEY) {
-    warnings.push("BRANDFETCH_API_KEY not set — using HTML/CSS + CDN fallbacks");
-  }
 
-  // Our existing HTML/CSS resolver (handles 403 sites with fallbacks)
   const bundle = await resolveBrandBundle({
     businessUrl: input.businessUrl,
-    profile: null,
+    profile: input.profile || null,
   });
   warnings.push(...bundle.warnings);
 
-  const colors =
-    brandfetch?.colors ||
-    bundle.colors;
+  const design =
+    bundle.design || input.profile?.brandDesign || null;
+
+  // Prefer Firecrawl / site-grounded palette
+  let colors: BrandColors | null = null;
+  let colorSource = "unknown";
+
+  if (
+    input.preferredColors &&
+    !isWeakSource(input.preferredColors.source) &&
+    !isWeakOrJunkPalette(input.preferredColors) &&
+    isSiteGroundedSource(input.preferredColors.source)
+  ) {
+    colors = input.preferredColors;
+    colorSource = `preferred:${input.preferredColors.source}`;
+  } else if (
+    bundle.colors &&
+    !isWeakSource(bundle.colors.source) &&
+    !isWeakOrJunkPalette(bundle.colors)
+  ) {
+    colors = bundle.colors;
+    colorSource = `bundle:${bundle.colors.source}`;
+  } else if (
+    input.preferredColors &&
+    !isWeakSource(input.preferredColors.source) &&
+    !isWeakOrJunkPalette(input.preferredColors)
+  ) {
+    colors = input.preferredColors;
+    colorSource = `preferred:${input.preferredColors.source}`;
+  } else if (brandfetch?.colors && !isWeakOrJunkPalette(brandfetch.colors)) {
+    colors = brandfetch.colors;
+    colorSource = "brandfetch";
+    try {
+      const page = await fetchRawLandingHtml(input.businessUrl);
+      colors = reconcilePaletteWithHtmlEvidence(
+        colors,
+        page.html,
+        input.businessUrl,
+      );
+      colorSource = `brandfetch+html-evidence`;
+    } catch {
+      warnings.push("Could not reconcile Brandfetch colors with site HTML");
+    }
+  } else if (bundle.colors && !isWeakOrJunkPalette(bundle.colors)) {
+    colors = bundle.colors;
+    colorSource = `bundle-fallback:${bundle.colors.source}`;
+  }
+
+  if (!colors || isWeakOrJunkPalette(colors)) {
+    throw new Error(
+      `No real brand colors for ${input.businessUrl}. Re-analyze the business URL with Firecrawl enabled.`,
+    );
+  }
+
+  // Keep Firecrawl branding roles; only light-clean junk accents
+  if (!/^firecrawl-branding:/i.test(colors.source || "")) {
+    colors = harmonizeBrandPalette(colors);
+  }
+  if (isJunkBrandHex(colors.accent)) {
+    colors = { ...colors, accent: colors.primary };
+  }
+  if (isJunkBrandHex(colors.primary)) {
+    throw new Error(
+      `Brand primary for ${input.businessUrl} resolved to a junk CSS color. Re-analyze with Firecrawl.`,
+    );
+  }
 
   const computed = input.archivedCompetitor?.computedTokens;
+
+  const firecrawlFonts = design?.fonts?.length
+    ? design.fonts
+    : design?.typography?.fontFamilies
+      ? [
+          design.typography.fontFamilies.heading,
+          design.typography.fontFamilies.primary,
+        ].filter((f): f is string => Boolean(f))
+      : [];
+
+  const borderRadii = [
+    design?.spacing?.borderRadius,
+    design?.components?.buttonPrimary?.borderRadius,
+    ...(computed?.borderRadii || []),
+  ].filter((r): r is string => Boolean(r));
 
   const siteAssets = bundle.assets
     ? {
         ...bundle.assets,
         logoUrl:
-          brandfetch?.logoUrl || bundle.assets.logoUrl || null,
-        socialLinks:
-          brandfetch?.socialLinks?.length
-            ? brandfetch.socialLinks
-            : bundle.assets.socialLinks || [],
+          bundle.assets.logoUrl || brandfetch?.logoUrl || null,
+        socialLinks: bundle.assets.socialLinks?.length
+          ? bundle.assets.socialLinks
+          : brandfetch?.socialLinks || [],
       }
     : null;
 
   return {
     colors: {
-      ...(colors || {
-        primary: "#0F7A6C",
-        secondary: "#134E4A",
-        accent: "#F59E0B",
-        background: "#FFFFFF",
-        text: "#0F172A",
-        muted: "#64748B",
-        source: "fallback",
-      }),
-      source: brandfetch?.colors?.source || colors?.source || input.businessUrl,
+      ...colors,
+      source: `${colorSource}|${colors.source || domain}`,
     },
-    logoUrl: brandfetch?.logoUrl || bundle.assets?.logoUrl || null,
+    logoUrl: bundle.assets?.logoUrl || brandfetch?.logoUrl || null,
     logoDarkUrl: brandfetch?.logoDarkUrl || null,
-    fonts:
-      brandfetch?.fonts?.length
+    fonts: firecrawlFonts.length
+      ? firecrawlFonts
+      : brandfetch?.fonts?.length
         ? brandfetch.fonts
         : computed?.fontFamilies || [],
-    borderRadii: computed?.borderRadii || [],
+    borderRadii: [...new Set(borderRadii)],
     boxShadows: computed?.boxShadows || [],
-    socialLinks:
-      brandfetch?.socialLinks?.length
-        ? brandfetch.socialLinks
-        : bundle.assets?.socialLinks || [],
+    socialLinks: bundle.assets?.socialLinks?.length
+      ? bundle.assets.socialLinks
+      : brandfetch?.socialLinks || [],
     siteAssets,
-    source: brandfetch ? "brandfetch+site" : "site",
+    design,
+    source: colorSource,
     warnings,
   };
 }
@@ -224,25 +325,29 @@ export function buildColorMap(
   user: BrandColors,
 ): Map<string, string> {
   const map = new Map<string, string>();
-  const targets = [user.primary, user.secondary, user.accent];
+  const targets = [
+    user.primary,
+    user.secondary,
+    user.accent,
+    user.primary,
+    user.secondary,
+  ];
   let ti = 0;
   for (const row of painted) {
     const hex = cssColorToHex(row.css);
     if (!hex) continue;
-    // skip near-white / near-black surfaces
     const n = hex.replace("#", "");
     const r = parseInt(n.slice(0, 2), 16);
     const g = parseInt(n.slice(2, 4), 16);
     const b = parseInt(n.slice(4, 6), 16);
     const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
     if (lum > 0.92 || lum < 0.08) continue;
-    if (Math.max(r, g, b) - Math.min(r, g, b) < 18) continue; // gray
+    if (Math.max(r, g, b) - Math.min(r, g, b) < 18) continue;
     if ([...map.keys()].some((k) => k.toUpperCase() === hex)) continue;
     map.set(hex, targets[Math.min(ti, targets.length - 1)]);
-    // also map the original css form
     map.set(row.css, targets[Math.min(ti, targets.length - 1)]);
     ti += 1;
-    if (ti >= 12) break;
+    if (ti >= 24) break;
   }
   return map;
 }

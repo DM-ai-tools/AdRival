@@ -2,12 +2,17 @@ import { after } from "next/server";
 import { NextResponse } from "next/server";
 import { v4 as uuidv4 } from "uuid";
 import { dispatchPlatformSearch } from "@/lib/pipeline/dispatch";
+import { resolveSearchGeoContext } from "@/lib/pipeline/keywordSuggestions";
 import { AD_PLATFORMS, parseKeywords, type AdPlatform } from "@/lib/platforms";
 import {
   defaultGeoForPlatform,
   geosForPlatform,
 } from "@/lib/geo";
-import type { BusinessProfile } from "@/lib/types";
+import type {
+  BusinessCategory,
+  BusinessProfile,
+  SearchGeoMode,
+} from "@/lib/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -34,14 +39,19 @@ export async function POST(request: Request) {
 
     const geoRaw = String(body.geo ?? body.country ?? "").trim();
     const allowed = new Set(geosForPlatform(platform).map((g) => g.code));
-    const geo = allowed.has(geoRaw)
+    let geo = allowed.has(geoRaw)
       ? geoRaw
       : defaultGeoForPlatform(platform);
 
     const businessProfile =
       body.businessProfile && typeof body.businessProfile === "object"
-        ? (body.businessProfile as BusinessProfile)
+        ? ({ ...body.businessProfile } as BusinessProfile)
         : null;
+
+    // Authoritative keywords from the form — overwrite profile seeds
+    if (businessProfile) {
+      businessProfile.competitorKeywords = keywords;
+    }
 
     const businessUrlRaw = String(
       body.businessUrl ?? businessProfile?.url ?? "",
@@ -52,10 +62,37 @@ export async function POST(request: Request) {
         : `https://${businessUrlRaw}`.replace(/\/$/, "")
       : null;
 
-    // Prefer explicit URL on the profile when both exist
     if (businessProfile && businessUrl && !businessProfile.url) {
       businessProfile.url = businessUrl;
     }
+
+    // Default Ad Library market from company primary country when user left default
+    if (
+      businessProfile?.primaryMarketCountry &&
+      allowed.has(businessProfile.primaryMarketCountry) &&
+      (!geoRaw || geoRaw === defaultGeoForPlatform(platform))
+    ) {
+      geo = businessProfile.primaryMarketCountry;
+    }
+
+    const requestedGeoMode = String(body.geoMode || "countrywide").trim() as
+      | SearchGeoMode
+      | string;
+    const baseMode: SearchGeoMode =
+      requestedGeoMode === "company_locations"
+        ? "company_locations"
+        : "countrywide";
+
+    const geoCtx = resolveSearchGeoContext({
+      keywords,
+      profile: businessProfile,
+      geoMode: baseMode,
+    });
+
+    const selectedCategory =
+      body.selectedCategory && typeof body.selectedCategory === "object"
+        ? (body.selectedCategory as BusinessCategory)
+        : null;
 
     if (!process.env.SOCIAVAULT_API_KEY) {
       return NextResponse.json(
@@ -69,9 +106,6 @@ export async function POST(request: Request) {
         { status: 500 },
       );
     }
-    if (businessProfile && !process.env.OPENROUTER_API_KEY) {
-      // Profile may have been analyzed earlier; still allow search with provided profile
-    }
 
     const jobId = uuidv4();
 
@@ -80,6 +114,10 @@ export async function POST(request: Request) {
         geo,
         businessProfile,
         businessUrl,
+        geoMode: geoCtx.geoMode,
+        selectedCategory,
+        targetLocations: geoCtx.targetLocations,
+        keywordLocation: geoCtx.keywordLocation,
       });
     });
 
@@ -89,6 +127,8 @@ export async function POST(request: Request) {
       keywords,
       platform,
       geo,
+      geoMode: geoCtx.geoMode,
+      keywordLocation: geoCtx.keywordLocation,
       businessUrl,
       businessProfile: businessProfile
         ? {

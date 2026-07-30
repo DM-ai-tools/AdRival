@@ -48,6 +48,27 @@ export function isGoogleAdsTransparencyUrl(url?: string | null): boolean {
   }
 }
 
+const DIRECTORY_HOST_RE =
+  /(^|\.)(clutch\.co|g2\.com|capterra\.com|getapp\.com|softwareadvice\.com|trustpilot\.com|yelp\.com|yellowpages\.|productreview\.com\.au|birdeye\.com|sitejabber\.com|bbb\.org|glassdoor\.com|crunchbase\.com|wikipedia\.org|facebook\.com|fb\.com|instagram\.com|linkedin\.com|twitter\.com|x\.com|youtube\.com|youtu\.be|tiktok\.com|wa\.me|whatsapp\.com|bit\.ly|linktr\.ee|godaddy\.com|wix\.com|squarespace\.com)/i;
+
+/** Directory / social / review sites that must never be the company website. */
+export function isDirectoryOrJunkWebsite(url?: string | null): boolean {
+  if (!url) return true;
+  try {
+    const withProto = url.startsWith("http") ? url : `https://${url}`;
+    const u = new URL(withProto);
+    const host = u.hostname.replace(/^www\./i, "").toLowerCase();
+    if (DIRECTORY_HOST_RE.test(host)) return true;
+    if (isYouTubeUrl(withProto)) return true;
+    if (isFacebookUrl(withProto)) return true;
+    if (isLinkedInCompanyUrl(withProto)) return true;
+    if (isGoogleAdsTransparencyUrl(withProto)) return true;
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 export function normalizeWebsiteUrl(url?: string | null): string | null {
   if (!url) return null;
   const trimmed = url.trim();
@@ -58,15 +79,7 @@ export function normalizeWebsiteUrl(url?: string | null): string | null {
       : `https://${trimmed}`;
     const u = new URL(withProto);
     if (!u.hostname.includes(".")) return null;
-    // Never treat ad libraries / socials as the company website
-    if (
-      isYouTubeUrl(withProto) ||
-      isFacebookUrl(withProto) ||
-      isLinkedInCompanyUrl(withProto) ||
-      isGoogleAdsTransparencyUrl(withProto)
-    ) {
-      return null;
-    }
+    if (isDirectoryOrJunkWebsite(withProto)) return null;
     return withProto;
   } catch {
     return null;

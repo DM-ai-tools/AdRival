@@ -18,11 +18,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Lookup ad not found" }, { status: 404 });
     }
 
-    // Return cached completed analysis unless force=true
+    // Return cached completed analysis unless force=true or missing same-LP ads
     if (
       !body.force &&
       existing.pageAnalysis?.status === "completed" &&
-      existing.pageAnalysis.offer
+      existing.pageAnalysis.offer &&
+      existing.pageAnalysis.sameLandingPageAds
     ) {
       return NextResponse.json({ ad: existing, cached: true });
     }

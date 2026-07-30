@@ -7,16 +7,13 @@ import {
   runGoogleFamilySearch,
 } from "./googleSearch";
 import { runLinkedInLookup, runLinkedInSearch } from "./linkedinSearch";
+import type { SearchDispatchOptions } from "./searchOptions";
 
 export async function dispatchPlatformSearch(
   jobId: string,
   keywordInput: string | string[],
   platform: AdPlatform,
-  options?: {
-    geo?: string;
-    businessProfile?: import("../types").BusinessProfile | null;
-    businessUrl?: string | null;
-  },
+  options?: SearchDispatchOptions,
 ) {
   const keywords = parseKeywords(keywordInput);
   if (keywords.length === 0) {

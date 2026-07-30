@@ -20,6 +20,28 @@ function countryLabel(c?: string | null) {
   return c;
 }
 
+function locationCell(c: CompetitorRecord) {
+  const label =
+    c.locationLabel ||
+    [c.locationSuburb, c.locationCity].filter(Boolean).join(", ") ||
+    null;
+  const status = c.locationStatus || null;
+  return (
+    <div className="location-cell">
+      <div>{label || "—"}</div>
+      {status === "unknown" && (
+        <span className="location-badge is-unknown">location unknown</span>
+      )}
+      {status === "matched" && label && (
+        <span className="location-badge is-matched">matched</span>
+      )}
+      {status === "mismatch" && (
+        <span className="location-badge is-mismatch">mismatch</span>
+      )}
+    </div>
+  );
+}
+
 function shortUrl(url?: string | null) {
   if (!url) return "—";
   try {
@@ -227,7 +249,7 @@ export function CompetitorTable({
   const isYouTube = platform === "youtube";
   const isGoogleFamily = isGoogle || isYouTube;
 
-  let colCount = 8; // company, country, services, active, sample, landing, days, links
+  let colCount = 9; // company, ad market, location, services, active, sample, landing, days, links
   if (isMeta || isLinkedIn) colCount += 1; // CTA
   if (isLinkedIn) colCount += 2; // ad type, impressions
   if (isGoogle || isYouTube) colCount += 2; // format, domain
@@ -246,12 +268,13 @@ export function CompetitorTable({
               onSort={onSort}
             />
             <SortTh
-              label="Country"
+              label="Ad market"
               column="country"
               sortKey={sortKey}
               sortDir={sortDir}
               onSort={onSort}
             />
+            <th>Location</th>
             <SortTh
               label="Services"
               column="services"
@@ -366,6 +389,7 @@ export function CompetitorTable({
                       {countryLabel(c.country)}
                     </span>
                   </td>
+                  <td>{locationCell(c)}</td>
                   <td>
                     <div className="tags">
                       {c.services.map((s) => (
@@ -466,7 +490,9 @@ export function CompetitorTable({
                         >
                           {c.recreatedPage?.status === "completed"
                             ? "View recreated page"
-                            : "Recreate for my brand"}
+                            : c.recreatedPage?.status === "content_ready"
+                              ? "Review content draft"
+                              : "Recreate for my brand"}
                         </a>
                       )}
                     </div>

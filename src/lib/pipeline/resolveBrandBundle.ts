@@ -1,6 +1,5 @@
-import type { BrandColors, BusinessProfile } from "../types";
+import type { BrandColors, BrandDesignSystem, BusinessProfile } from "../types";
 import {
-  extractBrandColors,
   extractBrandColorsFromHtml,
   normalizeHex,
 } from "./brandColors";
@@ -14,22 +13,23 @@ import {
   getAnthropicClient,
   getAnthropicModel,
 } from "../anthropic/client";
-
-const DEFAULT_COLORS: BrandColors = {
-  primary: "#0F7A6C",
-  secondary: "#134E4A",
-  accent: "#F59E0B",
-  background: "#FFFFFF",
-  text: "#0F172A",
-  muted: "#64748B",
-  source: "fallback",
-};
+import {
+  extractColorsViaFirecrawl,
+  fetchBrandfetchColors,
+  isChallengeOrEmptyHtml,
+  reconcilePaletteWithHtmlEvidence,
+} from "./brandColorSources";
+import {
+  harmonizeBrandPalette,
+  isWeakOrJunkPalette,
+} from "./paletteHarmonize";
 
 export type BrandBundle = {
   businessUrl: string;
   finalUrl: string;
   colors: BrandColors;
   assets: BrandSiteAssets | null;
+  design: BrandDesignSystem | null;
   warnings: string[];
 };
 
@@ -42,7 +42,9 @@ function withWwwVariants(url: string): string[] {
   const normalized = normalizeLandingUrl(url) || url;
   push(normalized);
   try {
-    const u = new URL(normalized.startsWith("http") ? normalized : `https://${normalized}`);
+    const u = new URL(
+      normalized.startsWith("http") ? normalized : `https://${normalized}`,
+    );
     push(u.toString());
     push(`${u.origin}/`);
     if (u.hostname.startsWith("www.")) {
@@ -91,7 +93,6 @@ async function firstReachableImage(urls: string[]): Promise<string | null> {
       if (!res.ok) continue;
       const ct = res.headers.get("content-type") || "";
       if (ct && !/^image\//i.test(ct) && !/octet-stream/i.test(ct)) continue;
-      // clearbit returns 200 with tiny placeholder sometimes — accept anyway
       return res.url || url;
     } catch {
       // try next
@@ -103,24 +104,35 @@ async function firstReachableImage(urls: string[]): Promise<string | null> {
 async function extractColorsViaLlm(
   businessUrl: string,
   businessName?: string | null,
+  pageEvidence?: string | null,
 ): Promise<BrandColors | null> {
   if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) {
     return null;
   }
+  if (!pageEvidence || pageEvidence.trim().length < 80) {
+    return null;
+  }
 
-  const prompt = `You know public brand websites. Infer the main brand palette used on this company's website UI (buttons, links, logo accents) — not random decorative colors.
+  const prompt = `Extract the REAL brand UI palette from this website evidence only.
 
 Business: ${businessName || "unknown"}
 URL: ${businessUrl}
+
+PAGE EVIDENCE (markdown / notes from a live scrape):
+"""
+${pageEvidence.slice(0, 6000)}
+"""
 
 Return ONLY JSON:
 { "primary": "#RRGGBB", "secondary": "#RRGGBB", "accent": "#RRGGBB", "background": "#RRGGBB", "text": "#RRGGBB", "muted": "#RRGGBB" }
 
 Rules:
-- Use real hex from their site branding when you know it (e.g. logo / primary CTA).
-- Prefer saturated brand colors for primary/accent.
-- background usually near-white; text near-black/dark navy.
-- If uncertain, still give your best estimate from their public branding.`;
+- Use colors actually evidenced on this site (logo, buttons, headings, CSS mentions).
+- Do NOT invent a generic marketing orange/coral palette.
+- Do NOT invent a blue/green accent unless it clearly appears as a major UI color on the site.
+- Accent must match the site's real palette family.
+- background white/light and text dark when that matches the page.
+- If evidence is insufficient, return { "primary": null }.`;
 
   try {
     if (process.env.ANTHROPIC_API_KEY) {
@@ -128,7 +140,7 @@ Rules:
       const completion = await client.messages.create({
         model: getAnthropicModel(),
         max_tokens: 400,
-        temperature: 0.1,
+        temperature: 0,
         messages: [{ role: "user", content: prompt }],
       });
       const content = completion.content
@@ -136,17 +148,17 @@ Rules:
         .join("\n");
       const m = content.match(/\{[\s\S]*\}/);
       if (!m) return null;
-      const parsed = JSON.parse(m[0]) as Record<string, string>;
+      const parsed = JSON.parse(m[0]) as Record<string, string | null>;
       const primary = normalizeHex(parsed.primary || "");
       if (!primary) return null;
       return {
         primary,
-        secondary: normalizeHex(parsed.secondary || "") || DEFAULT_COLORS.secondary,
-        accent: normalizeHex(parsed.accent || "") || DEFAULT_COLORS.accent,
+        secondary: normalizeHex(parsed.secondary || "") || primary,
+        accent: normalizeHex(parsed.accent || "") || primary,
         background: normalizeHex(parsed.background || "") || "#FFFFFF",
         text: normalizeHex(parsed.text || "") || "#0F172A",
-        muted: normalizeHex(parsed.muted || "") || DEFAULT_COLORS.muted,
-        source: `llm:${businessUrl}`,
+        muted: normalizeHex(parsed.muted || "") || "#64748B",
+        source: `llm-grounded:${businessUrl}`,
       };
     }
   } catch (err) {
@@ -172,8 +184,9 @@ function emptyAssets(finalUrl: string, siteName: string | null): BrandSiteAssets
 }
 
 /**
- * Strictly resolve brand colors + assets from the user-entered business URL.
- * Live HTML/CSS first; profile cache + logo CDNs + LLM colors as fallbacks.
+ * Resolve brand colors + assets + design system from the business URL.
+ * Primary: Firecrawl branding format (colors, fonts, logo, components, links).
+ * Fallbacks: HTML/CSS → Brandfetch → profile cache → grounded LLM.
  */
 export async function resolveBrandBundle(input: {
   businessUrl: string;
@@ -189,58 +202,63 @@ export async function resolveBrandBundle(input: {
   let html: string | null = null;
   let finalUrl = businessUrl;
   let title: string | null = input.profile?.businessName || null;
+  let pageEvidence: string | null = null;
+  let colors: BrandColors | null = null;
+  let assets: BrandSiteAssets | null = null;
+  let design: BrandDesignSystem | null = null;
 
-  // 1) Live fetch with www / origin variants
-  for (const candidate of withWwwVariants(businessUrl)) {
-    try {
-      const fetched = await fetchRawLandingHtml(candidate);
-      if (fetched.html && fetched.html.length > 500) {
-        // Reject obvious Cloudflare challenge shells
-        if (
-          /just a moment|cf-browser-verification|challenge-platform|attention required/i.test(
-            fetched.html,
-          ) &&
-          fetched.html.length < 100_000
-        ) {
-          warnings.push(`Blocked/challenge HTML from ${candidate}`);
-          continue;
+  // 1) Firecrawl branding — primary source
+  const fc = await extractColorsViaFirecrawl(businessUrl);
+  warnings.push(...fc.warnings);
+  pageEvidence = fc.markdown || pageEvidence;
+  if (fc.html && !isChallengeOrEmptyHtml(fc.html)) {
+    html = fc.html;
+  }
+  if (fc.assets) {
+    assets = fc.assets;
+    finalUrl = fc.assets.finalUrl || finalUrl;
+    title = fc.assets.siteName || title;
+  }
+  if (fc.design) {
+    design = fc.design;
+  }
+  if (fc.colors && !isWeakOrJunkPalette(fc.colors)) {
+    colors = fc.colors;
+  }
+
+  // 2) Live HTML assets if Firecrawl didn't return them
+  if (!assets || !html) {
+    for (const candidate of withWwwVariants(businessUrl)) {
+      try {
+        const fetched = await fetchRawLandingHtml(candidate);
+        if (fetched.html && fetched.html.length > 500) {
+          if (isChallengeOrEmptyHtml(fetched.html)) {
+            warnings.push(`Blocked/challenge HTML from ${candidate}`);
+            continue;
+          }
+          html = html || fetched.html;
+          finalUrl = fetched.finalUrl || finalUrl;
+          title = fetched.title || title;
+          if (!assets) {
+            try {
+              assets = extractBrandAssetsFromHtml(fetched.html, finalUrl);
+            } catch (err) {
+              warnings.push(
+                `Asset extract from HTML failed: ${(err as Error).message}`,
+              );
+            }
+          }
+          break;
         }
-        html = fetched.html;
-        finalUrl = fetched.finalUrl;
-        title = fetched.title || title;
-        break;
+      } catch (err) {
+        warnings.push(
+          `Fetch failed for ${candidate}: ${(err as Error).message || String(err)}`,
+        );
       }
-    } catch (err) {
-      warnings.push(
-        `Fetch failed for ${candidate}: ${(err as Error).message || String(err)}`,
-      );
     }
   }
 
-  let colors: BrandColors | null = null;
-  let assets: BrandSiteAssets | null = null;
-
-  if (html) {
-    try {
-      colors = await extractBrandColorsFromHtml(html, finalUrl);
-    } catch (err) {
-      warnings.push(`Color extract from HTML failed: ${(err as Error).message}`);
-    }
-    try {
-      assets = extractBrandAssetsFromHtml(html, finalUrl);
-    } catch (err) {
-      warnings.push(`Asset extract from HTML failed: ${(err as Error).message}`);
-    }
-  } else {
-    // Direct helpers as secondary attempt
-    try {
-      colors = await extractBrandColors(businessUrl);
-      if (colors.source?.includes("fallback")) {
-        warnings.push("extractBrandColors returned fallback palette");
-      }
-    } catch (err) {
-      warnings.push(`extractBrandColors failed: ${(err as Error).message}`);
-    }
+  if (!assets) {
     try {
       assets = await fetchBrandSiteAssets(businessUrl);
     } catch (err) {
@@ -248,11 +266,34 @@ export async function resolveBrandBundle(input: {
     }
   }
 
-  // 2) Profile cache (from earlier Analyze URL)
+  // 3) HTML/CSS colors if Firecrawl branding missing
+  if (isWeakOrJunkPalette(colors) && html) {
+    try {
+      const fromHtml = await extractBrandColorsFromHtml(html, finalUrl);
+      if (!isWeakOrJunkPalette(fromHtml)) {
+        colors = fromHtml;
+        warnings.push("Brand colors from live HTML/CSS (Firecrawl branding empty)");
+      }
+    } catch (err) {
+      warnings.push(`Color extract from HTML failed: ${(err as Error).message}`);
+    }
+  }
+
+  // 4) Brandfetch
+  if (isWeakOrJunkPalette(colors)) {
+    const bf = await fetchBrandfetchColors(businessUrl);
+    if (bf && !isWeakOrJunkPalette(bf)) {
+      colors = bf;
+      warnings.push(`Brand colors from Brandfetch (${colors.source})`);
+    }
+  }
+
+  // 5) Profile cache
   if (
-    (!colors || colors.source?.includes("fallback")) &&
+    isWeakOrJunkPalette(colors) &&
     input.profile?.brandColors &&
-    !input.profile.brandColors.source?.includes("fallback")
+    !isWeakOrJunkPalette(input.profile.brandColors) &&
+    !/^llm:/i.test(input.profile.brandColors.source || "")
   ) {
     colors = input.profile.brandColors;
     warnings.push("Used brand colors cached on business profile");
@@ -261,25 +302,45 @@ export async function resolveBrandBundle(input: {
     assets = input.profile.brandAssets;
     warnings.push("Used brand assets cached on business profile");
   }
+  if (!design && input.profile?.brandDesign) {
+    design = input.profile.brandDesign;
+  }
 
-  // 3) LLM color inference when HTML blocked
-  if (!colors || colors.source?.includes("fallback")) {
+  // 6) Grounded LLM last resort
+  if (isWeakOrJunkPalette(colors)) {
     const llmColors = await extractColorsViaLlm(
       businessUrl,
       input.profile?.businessName || title,
+      pageEvidence ||
+        (html && !isChallengeOrEmptyHtml(html) ? html.slice(0, 6000) : null),
     );
-    if (llmColors) {
+    if (llmColors && !isWeakOrJunkPalette(llmColors)) {
       colors = llmColors;
-      warnings.push("Inferred brand colors via Claude (site HTML blocked)");
+      warnings.push("Brand colors via grounded LLM (page evidence)");
     }
   }
 
-  if (!colors) {
-    colors = { ...DEFAULT_COLORS, source: `fallback:${businessUrl}` };
-    warnings.push("Fell back to default palette — could not read site colors");
+  if (isWeakOrJunkPalette(colors) || !colors) {
+    throw new Error(
+      `Could not extract real brand colors from ${businessUrl}. Set FIRECRAWL_API_KEY and re-analyze.`,
+    );
   }
 
-  // 4) Logo CDN fallbacks when site blocked / no logo found
+  // Trust Firecrawl branding as returned; light harmonize only for non-Firecrawl sources
+  if (/^firecrawl-branding:/i.test(colors.source || "")) {
+    // keep Firecrawl roles intact
+  } else {
+    colors = html
+      ? reconcilePaletteWithHtmlEvidence(colors, html, businessUrl)
+      : harmonizeBrandPalette(colors);
+  }
+
+  if (isWeakOrJunkPalette(colors)) {
+    throw new Error(
+      `Brand color extraction for ${businessUrl} produced junk values. Re-run analyze with Firecrawl.`,
+    );
+  }
+
   if (!assets) {
     assets = emptyAssets(finalUrl, input.profile?.businessName || title);
   }
@@ -290,15 +351,20 @@ export async function resolveBrandBundle(input: {
         ...assets,
         logoUrl: cdnLogo,
         images: [
-          { src: cdnLogo, alt: assets.siteName || "Logo", kind: "logo" as const },
+          {
+            src: cdnLogo,
+            alt: assets.siteName || "Logo",
+            kind: "logo" as const,
+          },
           ...assets.images,
         ],
       };
-      warnings.push("Used CDN logo fallback (Clearbit/Google) because site logo was unavailable");
+      warnings.push(
+        "Used CDN logo fallback (Clearbit/Google) because site logo was unavailable",
+      );
     }
   }
 
-  // Ensure siteName
   if (!assets.siteName) {
     assets = {
       ...assets,
@@ -311,6 +377,7 @@ export async function resolveBrandBundle(input: {
     finalUrl: assets.finalUrl || finalUrl,
     colors,
     assets,
+    design,
     warnings,
   };
 }

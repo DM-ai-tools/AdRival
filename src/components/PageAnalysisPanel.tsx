@@ -39,6 +39,7 @@ export function PageAnalysisPanel({
 
   const offer = analysis.offer;
   const sections = analysis.pageArchitecture?.sections || [];
+  const sameLp = analysis.sameLandingPageAds;
 
   return (
     <div className="page-analysis-panel">
@@ -91,6 +92,71 @@ export function PageAnalysisPanel({
               />
             )}
           </dl>
+        </div>
+      )}
+
+      {sameLp && (
+        <div className="page-analysis-block same-lp-ads">
+          <h5>
+            Ads on this landing page
+            {sameLp.matchingAds > 0
+              ? ` · ${sameLp.matchingAds} ad${sameLp.matchingAds === 1 ? "" : "s"}`
+              : ""}
+          </h5>
+          <p className="muted same-lp-meta">
+            Scanned {sameLp.scannedAds} advertiser ad
+            {sameLp.scannedAds === 1 ? "" : "s"}
+            {sameLp.ads.length > 0
+              ? ` · showing ${sameLp.ads.length} unique creative${
+                  sameLp.ads.length === 1 ? "" : "s"
+                }`
+              : ""}
+          </p>
+          {sameLp.note && <p className="muted">{sameLp.note}</p>}
+          {sameLp.ads.length === 0 ? (
+            <p className="muted">
+              No other ads found pointing at this landing page.
+            </p>
+          ) : (
+            <ul className="same-lp-ad-list">
+              {sameLp.ads.map((ad) => (
+                <li key={ad.adArchiveId} className="same-lp-ad">
+                  <div className="same-lp-ad-top">
+                    <strong className="same-lp-hook">{ad.hook}</strong>
+                    <a
+                      href={ad.adLibraryUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="same-lp-library-link"
+                    >
+                      Ad Library
+                    </a>
+                  </div>
+                  <dl className="lookup-fields same-lp-fields">
+                    <Field label="Offer" value={ad.offer} />
+                    <Field label="CTA" value={ad.ctaText} />
+                    {ad.bodySnippet && ad.bodySnippet !== ad.hook && (
+                      <Field label="Copy" value={ad.bodySnippet} />
+                    )}
+                    <Field
+                      label="Status"
+                      value={
+                        [
+                          ad.isActive === false ? "Inactive" : "Active",
+                          ad.daysRunning != null && ad.daysRunning >= 0
+                            ? `${ad.daysRunning}d`
+                            : null,
+                          ad.country,
+                        ]
+                          .filter(Boolean)
+                          .join(" · ") || null
+                      }
+                    />
+                  </dl>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
 

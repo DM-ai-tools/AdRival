@@ -90,8 +90,8 @@ export type PlatformAdThresholds = {
 export function getPlatformAdThresholds(p: AdPlatform): PlatformAdThresholds {
   if (p === "facebook") {
     return {
-      minDaysExclusive: 10,
-      minActiveAds: 8,
+      minDaysExclusive: 7,
+      minActiveAds: 5,
       requireDaysGreaterThan: false,
       skipDuration: false,
       activeAdsInclusive: false,
@@ -117,10 +117,10 @@ export function getPlatformAdThresholds(p: AdPlatform): PlatformAdThresholds {
       activeAdsInclusive: true,
     };
   }
-  // Instagram: keep stricter bar
+  // Instagram: aligned closer to Facebook relaxed tiers
   return {
-    minDaysExclusive: 20,
-    minActiveAds: 15,
+    minDaysExclusive: 10,
+    minActiveAds: 5,
     requireDaysGreaterThan: true,
     skipDuration: false,
     activeAdsInclusive: true,

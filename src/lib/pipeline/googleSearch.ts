@@ -18,11 +18,13 @@ import {
   pickCompanyPageMatch,
   pickGoogleAdDomains,
   proposeAgencyDomains,
+  serviceKeywordOverlapScore,
 } from "../openai/analyzer";
 import { saveCompetitor, saveJob, saveLookupAd, saveLookupJob } from "../db";
 import {
   TARGET_COMPETITORS,
   type AdCandidate,
+  type BrandReview,
   type CompetitorRecord,
   type LookupAdRecord,
   type LookupJob,
@@ -373,11 +375,7 @@ export async function runGoogleFamilySearch(
   jobId: string,
   keywordInput: string | string[],
   platform: Extract<AdPlatform, "google" | "youtube">,
-  options?: {
-    geo?: string;
-    businessProfile?: import("../types").BusinessProfile | null;
-    businessUrl?: string | null;
-  },
+  options?: import("./searchOptions").SearchDispatchOptions,
 ) {
   const keywords = parseKeywords(keywordInput);
   const now = new Date().toISOString();
@@ -391,6 +389,10 @@ export async function runGoogleFamilySearch(
     keywords,
     platform,
     geo,
+    geoMode: options?.geoMode || "countrywide",
+    selectedCategory: options?.selectedCategory || null,
+    targetLocations: options?.targetLocations || [],
+    keywordLocation: options?.keywordLocation || null,
     businessUrl,
     businessProfile,
     status: "running",
@@ -420,14 +422,28 @@ export async function runGoogleFamilySearch(
     const queries = new Set<string>(keywords);
     for (const kw of keywords) {
       try {
-        for (const q of await expandKeywordQueries(kw, businessProfile))
+        for (const q of await expandKeywordQueries(kw, businessProfile, {
+          geoMode: job.geoMode,
+          targetLocations: job.targetLocations,
+          selectedCategory: job.selectedCategory,
+        }))
           queries.add(q);
       } catch {
         /* keep seed */
       }
     }
+    if (
+      job.geoMode === "company_locations" ||
+      job.geoMode === "keyword_location"
+    ) {
+      for (const loc of (job.targetLocations || []).slice(0, 4)) {
+        const place = loc.suburb || loc.city || loc.label;
+        if (!place) continue;
+        for (const kw of keywords.slice(0, 3)) queries.add(`${kw} ${place}`);
+      }
+    }
 
-    outer: for (const query of Array.from(queries).slice(0, 10)) {
+    outer: for (const query of Array.from(queries).slice(0, 18)) {
       if (accepted.length >= TARGET_COMPETITORS) break;
 
       job.progress.stage = "finding_domains";
@@ -674,11 +690,22 @@ async function tryAcceptFromAds(args: {
   }
 
   const primary = [...enriched].sort((a, b) => {
-    const score = (c: AdCandidate) =>
-      (c.landingPageUrl ? 50 : 0) +
-      (c.title ? 20 : 0) +
-      (c.daysRunning >= 0 ? 15 : 0) +
-      (c.fullText?.length || 0) / 50;
+    const score = (c: AdCandidate) => {
+      const text = `${c.title}\n${c.body}\n${c.fullText}`;
+      const kw =
+        serviceKeywordOverlapScore(text, {
+          businessProfile: job.businessProfile,
+          searchKeywords: keywords,
+          selectedCategory: job.selectedCategory,
+        }) * 40;
+      return (
+        kw +
+        (c.landingPageUrl ? 50 : 0) +
+        (c.title ? 20 : 0) +
+        (c.daysRunning >= 0 ? 15 : 0) +
+        (c.fullText?.length || 0) / 50
+      );
+    };
     return score(b) - score(a);
   })[0];
 
@@ -696,8 +723,13 @@ async function tryAcceptFromAds(args: {
       keywords[0] || query,
       primary,
       null,
-      enriched.filter((a) => a.adArchiveId !== primary.adArchiveId).slice(0, 3),
-      { relaxed: true, businessProfile: job.businessProfile },
+      enriched.filter((a) => a.adArchiveId !== primary.adArchiveId).slice(0, 5),
+      {
+        relaxed: accepted.length >= 5,
+        businessProfile: job.businessProfile,
+        searchKeywords: keywords,
+        selectedCategory: job.selectedCategory,
+      },
     );
   } catch {
     job.progress.rejected += 1;
@@ -723,10 +755,6 @@ async function tryAcceptFromAds(args: {
     return;
   }
 
-  job.progress.stage = "brand_review";
-  job.progress.message = `Brand review for ${pageName}…`;
-  saveJob(job);
-
   const snap = primary.snapshot as GoogleAdCreative & {
     _details?: { youtubeUrl?: string | null };
   };
@@ -734,41 +762,34 @@ async function tryAcceptFromAds(args: {
   const website =
     normalizeWebsiteUrl(websiteHint) ||
     (domainHint ? websiteUrl(domainHint) : null);
-  // Only a real YouTube creative URL — never landing pages / transparency URLs
   const creativeYt = isYouTubeUrl(snap._details?.youtubeUrl)
     ? String(snap._details?.youtubeUrl)
     : null;
 
-  let brand;
-  try {
-    brand = await runBrandReview({
-      pageId,
-      pageName,
-      websiteHint: website,
-      youtubeUrlHint: creativeYt,
-      youtubeHandleHint: null,
-      categoryHint:
-        platform === "youtube" ? "YouTube advertiser" : "Google advertiser",
-      sourcePlatform: platform,
-    });
-  } catch (err) {
-    brand = {
-      website,
-      category:
-        platform === "youtube" ? "YouTube advertiser" : "Google advertiser",
-      youtubeUrl: creativeYt,
-    };
-    job.progress.message = `Partial brand review for ${pageName}: ${(err as Error).message}`;
-    saveJob(job);
-  }
+  let brand: BrandReview = {
+    website,
+    category:
+      platform === "youtube" ? "YouTube advertiser" : "Google advertiser",
+    youtubeUrl: creativeYt,
+  };
 
-  brand = sanitizeBrandForPlatform(brand, platform, {
-    websiteHint: website,
-    creativeYoutubeUrl: creativeYt,
+  const {
+    cheapLocationFromText,
+    resolveAndMatchCompetitorLocation,
+  } = await import("./competitorLocation");
+  const { updateCompetitor } = await import("../db");
+
+  const provisional = cheapLocationFromText({
+    pageName,
+    adText: primary.fullText || primary.body,
+    landingUrl: primary.landingPageUrl || website,
+    targets: job.targetLocations || [],
+    geoMode: job.geoMode || "countrywide",
   });
 
   const sampleAd = sampleAdFromGoogleCandidate(primary, platform, domainHint);
 
+  // Save first — never block on location
   const competitor: CompetitorRecord = {
     id: newId(),
     runId: job.id,
@@ -776,6 +797,12 @@ async function tryAcceptFromAds(args: {
     pageName,
     country,
     platform,
+    locationLabel: provisional.locationLabel,
+    locationCity: provisional.locationCity,
+    locationSuburb: provisional.locationSuburb,
+    locationCountry: provisional.locationCountry,
+    locationStatus: provisional.locationStatus,
+    locationSource: provisional.locationSource,
     activeAdsCount: activeCount,
     services: filter.services as ServiceLabel[],
     sampleAd,
@@ -787,8 +814,86 @@ async function tryAcceptFromAds(args: {
   accepted.push(competitor);
   job.competitorIds.push(competitor.id);
   job.progress.accepted = accepted.length;
+  job.progress.message = `Accepted ${pageName} (${accepted.length}/${TARGET_COMPETITORS}) via ${domain} — location pending…`;
+  saveJob(job);
+
+  // Enrich brand + location after accept
+  job.progress.stage = "brand_review";
+  job.progress.message = `Enriching brand for ${pageName}…`;
+  saveJob(job);
+  try {
+    brand = await runBrandReview({
+      pageId,
+      pageName,
+      websiteHint: website,
+      youtubeUrlHint: creativeYt,
+      youtubeHandleHint: null,
+      categoryHint:
+        platform === "youtube" ? "YouTube advertiser" : "Google advertiser",
+      sourcePlatform: platform,
+    });
+    brand = sanitizeBrandForPlatform(brand, platform, {
+      websiteHint: website,
+      creativeYoutubeUrl: creativeYt,
+    });
+  } catch (err) {
+    job.progress.message = `Partial brand review for ${pageName}: ${(err as Error).message}`;
+    saveJob(job);
+  }
+
+  job.progress.stage = "location_check";
+  job.progress.message = `Resolving location for ${pageName}…`;
+  saveJob(job);
+  let loc = provisional;
+  try {
+    const locResult = await resolveAndMatchCompetitorLocation({
+      pageName,
+      website: brand.website || website,
+      facebookUrl: brand.facebookUrl,
+      linkedinUrl: brand.linkedinUrl,
+      geoMode: job.geoMode || "countrywide",
+      targetLocations: job.targetLocations || [],
+      provisional,
+      skipPerplexityIfResolved: provisional.locationStatus === "matched",
+    });
+    loc = locResult.location;
+  } catch {
+    // keep provisional
+  }
+
+  updateCompetitor(competitor.id, {
+    brand,
+    locationLabel: loc.locationLabel,
+    locationCity: loc.locationCity,
+    locationSuburb: loc.locationSuburb,
+    locationCountry: loc.locationCountry,
+    locationStatus: loc.locationStatus,
+    locationSource: loc.locationSource,
+  });
+  const idx = accepted.findIndex((c) => c.id === competitor.id);
+  if (idx >= 0) {
+    accepted[idx] = {
+      ...accepted[idx],
+      brand,
+      locationLabel: loc.locationLabel,
+      locationCity: loc.locationCity,
+      locationSuburb: loc.locationSuburb,
+      locationCountry: loc.locationCountry,
+      locationStatus: loc.locationStatus,
+      locationSource: loc.locationSource,
+    };
+  }
+
   job.progress.stage = "searching_ads";
-  job.progress.message = `Accepted ${pageName} (${accepted.length}/${TARGET_COMPETITORS}) via ${domain}`;
+  const locNote =
+    loc.locationStatus === "unknown"
+      ? " · location unknown"
+      : loc.locationStatus === "mismatch"
+        ? ` · location mismatch${loc.locationLabel ? ` (${loc.locationLabel})` : ""}`
+        : loc.locationLabel
+          ? ` · ${loc.locationLabel}`
+          : "";
+  job.progress.message = `Accepted ${pageName} (${accepted.length}/${TARGET_COMPETITORS}) via ${domain}${locNote}`;
   saveJob(job);
 }
 

@@ -40,8 +40,63 @@ function normalizeText(t: string): string {
   return t.replace(/\s+/g, " ").trim();
 }
 
+/**
+ * Set visible text without destroying icons/chevrons inside interactive controls
+ * (FAQ buttons, accordion headers, etc.).
+ */
+function setTextPreservingStructure(
+  $: ReturnType<typeof cheerio.load>,
+  $el: cheerio.Cheerio<any>,
+  text: string,
+): void {
+  if ($el.children().length === 0) {
+    $el.text(text);
+    return;
+  }
+
+  // Prefer a dedicated text-bearing child that isn't an icon wrapper
+  const $textChild = $el
+    .children("span, p, strong, em, label, a")
+    .filter((_, c) => {
+      const $c = $(c);
+      if ($c.is("svg, i, img")) return false;
+      if ($c.children("svg, i, img").length && normalizeText($c.text()).length < 3) {
+        return false;
+      }
+      return normalizeText($c.text()).length > 0 || $c.children().length === 0;
+    })
+    .first();
+
+  if ($textChild.length) {
+    if ($textChild.children().length === 0) {
+      $textChild.text(text);
+    } else {
+      setTextPreservingStructure($, $textChild, text);
+    }
+    return;
+  }
+
+  // Replace first non-empty direct text node; keep element children (icons)
+  let replaced = false;
+  $el.contents().each((_, child) => {
+    const node = child as { type?: string; data?: string };
+    if (node.type === "text") {
+      if (!replaced && normalizeText(node.data || "").length > 0) {
+        node.data = text;
+        replaced = true;
+      } else if (replaced) {
+        node.data = "";
+      }
+    }
+  });
+  if (!replaced) {
+    $el.prepend(text);
+  }
+}
+
 function lengthBudget(len: number): { minLen: number; maxLen: number } {
-  const pad = Math.max(2, Math.round(len * 0.15));
+  // Match content-gen budgets so approved copy fits placements
+  const pad = Math.max(2, Math.round(len * 0.18));
   return {
     minLen: Math.max(1, len - pad),
     maxLen: len + pad,
@@ -50,13 +105,18 @@ function lengthBudget(len: number): { minLen: number; maxLen: number } {
 
 /**
  * Stamp leaf-ish text elements with data-cid so Claude never sees/emits markup.
- * Footer nodes are skipped — footer is rebuilt deterministically from brand assets.
+ * Footer nodes are skipped — footer is remapped in place from brand assets.
  */
 export function stampTextCids(html: string): {
   html: string;
   nodes: CidTextNode[];
 } {
   const $ = cheerio.load(html);
+  // If already stamped (content-phase archive), collect existing nodes — do not re-id
+  if ($("[data-cid]").length >= 3) {
+    return collectStampedCidNodes($.html());
+  }
+
   const nodes: CidTextNode[] = [];
   let i = 0;
   const seenNormalized = new Set<string>();
@@ -67,7 +127,7 @@ export function stampTextCids(html: string): {
       if (!TEXT_ROLES.has(tag)) return;
       const $el = $(el);
       if ($el.closest("script, style, noscript, svg, [data-cid]").length) return;
-      // Footer copy is replaced wholesale — do not CID-stamp it
+      // Footer copy is remapped in place — do not CID-stamp it
       if ($el.closest(FOOTER_SEL).length) return;
 
       // Skip deep wrappers that contain other text tags (except headings/CTAs)
@@ -81,7 +141,7 @@ export function stampTextCids(html: string): {
       }
 
       const text = normalizeText($el.text());
-      if (text.length < 2 || text.length > 400) return;
+      if (text.length < 2 || text.length > 900) return;
       if (/^(home|menu|skip to content|©)$/i.test(text)) return;
 
       // Avoid stamping the same visible string twice (duplicate hero/slide copy)
@@ -97,7 +157,7 @@ export function stampTextCids(html: string): {
           text,
           ...lengthBudget(text.length),
         });
-        if (nodes.length >= 220) return false;
+        if (nodes.length >= 320) return false;
         return;
       }
       if (text.length >= 18) seenNormalized.add(key);
@@ -110,10 +170,44 @@ export function stampTextCids(html: string): {
         text,
         ...lengthBudget(text.length),
       });
-      if (nodes.length >= 220) return false;
+      if (nodes.length >= 320) return false;
     },
   );
 
+  return { html: $.html(), nodes };
+}
+
+/**
+ * Read existing data-cid stamps without changing ids (content↔design fidelity).
+ */
+export function collectStampedCidNodes(html: string): {
+  html: string;
+  nodes: CidTextNode[];
+} {
+  const $ = cheerio.load(html);
+  const nodes: CidTextNode[] = [];
+  $("[data-cid]").each((_, el) => {
+    const $el = $(el);
+    const id = ($el.attr("data-cid") || "").trim();
+    if (!id) return;
+    if ($el.closest(FOOTER_SEL).length && !$el.attr("data-cid")) return;
+    const tag = ((el as { tagName?: string }).tagName || "p").toLowerCase();
+    const text = normalizeText($el.text());
+    if (text.length < 1) return;
+    nodes.push({
+      id,
+      role: tag,
+      text,
+      ...lengthBudget(text.length),
+      inFooter: $el.closest(FOOTER_SEL).length > 0,
+    });
+  });
+  // Stable order by n# when possible
+  nodes.sort((a, b) => {
+    const na = Number(/^n(\d+)$/i.exec(a.id)?.[1] ?? 99999);
+    const nb = Number(/^n(\d+)$/i.exec(b.id)?.[1] ?? 99999);
+    return na - nb;
+  });
   return { html: $.html(), nodes };
 }
 
@@ -228,20 +322,20 @@ export function ensureUniqueReplacements(
 }
 
 /**
- * Apply Claude's {id,newText} map back onto data-cid elements.
- * Enforces ±15% length budget so containers don't overflow.
- *
- * IMPORTANT: Always set the element's full text once. Writing the replacement
- * into every child text node duplicates headlines like "Foo Foo".
+ * Apply Claude's / approved {id,newText} map back onto data-cid elements.
+ * When forceApply is true (approved content path), always write — do not keep
+ * competitor originals just because length is slightly outside budget.
  */
 export function applyCidReplacements(
   html: string,
   nodes: CidTextNode[],
   replacements: Map<string, string>,
+  options?: { forceApply?: boolean },
 ): { html: string; applied: number } {
   const $ = cheerio.load(html);
   const byId = new Map(nodes.map((n) => [n.id, n]));
   let applied = 0;
+  const force = Boolean(options?.forceApply);
 
   $("[data-cid]").each((_, el) => {
     const $el = $(el);
@@ -260,8 +354,9 @@ export function applyCidReplacements(
             normalizeText(meta.text).toLowerCase(),
       );
       if (primary && replacements.has(primary.id)) {
-        // Hide duplicate block rather than rewrite to the same copy again
-        const $block = $el.closest("section, article, .swiper-slide, [class*='slide'], [class*='card'], li, div");
+        const $block = $el.closest(
+          "section, article, .swiper-slide, [class*='slide'], [class*='card'], li, div",
+        );
         if (
           $block.length &&
           !$block.is("body, html, main, header, nav") &&
@@ -284,16 +379,19 @@ export function applyCidReplacements(
     if (!next) return;
 
     let text = normalizeText(next);
-    if (text.length > meta.maxLen) {
-      text = text.slice(0, meta.maxLen).replace(/\s+\S*$/, "").trim();
-    }
-    if (text.length < meta.minLen && text.length < meta.text.length) {
-      // too short — keep original to avoid layout collapse
-      return;
+    // Approved path: never truncate — approved copy wins over slot budgets
+    if (!force) {
+      if (text.length > meta.maxLen) {
+        text = text.slice(0, meta.maxLen).replace(/\s+\S*$/, "").trim();
+      }
+      if (text.length < meta.minLen && text.length < meta.text.length) {
+        // too short — keep original to avoid layout collapse
+        return;
+      }
     }
 
-    // Single write — never fan out into every descendant text node
-    $el.text(text);
+    // Single write — preserve icons/chevrons inside interactive controls
+    setTextPreservingStructure($, $el, text);
     applied += 1;
   });
 

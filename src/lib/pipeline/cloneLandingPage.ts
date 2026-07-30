@@ -21,6 +21,7 @@ import {
   getAnthropicClient,
   getAnthropicModel,
 } from "../anthropic/client";
+import { injectBrandColorOverlay } from "./brandColorOverlay";
 
 const TEXT_TAGS = new Set([
   "h1",
@@ -509,19 +510,6 @@ export function remapBrandColors(html: string, colors: BrandColors): string {
     out = replaceColorEverywhere(out, comp, target);
   });
 
-  // Rewrite common CSS variables inline if present
-  out = out.replace(
-    /(--[\w-]*(?:primary|brand|accent|main|secondary|cta|button|theme)[\w-]*)\s*:\s*([^;!}{]+)/gi,
-    (full, name: string) => {
-      const lower = name.toLowerCase();
-      if (/accent|cta|secondary/.test(lower) && /accent|cta/.test(lower)) {
-        return `${name}: ${colors.accent}`;
-      }
-      if (/secondary/.test(lower)) return `${name}: ${colors.secondary}`;
-      return `${name}: ${colors.primary}`;
-    },
-  );
-
   // Drop remote stylesheets that fight the brand overlay (keep fonts/icon CDNs)
   out = out.replace(/<link\b[^>]*>/gi, (tag) => {
     if (!/rel\s*=\s*["']stylesheet["']/i.test(tag)) return tag;
@@ -535,70 +523,7 @@ export function remapBrandColors(html: string, colors: BrandColors): string {
     return `<!-- adrival: removed competing stylesheet -->`;
   });
 
-  const overlay = `
-<style id="adrival-brand-overlay">
-:root, html, body {
-  --adrival-primary: ${colors.primary} !important;
-  --adrival-secondary: ${colors.secondary} !important;
-  --adrival-accent: ${colors.accent} !important;
-  --adrival-text: ${colors.text} !important;
-  --adrival-bg: ${colors.background} !important;
-  --primary: ${colors.primary} !important;
-  --primary-color: ${colors.primary} !important;
-  --brand: ${colors.primary} !important;
-  --brand-color: ${colors.primary} !important;
-  --brand-primary: ${colors.primary} !important;
-  --color-primary: ${colors.primary} !important;
-  --accent: ${colors.accent} !important;
-  --accent-color: ${colors.accent} !important;
-  --secondary: ${colors.secondary} !important;
-  --link-color: ${colors.primary} !important;
-  --button-bg: ${colors.primary} !important;
-  --bs-primary: ${colors.primary} !important;
-  --bs-link-color: ${colors.primary} !important;
-}
-a { color: ${colors.primary} !important; }
-h1, h2, h3, .headline, [class*="headline"], [class*="Heading"] {
-  color: ${colors.secondary} !important;
-}
-h1 span, h2 span, h3 span, strong span, .highlight, [class*="highlight"], [class*="accent"] {
-  color: ${colors.accent} !important;
-}
-a.btn, a.button, button, .btn, .button,
-[class*="btn-primary"], [class*="Button"], [class*="cta"],
-input[type="submit"], input[type="button"] {
-  background-color: ${colors.primary} !important;
-  background-image: none !important;
-  border-color: ${colors.primary} !important;
-  color: #fff !important;
-}
-a.btn:hover, a.button:hover, button:hover, .btn:hover, .button:hover {
-  background-color: ${colors.secondary} !important;
-  border-color: ${colors.secondary} !important;
-}
-header, nav, [role="banner"] {
-  border-color: ${colors.primary} !important;
-}
-[class*="hero"] [class*="badge"], [class*="pill"], [class*="tag"] {
-  background-color: ${colors.primary} !important;
-  color: #fff !important;
-}
-#adrival-draft-banner { background: ${colors.primary} !important; }
-</style>
-<meta name="theme-color" content="${colors.primary}">
-<meta name="adrival-brand-source" content="${(colors.source || "site").replace(/"/g, "")}">
-`;
-
-  // Remove older overlay if regenerating mid-document
-  out = out.replace(/<style id="adrival-brand-overlay">[\s\S]*?<\/style>/gi, "");
-  out = out.replace(/<meta name="adrival-brand-source"[^>]*>/gi, "");
-
-  if (/<\/head>/i.test(out)) {
-    out = out.replace(/<\/head>/i, `${overlay}</head>`);
-  } else {
-    out = overlay + out;
-  }
-  return out;
+  return injectBrandColorOverlay(out, colors);
 }
 
 function updateDocumentMeta(

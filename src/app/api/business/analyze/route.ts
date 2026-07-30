@@ -3,7 +3,7 @@ import { analyzeBusinessUrl } from "@/lib/openrouter/businessAnalyzer";
 import { resolveBrandBundle } from "@/lib/pipeline/resolveBrandBundle";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+export const maxDuration = 180;
 
 function friendlyOpenRouterError(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
@@ -42,7 +42,7 @@ export async function POST(request: Request) {
 
     const profile = await analyzeBusinessUrl(url);
 
-    // Strict brand pull from the user-entered URL (HTML/CSS + fallbacks)
+    // Brand identity via Firecrawl branding (+ links) — colors, fonts, logo, socials
     try {
       const bundle = await resolveBrandBundle({
         businessUrl: profile.url || url,
@@ -50,6 +50,7 @@ export async function POST(request: Request) {
       });
       profile.brandColors = bundle.colors;
       profile.brandAssets = bundle.assets;
+      profile.brandDesign = bundle.design;
       if (bundle.warnings.length) {
         console.warn("[business/analyze] brand warnings", bundle.warnings);
       }

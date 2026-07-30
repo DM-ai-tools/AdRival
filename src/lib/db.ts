@@ -162,6 +162,22 @@ export function getJob(id: string): SearchJob | null {
   return ensureDb().jobs.find((j) => j.id === id) ?? null;
 }
 
+export function updateJob(
+  id: string,
+  patch: Partial<SearchJob>,
+): SearchJob | null {
+  const db = ensureDb();
+  const idx = db.jobs.findIndex((j) => j.id === id);
+  if (idx < 0) return null;
+  db.jobs[idx] = {
+    ...db.jobs[idx],
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  };
+  writeDb(db);
+  return db.jobs[idx];
+}
+
 export function listJobs(limit = 100): SearchJob[] {
   return ensureDb().jobs.slice(0, limit);
 }

@@ -3,7 +3,7 @@ import { getCompetitor } from "@/lib/db";
 import { analyzeCompetitorLandingPage } from "@/lib/pipeline/landingPageAnalysis";
 
 export const runtime = "nodejs";
-export const maxDuration = 180;
+export const maxDuration = 300;
 
 export async function POST(request: Request) {
   try {
@@ -27,7 +27,8 @@ export async function POST(request: Request) {
     if (
       !body.force &&
       existing.pageAnalysis?.status === "completed" &&
-      existing.pageAnalysis.offer
+      existing.pageAnalysis.offer &&
+      existing.pageAnalysis.sameLandingPageAds
     ) {
       return NextResponse.json({ competitor: existing, cached: true });
     }

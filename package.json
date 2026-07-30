@@ -16,9 +16,11 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
+    "@runwayml/sdk": "^4.13.1",
     "cheerio": "^1.0.0",
     "exceljs": "^4.4.0",
     "next": "^15.3.0",
+    "node-vibrant": "^4.0.4",
     "openai": "^4.96.0",
     "pixelmatch": "^7.2.0",
     "playwright": "^1.62.0",
