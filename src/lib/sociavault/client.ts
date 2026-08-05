@@ -29,10 +29,29 @@ async function svFetch<T>(
   const json = await res.json().catch(() => ({}));
 
   if (!res.ok) {
-    const msg =
-      (json as { error?: string }).error ||
-      `SociaVault request failed (${res.status}) for ${path}`;
-    throw new Error(msg);
+    const status = res.status;
+    const apiErr = (json as { error?: string; message?: string }).error
+      || (json as { message?: string }).message;
+    if (status === 401 || status === 403) {
+      throw new Error(
+        apiErr ||
+          `SociaVault auth failed (${status}) — check SOCIAVAULT_API_KEY`,
+      );
+    }
+    if (status === 402 || /credit|quota|billing|payment/i.test(String(apiErr || ""))) {
+      throw new Error(
+        apiErr ||
+          `SociaVault credits exhausted (${status}) for ${path}`,
+      );
+    }
+    if (status === 429) {
+      throw new Error(
+        apiErr || `SociaVault rate limited (429) for ${path} — retry shortly`,
+      );
+    }
+    throw new Error(
+      apiErr || `SociaVault request failed (${status}) for ${path}`,
+    );
   }
 
   return json as T;

@@ -1,13 +1,14 @@
 import * as cheerio from "cheerio";
 import type { LandingContentBlock, LandingContentDraft } from "../types";
 import type { CidTextNode } from "./archive/rewriteTextByCid";
+import { clipToCompletePhrase } from "./slotTextBudget";
 
 function normalize(s: string): string {
   return s.replace(/\s+/g, " ").trim();
 }
 
 /**
- * Keep approved copy verbatim. Soft-truncate only when wildly longer than the slot.
+ * Keep approved copy. Soft-truncate only when wildly longer — prefer complete phrases.
  */
 function fitApprovedText(
   text: string,
@@ -18,12 +19,15 @@ function fitApprovedText(
   if (!t) return t;
   const ceiling = Math.max(
     maxLenHint || 0,
-    Math.ceil(node.text.length * 1.25),
+    Math.ceil(node.text.length * 1.55),
     node.maxLen,
-    8,
+    24,
   );
   if (t.length > ceiling) {
-    t = t.slice(0, ceiling).replace(/\s+\S*$/, "").trim();
+    t = clipToCompletePhrase(t, ceiling, {
+      softMax: Math.ceil(ceiling * 1.25),
+      role: node.role,
+    });
   }
   return t;
 }
@@ -240,30 +244,39 @@ function setAnchorLabel($: cheerio.CheerioAPI, $el: cheerio.Cheerio<any>, text: 
     $el.text(text);
     return;
   }
+  // Clear all direct text first so competitor labels cannot remain beside the new copy
+  $el.contents().each((_, child) => {
+    const node = child as { type?: string; data?: string };
+    if (node.type === "text") node.data = "";
+  });
+
   const $textChild = $el
     .children("span, p, strong, em, label")
     .filter((_, c) => {
       const $c = $(c);
       if ($c.is("svg, i, img")) return false;
-      return normalize($c.text()).length > 0 || $c.children().length === 0;
+      if ($c.children("svg, i, img").length && normalize($c.text()).length < 2) {
+        return false;
+      }
+      return true;
     })
     .first();
   if ($textChild.length) {
+    $el.children("span, p, strong, em, label").each((_, c) => {
+      const $c = $(c);
+      if ($c[0] === $textChild[0]) return;
+      if ($c.is("svg, i, img")) return;
+      $c.text("");
+    });
     if ($textChild.children().length === 0) $textChild.text(text);
     else setAnchorLabel($, $textChild, text);
     return;
   }
-  let replaced = false;
-  $el.contents().each((_, child) => {
-    const node = child as { type?: string; data?: string };
-    if (node.type === "text" && normalize(node.data || "").length > 0 && !replaced) {
-      node.data = text;
-      replaced = true;
-    } else if (node.type === "text" && replaced) {
-      node.data = "";
-    }
-  });
-  if (!replaced) $el.prepend(text);
+  const safe = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  $el.append(safe);
 }
 
 /**

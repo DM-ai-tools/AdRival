@@ -5,9 +5,220 @@ import type { ArchivedPage } from "./capturePage";
 import { detectSocialNetwork } from "../brandAssets";
 import { replaceColorEverywhere } from "./colorReplace";
 import { injectBrandColorOverlay } from "../brandColorOverlay";
+import {
+  collectRoutableBrandLinks,
+  pickCtaHref,
+  resolveBrandPageHref,
+} from "../brandLinkRouting";
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Partner / press / client logo strips — keep as-is (neither brand logo nor AI). */
+export function isPartnerLogoContext($el: cheerio.Cheerio<any>): boolean {
+  return (
+    $el.closest(
+      "[class*='partner'], [class*='Partner'], [class*='client'], [class*='Client'], [class*='press'], [class*='Press'], [class*='as-seen'], [class*='asseen'], [class*='trusted-by'], [class*='trustedby'], [class*='award'], [class*='certif'], [class*='accreditation'], [class*='media-logo'], [class*='logo-cloud'], [class*='logo-wall'], [class*='brands-row']",
+    ).length > 0
+  );
+}
+
+/**
+ * True when this <img> is a site brand mark (header/nav/footer/identity),
+ * not a photo that should get AI replacement.
+ */
+export function isSiteLogoCandidate(
+  $el: cheerio.Cheerio<any>,
+  src: string,
+  alt: string,
+  className: string,
+): boolean {
+  if (isPartnerLogoContext($el)) return false;
+
+  const hay = `${src.slice(0, 220)} ${alt} ${className}`.toLowerCase();
+  // Photos / people / scene content — never treat as logo
+  if (
+    /handshake|review|testimonial|people|portrait|photo|stock|hero-img|hero-image|team-photo|office|clinic|patient|smile|before|after|gallery|unsplash|pexels/i.test(
+      hay,
+    )
+  ) {
+    return false;
+  }
+
+  const inBrandChrome =
+    $el.closest(
+      "header, nav, [role='banner'], .navbar, .header, .site-header, .masthead, footer, [role='contentinfo'], a.logo, .navbar-brand, [class*='site-logo'], [class*='brand-logo'], [class*='Logo']",
+    ).length > 0;
+  const inLogoLink = $el.closest(
+    "a.logo, .navbar-brand, a[class*='logo'], [class*='navbar-brand'], [class*='site-logo'], [class*='brand-logo']",
+  ).length;
+
+  // Explicit logo / wordmark naming
+  if (/logo|wordmark|logotype|site-logo|navbar-brand|brand-mark/i.test(hay)) {
+    // In main content "logo" may be a section heading image — only accept if chrome or small
+    const width = Number($el.attr("width") || 0);
+    const height = Number($el.attr("height") || 0);
+    if (inBrandChrome || inLogoLink) return true;
+    if (height > 0 && height <= 140) return true;
+    if (width > 0 && width <= 320 && (height === 0 || height <= 160)) return true;
+    if (/^data:image\/svg/i.test(src) || /\.svg(\?|#|$)/i.test(src)) return true;
+    return false;
+  }
+
+  if (!inBrandChrome && !inLogoLink) return false;
+  // Nav menu icons are not logos
+  if (
+    $el.closest("li, button, .menu, .nav-item, .nav-link, .mobile-nav").length &&
+    !inLogoLink
+  ) {
+    return false;
+  }
+
+  const width = Number($el.attr("width") || 0);
+  const height = Number($el.attr("height") || 0);
+  if (height > 0 && height <= 120) return true;
+  if (width > 0 && width <= 280 && (height === 0 || height <= 140)) return true;
+  if (
+    (width === 0 && height === 0 && /\.(svg|png|webp)(\?|#|$)/i.test(src)) ||
+    /^data:image\/svg/i.test(src)
+  ) {
+    return true;
+  }
+  if (inLogoLink) return true;
+  return false;
+}
+
+/** @deprecated use isSiteLogoCandidate */
+function isHeaderLogoCandidate(
+  $el: cheerio.Cheerio<any>,
+  src: string,
+  alt: string,
+  className: string,
+): boolean {
+  return isSiteLogoCandidate($el, src, alt, className);
+}
+
+/**
+ * Apply brand logo to header/nav marks. Exported so design can re-run after image embed.
+ */
+export function applyBrandLogoToHtml(
+  html: string,
+  input: { logoUrl: string; brandName: string; businessUrl: string },
+): { html: string; logos: number } {
+  const $ = cheerio.load(html);
+  const logos = applyBrandLogoMarks($, input);
+  return { html: $.html(), logos };
+}
+
+function applyBrandLogoMarks(
+  $: cheerio.CheerioAPI,
+  input: { logoUrl: string; brandName: string; businessUrl: string },
+): number {
+  let logoHits = 0;
+  const logoUrl = input.logoUrl;
+
+  const stampLogoImg = ($el: cheerio.Cheerio<any>) => {
+    // Logos win over AI slots — reclaim any mistaken gen stamps
+    $el.removeAttr("data-adrival-gen-id");
+    $el.removeAttr("data-adrival-image");
+    $el.attr("src", logoUrl);
+    $el.removeAttr("srcset");
+    $el.removeAttr("sizes");
+    $el.removeAttr("data-src");
+    $el.removeAttr("data-lazy-src");
+    $el.attr("alt", input.brandName);
+    $el.attr("data-adrival-logo", "1");
+    const $picture = $el.parent("picture");
+    if ($picture.length) {
+      $picture.find("source").each((_: number, srcEl: any) => {
+        $(srcEl).attr("srcset", logoUrl);
+        $(srcEl).attr("data-adrival-logo", "1");
+      });
+    }
+    const style = $el.attr("style") || "";
+    if (!/object-fit/i.test(style)) {
+      $el.attr(
+        "style",
+        `${style}${style && !style.trim().endsWith(";") ? ";" : ""}object-fit:contain;`,
+      );
+    }
+    logoHits += 1;
+  };
+
+  // Always refresh previously stamped logos
+  $("img[data-adrival-logo]").each((_, el) => {
+    stampLogoImg($(el));
+  });
+
+  $("img").each((_, el) => {
+    if (logoHits >= 24) return;
+    const $el = $(el);
+    if ($el.attr("data-adrival-logo")) return;
+    const src = $el.attr("src") || "";
+    const alt = $el.attr("alt") || "";
+    const className = `${$el.attr("class") || ""} ${$el.parent().attr("class") || ""}`;
+    if (!isSiteLogoCandidate($el, src, alt, className)) return;
+    if (
+      /icon|sprite|avatar|payment|flag|favicon/i.test(`${src} ${alt}`) &&
+      !/logo/i.test(`${src} ${alt} ${className}`)
+    ) {
+      return;
+    }
+    stampLogoImg($el);
+  });
+
+  // picture/source logos in header / nav / footer brand areas
+  $(
+    "header picture source, nav picture source, .navbar picture source, footer picture source, a.logo picture source, .navbar-brand picture source",
+  ).each((_, el) => {
+    const $el = $(el);
+    if ($el.attr("srcset") || $el.attr("data-adrival-logo")) {
+      $el.attr("srcset", logoUrl);
+      $el.attr("data-adrival-logo", "1");
+      logoHits += 1;
+    }
+  });
+
+  // SVG wordmarks in brand chrome → replace with brand <img>
+  $(
+    "header svg, nav svg, footer svg, a.logo svg, .navbar-brand svg, [class*='site-logo'] svg, [class*='brand-logo'] svg",
+  ).each((_, el) => {
+    if (logoHits >= 24) return;
+    const $el = $(el);
+    if ($el.closest("[data-adrival-logo]").length) return;
+    if (isPartnerLogoContext($el)) return;
+    // Skip large illustrative SVGs
+    const w = Number($el.attr("width") || 0);
+    const h = Number($el.attr("height") || 0);
+    if ((w && w > 400) || (h && h > 200)) return;
+    if (
+      $el.closest("li, button, .menu, .nav-item").length &&
+      !$el.closest("a.logo, .navbar-brand, [class*='logo']").length
+    ) {
+      return;
+    }
+    const width = $el.attr("width") || "140";
+    const height = $el.attr("height") || "40";
+    $el.replaceWith(
+      `<img src="${logoUrl}" alt="${input.brandName}" width="${width}" height="${height}" data-adrival-logo="1" style="object-fit:contain;max-height:${height}px;width:auto;" />`,
+    );
+    logoHits += 1;
+  });
+
+  if (logoHits === 0) {
+    const $header = $(
+      "header, [role='banner'], .navbar, .site-header, .masthead, nav",
+    ).first();
+    if ($header.length) {
+      $header.prepend(
+        `<a href="${input.businessUrl}" data-adrival-logo="1" style="display:inline-flex;align-items:center;padding:8px 12px;z-index:5;position:relative;"><img src="${logoUrl}" alt="${input.brandName}" style="max-height:48px;width:auto;max-width:220px;object-fit:contain;" data-adrival-logo="1" /></a>`,
+      );
+      logoHits += 1;
+    }
+  }
+
+  return logoHits;
 }
 
 /**
@@ -177,52 +388,14 @@ button.btn-secondary,.btn-secondary,a.btn-secondary,[class*='btn-secondary'],[cl
     }
   }
 
-  // Logo: replace src only — preserve width/height/style
+  // Logo: replace header/nav brand marks — preserve width/height/style
   if (input.brand.logoUrl) {
-    let logoHits = 0;
-    $("img").each((_, el) => {
-      if (logoHits >= 3) return;
-      const $el = $(el);
-      const hay = `${$el.attr("src") || ""} ${$el.attr("alt") || ""} ${$el.attr("class") || ""} ${$el.parent().attr("class") || ""}`;
-      const inHeader =
-        $el.closest("header, nav, [role='banner'], .navbar, .logo").length > 0;
-      if (!/logo|brand|wordmark/i.test(hay) && !inHeader) return;
-      if (/icon|sprite|avatar|payment|flag/i.test(hay) && !/logo/i.test(hay)) {
-        return;
-      }
-      $el.attr("src", input.brand.logoUrl!);
-      $el.removeAttr("srcset");
-      $el.attr("alt", input.brandName);
-      $el.attr("data-adrival-logo", "1");
-      logoHits += 1;
-      stats.logos += 1;
+    const logoResult = applyBrandLogoMarks($, {
+      logoUrl: input.brand.logoUrl,
+      brandName: input.brandName,
+      businessUrl: input.businessUrl,
     });
-    // SVG logo slots → replace with img keeping approximate size
-    if (logoHits === 0) {
-      $("header svg, nav svg, a.logo svg, .navbar-brand svg")
-        .first()
-        .each((_, el) => {
-          const $el = $(el);
-          const w = $el.attr("width") || "140";
-          const h = $el.attr("height") || "40";
-          $el.replaceWith(
-            `<img src="${input.brand.logoUrl}" alt="${input.brandName}" width="${w}" height="${h}" data-adrival-logo="1" style="object-fit:contain;max-height:${h}px;width:auto;" />`,
-          );
-          stats.logos += 1;
-        });
-    }
-    // Inject logo if none found
-    if (logoHits === 0 && stats.logos === 0) {
-      const $header = $(
-        "header, [role='banner'], .navbar, .site-header, .masthead, nav",
-      ).first();
-      if ($header.length) {
-        $header.prepend(
-          `<a href="${input.businessUrl}" data-adrival-logo="1" style="display:inline-flex;align-items:center;padding:8px 12px;"><img src="${input.brand.logoUrl}" alt="${input.brandName}" style="max-height:48px;width:auto;object-fit:contain;" /></a>`,
-        );
-        stats.logos += 1;
-      }
-    }
+    stats.logos += logoResult;
   }
 
   // Hero / large content image swaps from brand assets (never icons/footer)
@@ -328,43 +501,10 @@ button.btn-secondary,.btn-secondary,a.btn-secondary,[class*='btn-secondary'],[cl
     if (net && !brandSocialByNet.has(net)) brandSocialByNet.set(net, s.href);
   }
 
-  const pageLinks = [
-    ...(input.brand.siteAssets?.navLinks || []),
-    ...(input.brand.siteAssets?.footerLinks || []),
-  ];
-  const pageByLabel = new Map<string, string>();
-  const pageBySlug = new Map<string, string>();
-  for (const l of pageLinks) {
-    const key = (l.label || "").toLowerCase().replace(/\s+/g, " ").trim();
-    if (key && !pageByLabel.has(key)) pageByLabel.set(key, l.href);
-    try {
-      const slug = new URL(l.href).pathname.replace(/\/$/, "").toLowerCase();
-      if (slug && slug !== "/" && !pageBySlug.has(slug)) pageBySlug.set(slug, l.href);
-    } catch {
-      // ignore
-    }
-  }
-
-  const resolveBrandPageHref = (label: string, competitorPath: string): string => {
-    const lab = label.toLowerCase().replace(/\s+/g, " ").trim();
-    if (lab && pageByLabel.has(lab)) return pageByLabel.get(lab)!;
-    // fuzzy label contains
-    for (const [k, href] of pageByLabel) {
-      if (lab && (k.includes(lab) || lab.includes(k)) && lab.length >= 4) {
-        return href;
-      }
-    }
-    const path = (competitorPath || "").replace(/\/$/, "").toLowerCase();
-    if (path && path !== "/" && pageBySlug.has(path)) return pageBySlug.get(path)!;
-    // slug tail match
-    const tail = path.split("/").filter(Boolean).pop();
-    if (tail) {
-      for (const [slug, href] of pageBySlug) {
-        if (slug.endsWith(`/${tail}`) || slug === `/${tail}`) return href;
-      }
-    }
-    return input.businessUrl;
-  };
+  const pageLinks = collectRoutableBrandLinks(
+    input.brand.siteAssets,
+    input.businessUrl,
+  );
 
   $("a[href]").each((_, el) => {
     const $el = $(el);
@@ -388,11 +528,35 @@ button.btn-secondary,.btn-secondary,a.btn-secondary,[class*='btn-secondary'],[cl
       return;
     }
 
+    const isCta =
+      /btn|button|cta|primary/i.test(className) ||
+      /get started|book|apply|download|sign up|try|demo|call|contact|schedule|quote|enquire/i.test(
+        label,
+      );
+
     try {
       const u = new URL(href, input.archive.finalUrl);
       const host = u.hostname.replace(/^www\./i, "").toLowerCase();
       if (competitorHost && host.includes(competitorHost)) {
-        $el.attr("href", resolveBrandPageHref(label, u.pathname));
+        if (isCta) {
+          $el.attr(
+            "href",
+            pickCtaHref({
+              label,
+              className,
+              assets: input.brand.siteAssets,
+              businessUrl: input.businessUrl,
+            }),
+          );
+        } else {
+          const resolved = resolveBrandPageHref({
+            label,
+            competitorPath: u.pathname,
+            links: pageLinks,
+            businessUrl: input.businessUrl,
+          });
+          $el.attr("href", resolved || input.businessUrl);
+        }
         stats.links += 1;
         return;
       }
@@ -400,12 +564,17 @@ button.btn-secondary,.btn-secondary,a.btn-secondary,[class*='btn-secondary'],[cl
       // ignore
     }
 
-    // CTA-looking buttons → business URL
-    if (
-      /btn|button|cta|primary/i.test(className) ||
-      /get started|book|apply|download|sign up|try|demo|call/i.test(label)
-    ) {
-      $el.attr("href", input.businessUrl);
+    // CTA-looking buttons on external/relative hosts → best brand CTA page
+    if (isCta) {
+      $el.attr(
+        "href",
+        pickCtaHref({
+          label,
+          className,
+          assets: input.brand.siteAssets,
+          businessUrl: input.businessUrl,
+        }),
+      );
       stats.links += 1;
     }
   });

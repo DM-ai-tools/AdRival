@@ -3,6 +3,10 @@ import {
   detectSocialNetwork,
   type BrandSiteAssets,
 } from "./brandAssets";
+import {
+  collectRoutableBrandLinks,
+  resolveBrandPageHref,
+} from "./brandLinkRouting";
 
 function normalizeText(t: string): string {
   return t.replace(/\s+/g, " ").trim();
@@ -244,15 +248,21 @@ export function rebuildBrandFooter(
         idx = uniqueLinks.findIndex((_, i) => !usedLink.has(i));
       }
       if (idx < 0) {
-        // No inventory left — point remaining competitor-host links home
-        try {
-          const host = new URL(href).hostname.replace(/^www\./i, "");
-          // leave external non-competitor alone if we can't tell
-          void host;
-          $el.attr("href", businessUrl);
-        } catch {
-          $el.attr("href", businessUrl);
-        }
+        // Prefer a semantic brand page over collapsing every leftover to homepage
+        const routable = collectRoutableBrandLinks(assets, businessUrl);
+        const resolved = resolveBrandPageHref({
+          label,
+          competitorPath: (() => {
+            try {
+              return new URL(href).pathname;
+            } catch {
+              return null;
+            }
+          })(),
+          links: routable,
+          businessUrl,
+        });
+        $el.attr("href", resolved || businessUrl);
         return;
       }
       usedLink.add(idx);

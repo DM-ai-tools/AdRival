@@ -16,10 +16,10 @@ import {
 } from "../mapApprovedContent";
 import { applyDesignFeedbackToReplacements } from "../applyDesignFeedback";
 import { fitApprovedContentToCids } from "../fitApprovedContent";
-import { generateAndEmbedLandingImages, inventoryImageSlots } from "../generateLandingImages";
+import { generateAndEmbedLandingImages, inventoryImageSlots, embedGeneratedImages } from "../generateLandingImages";
 import { captureArchivedPage, type ArchivedPage } from "./capturePage";
 import { extractBrandTokens } from "./brandTokens";
-import { applyBrandDeterministic } from "./applyBrandDeterministic";
+import { applyBrandDeterministic, applyBrandLogoToHtml } from "./applyBrandDeterministic";
 import {
   applyCidReplacements,
   collapseDoubledElementText,
@@ -171,7 +171,18 @@ export async function recreateFromArchive(input: {
     html = html.replace(re, input.brandName);
   }
 
-  // Reserve image slots before brand asset swaps so Runway can own them.
+  // 1) Stamp brand logos FIRST so they never enter the AI image inventory
+  const logoUrlEarly = brand.logoUrl || brand.siteAssets?.logoUrl || null;
+  if (logoUrlEarly) {
+    const logoFirst = applyBrandLogoToHtml(html, {
+      logoUrl: logoUrlEarly,
+      brandName: input.brandName,
+      businessUrl: input.businessUrl,
+    });
+    html = logoFirst.html;
+  }
+
+  // 2) Reserve AI slots on remaining photos only (skips data-adrival-logo)
   const reserved = inventoryImageSlots(html);
   html = reserved.html;
 
@@ -197,15 +208,16 @@ export async function recreateFromArchive(input: {
         competitorName: input.competitorName,
         industry: input.profile?.industry || null,
         brandColors: brand.colors,
+        logoUrl: logoUrlEarly,
         slots: reserved.slots,
       });
       html = gen.html;
       generatedImages = gen.images;
       imageGenNote = gen.images.length
-        ? `Runway GPT Image 2×${gen.images.length} embedded`
+        ? `Runway GPT Image 2×${gen.images.length} (${gen.embedded} placed)`
         : gen.warnings[0] || "image generation skipped";
       if (gen.warnings.length && gen.images.length) {
-        imageGenNote += ` (${gen.warnings.length} slot warning(s))`;
+        imageGenNote += ` · ${gen.warnings.length} slot warning(s)`;
       }
     } catch (err) {
       console.warn("[archive] image generation failed", err);
@@ -213,6 +225,8 @@ export async function recreateFromArchive(input: {
     }
   } else if (!input.competitorId) {
     imageGenNote = "image generation skipped (no competitorId)";
+  } else if (reserved.slots.length === 0) {
+    imageGenNote = "no photo slots for AI (logos reserved separately)";
   }
 
   const htmlBeforeCopy = html;
@@ -317,6 +331,43 @@ export async function recreateFromArchive(input: {
     },
   );
   html = footer.html;
+
+  // Re-embed after copy/footer passes so later transforms cannot drop Runway srcs
+  if (generatedImages.length > 0) {
+    const re = embedGeneratedImages(html, generatedImages);
+    html = re.html;
+    if (imageGenNote) {
+      imageGenNote = imageGenNote.replace(
+        /\(\d+ placed\)/,
+        `(${re.embedded} placed)`,
+      );
+    }
+  }
+
+  // Logos last — reclaim any logo marks that AI may have overwritten
+  const logoUrl = brand.logoUrl || brand.siteAssets?.logoUrl || null;
+  if (logoUrl) {
+    const logoPass = applyBrandLogoToHtml(html, {
+      logoUrl,
+      brandName: input.brandName,
+      businessUrl: input.businessUrl,
+    });
+    html = logoPass.html;
+  }
+
+  // Final re-embed AI photos only (embed skips / strips logo stamps)
+  if (generatedImages.length > 0) {
+    html = embedGeneratedImages(html, generatedImages).html;
+  }
+
+  // Absolute last: logos win again so brand marks are never left as AI scenes
+  if (logoUrl) {
+    html = applyBrandLogoToHtml(html, {
+      logoUrl,
+      brandName: input.brandName,
+      businessUrl: input.businessUrl,
+    }).html;
+  }
 
   const archiveNote = usedStored
     ? "reused content-phase archive"

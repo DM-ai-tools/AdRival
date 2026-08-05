@@ -8,6 +8,10 @@ import type {
 } from "@/lib/types";
 import { formatDaysLive, type AdPlatform } from "@/lib/platforms";
 import { PageAnalysisPanel } from "@/components/PageAnalysisPanel";
+import {
+  LookupOffersDashboard,
+  LookupOffersTeaser,
+} from "@/components/LookupOffersReportPanel";
 
 interface LookupResultsProps {
   job: LookupJob;
@@ -15,6 +19,9 @@ interface LookupResultsProps {
   onFetchCandidate?: (candidate: LookupPageCandidate) => void;
   fetchingCandidateId?: string | null;
   onAdUpdated?: (ad: LookupAdRecord) => void;
+  onJobUpdated?: (job: LookupJob, ads?: LookupAdRecord[]) => void;
+  /** Reload lookup job + ads after leaving the offers dashboard */
+  onReload?: () => void | Promise<void>;
 }
 
 function fmt(n?: number | null) {
@@ -255,10 +262,16 @@ export function LookupResults({
   onFetchCandidate,
   fetchingCandidateId,
   onAdUpdated,
+  onJobUpdated,
+  onReload,
 }: LookupResultsProps) {
   const page = job.selectedPage;
   const running = job.status === "running";
+  const analyzingOffers = job.progress.stage === "analyzing_offers";
   const platform = (job.platform || "facebook") as AdPlatform;
+  const [regeneratingReport, setRegeneratingReport] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
+  const [showOffersDash, setShowOffersDash] = useState(false);
   const isLinkedIn = platform === "linkedin";
   const liFollowers =
     page?.raw?.linkedinFollowers != null
@@ -274,6 +287,62 @@ export function LookupResults({
       : null;
 
   const others = job.candidates.filter((c) => c.pageId !== page?.pageId);
+
+  async function regenerateOffersReport(force = true) {
+    setReportError(null);
+    setRegeneratingReport(true);
+    try {
+      const res = await fetch("/api/lookup/offers-report", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ lookupId: job.id, force }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Offers report failed");
+      if (data.job) {
+        onJobUpdated?.(
+          data.job as LookupJob,
+          Array.isArray(data.ads) ? (data.ads as LookupAdRecord[]) : undefined,
+        );
+      }
+    } catch (err) {
+      setReportError((err as Error).message);
+    } finally {
+      setRegeneratingReport(false);
+    }
+  }
+
+  async function handleBackFromOffers() {
+    setShowOffersDash(false);
+    await onReload?.();
+  }
+
+  const showOffersTeaser =
+    ads.length > 0 ||
+    Boolean(job.offersReport) ||
+    analyzingOffers ||
+    regeneratingReport;
+
+  if (showOffersDash && job.offersReport?.status === "completed") {
+    return (
+      <LookupOffersDashboard
+        job={job}
+        report={job.offersReport}
+        regenerating={regeneratingReport}
+        onBack={() => {
+          void handleBackFromOffers();
+          if (typeof window !== "undefined") {
+            window.scrollTo({ top: 0, behavior: "smooth" });
+          }
+        }}
+        onRegenerate={
+          ads.length > 0 && !analyzingOffers
+            ? () => void regenerateOffersReport(true)
+            : undefined
+        }
+      />
+    );
+  }
 
   return (
     <div className="lookup-results">
@@ -396,6 +465,32 @@ export function LookupResults({
           )}
         </section>
       )}
+
+      {showOffersTeaser ? (
+        <>
+          {reportError ? (
+            <p className="error-text panel" role="alert">
+              {reportError}
+            </p>
+          ) : null}
+          <LookupOffersTeaser
+            report={job.offersReport}
+            running={analyzingOffers || regeneratingReport}
+            generating={regeneratingReport}
+            onOpen={() => {
+              setShowOffersDash(true);
+              if (typeof window !== "undefined") {
+                window.scrollTo({ top: 0, behavior: "smooth" });
+              }
+            }}
+            onGenerate={
+              ads.length > 0 && !analyzingOffers
+                ? () => void regenerateOffersReport(true)
+                : undefined
+            }
+          />
+        </>
+      ) : null}
 
       <section className="results">
         <div className="results-head">

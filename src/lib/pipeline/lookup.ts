@@ -22,6 +22,7 @@ import {
   type LookupPageCandidate,
 } from "../types";
 import { enrichLookupPageMetrics } from "./lookupEnrichment";
+import { runLookupOffersReportPhase } from "./lookupOffersReport";
 
 const MAX_AD_PAGES_PER_COUNTRY = 25;
 
@@ -286,17 +287,33 @@ export async function runCompetitorLookup(
     }
 
     updateLookup(job, {
-      status: stored.length > 0 ? "completed" : "partial",
+      status: "running",
       progress: {
         ...job.progress,
-        stage: "done",
+        stage: "analyzing_offers",
         adsFetched: stored.length,
         message:
           stored.length > 0
-            ? `Loaded ${stored.length} ads for "${selected.name}".`
+            ? `Loaded ${stored.length} ads — analyzing unique creatives & landing pages…`
             : `Matched "${selected.name}" but found no ads in US/AU.`,
       },
     });
+
+    if (stored.length > 0) {
+      await runLookupOffersReportPhase(job.id, {
+        finalStatus: "completed",
+      });
+    } else {
+      updateLookup(job, {
+        status: "partial",
+        progress: {
+          ...job.progress,
+          stage: "done",
+          adsFetched: 0,
+          message: `Matched "${selected.name}" but found no ads in US/AU.`,
+        },
+      });
+    }
   } catch (err) {
     updateLookup(job, {
       status: "failed",

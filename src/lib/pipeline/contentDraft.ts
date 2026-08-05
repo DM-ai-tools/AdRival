@@ -12,6 +12,7 @@ import {
   extractCompetitorPageTextSlots,
   type PageTextSlot,
 } from "./extractPageTextSlots";
+import { clipToCompletePhrase, lengthBudgetForRole } from "./slotTextBudget";
 
 const DEFAULT_CONTENT_MODEL = "gpt-4.1";
 
@@ -328,28 +329,71 @@ function buildBrandLinkSlots(input: {
 }
 
 function pageSlotsToScaffold(slots: PageTextSlot[]): ScaffoldSlot[] {
-  return slots.map((s) => ({
-    id: s.id,
-    sectionIndex: s.sectionIndex,
-    sectionName: s.sectionName,
-    role: s.role,
-    label: s.label,
-    purpose: s.purpose,
-    targetLen: s.targetLen,
-    minLen: s.minLen,
-    maxLen: s.maxLen,
-    originalText: s.originalText,
-    htmlRole: s.htmlRole,
-  }));
+  return slots.map((s) => {
+    const faqSection = /faq/i.test(s.sectionName);
+    let role = s.role;
+    let label = s.label;
+    if (faqSection) {
+      if (role === "h2" || role === "h3" || role === "eyebrow") {
+        role = "faq_question";
+        label = "FAQ question";
+      } else if (role === "body" || role === "bullet") {
+        role = "faq_answer";
+        label = "FAQ answer";
+      }
+    }
+    return {
+      id: s.id,
+      sectionIndex: s.sectionIndex,
+      sectionName: s.sectionName,
+      role,
+      label,
+      purpose: s.purpose,
+      targetLen: s.targetLen,
+      minLen: s.minLen,
+      maxLen: s.maxLen,
+      originalText: s.originalText,
+      htmlRole: s.htmlRole,
+      href: s.href || null,
+      seedText: s.seedText || null,
+    };
+  });
 }
 
+/** Shared scaffold for OpenAI slot drafting and Firecrawl/Claude document drafting. */
+export function buildPageContentScaffold(input: {
+  pageSlots?: PageTextSlot[] | null;
+  brandLinks?: {
+    navLinks?: BrandLink[];
+    footerLinks?: BrandLink[];
+    socialLinks?: BrandLink[];
+    servicePages?: BrandLink[];
+    businessUrl?: string;
+  } | null;
+}): ScaffoldSlot[] {
+  const pageScaffold = pageSlotsToScaffold(input.pageSlots || []);
+  const maxSection = pageScaffold.length
+    ? Math.max(0, ...pageScaffold.map((s) => s.sectionIndex))
+    : 0;
+  const linkSlots = buildBrandLinkSlots({
+    brandLinks: input.brandLinks,
+    sectionBase: maxSection + 1,
+  });
+  return [
+    ...linkSlots.filter((s) => s.sectionIndex === 0),
+    ...pageScaffold,
+    ...linkSlots.filter((s) => s.sectionIndex !== 0),
+  ];
+}
+
+export type { ScaffoldSlot };
+
 function clipToSlotBudget(text: string, slot: ScaffoldSlot): string {
-  let t = text.replace(/\s+/g, " ").trim();
-  const maxLen = slot.maxLen ?? Math.ceil(slot.targetLen * 1.2);
-  if (t.length > maxLen) {
-    t = t.slice(0, maxLen).replace(/\s+\S*$/, "").trim();
-  }
-  return t;
+  const maxLen = slot.maxLen ?? Math.ceil(slot.targetLen * 1.35);
+  return clipToCompletePhrase(text, maxLen, {
+    softMax: Math.max(maxLen + 16, Math.ceil(maxLen * 1.4)),
+    role: slot.role,
+  });
 }
 
 /**
@@ -403,7 +447,7 @@ export function buildContentScaffold(
     const elements = (section.keyElements || []).map((e) => e.toLowerCase());
     const push = (role: string, targetLen: number, suffix = "0") => {
       const id = `s${sectionIndex}-${role}-${suffix}`;
-      const pad = Math.max(2, Math.round(targetLen * 0.18));
+      const budget = lengthBudgetForRole(targetLen, role);
       slots.push({
         id,
         sectionIndex: sectionIndex + 1,
@@ -412,8 +456,8 @@ export function buildContentScaffold(
         label: roleLabel(role, name, Number(suffix) || 0),
         purpose,
         targetLen,
-        minLen: Math.max(1, targetLen - pad),
-        maxLen: targetLen + pad,
+        minLen: budget.minLen,
+        maxLen: budget.maxLen,
       });
     };
 
@@ -507,6 +551,8 @@ export function brandAssetsFromContentDraft(
       ? footerLinks
       : uniqLinks([...(base?.footerLinks || []), ...internalLinks], 14),
     socialLinks: socialLinks.length ? socialLinks : base?.socialLinks || [],
+    servicePages: base?.servicePages || [],
+    ctaLinks: base?.ctaLinks || [],
     images: base?.images || [],
     emails: base?.emails || [],
     phones: base?.phones || [],
@@ -605,7 +651,7 @@ export async function generateLandingContentDraft(input: {
   const client = getClient();
   const system = `You write replacement landing-page copy for REAL text placements from a competitor page.
 
-Each scaffold slot is one visible text node on the page (headline, paragraph, button, list item, etc.) with a HARD character budget from the original placement.
+Each scaffold slot is one visible text node on the page (headline, paragraph, button, list item, etc.) with a character budget from the original placement.
 
 Return ONLY JSON:
 {
@@ -619,17 +665,18 @@ Return ONLY JSON:
 
 Hard rules:
 1) Fill EVERY scaffold id exactly once. Prefer returning only {id, text} — other fields are already known.
-2) LENGTH (critical): text length MUST be between minLen and maxLen for that slot (inclusive). Aim near targetLen. Never write long paragraphs into short slots (buttons, eyebrows, nav). Never stuff a short line into a long body slot — fill body slots with real sentences up to the budget.
-3) originalText is the competitor's current copy at that placement — use it ONLY as topic/angle. STRONG paraphrase: new wording, new rhythm. Never keep 3+ consecutive content words from originalText (locked keywords are the only exception).
-4) Never mention competitor "${input.competitorName}".
-5) KEYWORDS LOCK: keep these EXACTLY when they appear:
+2) COMPLETE COPY (critical): every text MUST be a finished phrase or sentence. Never end mid-thought (e.g. "…With Smarter" or "…so you" is INVALID). Prefer a slightly shorter complete line over a longer incomplete one.
+3) LENGTH: aim near targetLen; stay between minLen and maxLen when possible. Soft ceiling — finishing the thought beats exact maxLen. Buttons/eyebrows stay short; body slots get full sentences.
+4) originalText is the competitor's current copy at that placement — use it ONLY as topic/angle. STRONG paraphrase: new wording, new rhythm. Never keep 3+ consecutive content words from originalText (locked keywords are the only exception).
+5) Never mention competitor "${input.competitorName}".
+6) KEYWORDS LOCK: keep these EXACTLY when they appear:
 ${lockedKeywords.map((k) => `   - "${k}"`).join("\n") || `   - "${input.keyword}"`}
-6) LINKS: roles nav, internal_link, footer_link, social have locked href + optional seedText. Keep href exactly; polish label only; stay within length budget.
-7) Match role: h1 = one headline, h2/h3 = headings, cta = short action label, bullet = one benefit line, body = paragraph within budget, eyebrow = short line.
-8) No fabricated regulated claims, fake endorsements, or invented licence numbers.
-9) Footer disclaimer is brand-safe general info only.
-10) Meta title/description unique and benefit-led within their budgets.
-${feedback ? `11) HIGHEST PRIORITY user feedback:\n"""${feedback.slice(0, 2500)}"""` : ""}`;
+7) LINKS: roles nav, internal_link, footer_link, social have locked href + optional seedText. Keep href exactly; polish label only; stay within length budget.
+8) Match role: h1 = one complete headline, h2/h3 = complete headings, cta = short action label, bullet = one complete benefit, body = full sentence(s) within budget, eyebrow = short complete line.
+9) No fabricated regulated claims, fake endorsements, or invented licence numbers.
+10) Footer disclaimer is brand-safe general info only.
+11) Meta title/description unique and benefit-led within their budgets.
+${feedback ? `12) HIGHEST PRIORITY user feedback:\n"""${feedback.slice(0, 2500)}"""` : ""}`;
 
   const brandPayload = {
     name: input.brandName,
@@ -659,8 +706,8 @@ ${feedback ? `11) HIGHEST PRIORITY user feedback:\n"""${feedback.slice(0, 2500)}
       sectionName: s.sectionName,
       label: s.label,
       targetLen: s.targetLen,
-      minLen: s.minLen ?? Math.max(1, Math.floor(s.targetLen * 0.82)),
-      maxLen: s.maxLen ?? Math.ceil(s.targetLen * 1.18),
+      minLen: s.minLen ?? lengthBudgetForRole(s.targetLen, s.role).minLen,
+      maxLen: s.maxLen ?? lengthBudgetForRole(s.targetLen, s.role).maxLen,
       originalText: s.originalText || null,
       seedText: s.seedText || null,
       href: s.href || null,
@@ -783,7 +830,10 @@ export function normalizeEditedContentDraft(
     let text = String(next.text || "").replace(/\s+/g, " ").trim();
     const maxLen = b.maxLen ?? null;
     if (maxLen && text.length > maxLen) {
-      text = text.slice(0, maxLen).replace(/\s+\S*$/, "").trim();
+      text = clipToCompletePhrase(text, maxLen, {
+        softMax: Math.max(maxLen + 16, Math.ceil(maxLen * 1.35)),
+        role: b.role,
+      });
     }
     return {
       ...b,

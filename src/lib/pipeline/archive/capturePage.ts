@@ -24,19 +24,38 @@ async function autoScroll(page: Page): Promise<void> {
   await page.evaluate(async () => {
     await new Promise<void>((resolve) => {
       let total = 0;
-      const distance = 600;
+      const distance = 500;
       const timer = setInterval(() => {
         const { scrollHeight } = document.documentElement;
         window.scrollBy(0, distance);
         total += distance;
-        if (total >= scrollHeight || total > 20_000) {
+        if (total >= scrollHeight || total > 24_000) {
+          clearInterval(timer);
+          resolve();
+        }
+      }, 140);
+    });
+  });
+  // Let lazy media + scroll libraries paint mid-page
+  await page.waitForTimeout(600);
+  // Second pass slowly so IntersectionObserver / AOS-style reveals can fire
+  await page.evaluate(async () => {
+    await new Promise<void>((resolve) => {
+      let y = 0;
+      const step = 400;
+      const timer = setInterval(() => {
+        const max = document.documentElement.scrollHeight;
+        y += step;
+        window.scrollTo(0, y);
+        if (y >= max || y > 24_000) {
           clearInterval(timer);
           window.scrollTo(0, 0);
           resolve();
         }
-      }, 120);
+      }, 180);
     });
   });
+  await page.waitForTimeout(400);
 }
 
 async function inlineDocumentResources(page: Page): Promise<void> {

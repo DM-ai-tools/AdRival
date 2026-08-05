@@ -395,6 +395,13 @@ export default function HomePage() {
                   prev.map((a) => (a.id === ad.id ? ad : a)),
                 );
               }}
+              onJobUpdated={(nextJob, nextAds) => {
+                setLookupJob(nextJob);
+                if (nextAds) setLookupAds(nextAds);
+              }}
+              onReload={async () => {
+                if (lookupId) await pollLookup(lookupId);
+              }}
             />
           )}
           {!lookupJob && lookupQuery && (
@@ -470,6 +477,13 @@ export default function HomePage() {
                   setHistoryLookupAds((prev) =>
                     prev.map((a) => (a.id === ad.id ? ad : a)),
                   );
+                }}
+                onJobUpdated={(nextJob, nextAds) => {
+                  setHistoryLookupJob(nextJob);
+                  if (nextAds) setHistoryLookupAds(nextAds);
+                }}
+                onReload={async () => {
+                  if (selectedHistory) await loadHistoryItem(selectedHistory);
                 }}
               />
             ) : historyJob ? (

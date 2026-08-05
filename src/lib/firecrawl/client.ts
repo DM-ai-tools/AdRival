@@ -226,8 +226,9 @@ export async function firecrawlScrapePage(
       "markdown",
       {
         type: "json",
-        prompt: `Extract the website's real navigation, footer, social, and service/product page links.
+        prompt: `Extract the website's real navigation, footer, social, service/product, and CTA page links.
 Return only links that appear on this site. Prefer specific page URLs — never collapse everything to the homepage.
+ctaLinks should be high-intent pages (contact, book, apply, quote, schedule, demo) — not the homepage.
 Labels should be the visible link text.`,
         schema: {
           type: "object",
@@ -277,6 +278,17 @@ Labels should be the visible link text.`,
                 required: ["label", "href"],
               },
             },
+            ctaLinks: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  label: { type: "string" },
+                  href: { type: "string" },
+                },
+                required: ["label", "href"],
+              },
+            },
           },
         },
       },
@@ -299,6 +311,22 @@ export async function firecrawlScrapeHtml(
     formats: ["html", "markdown"],
     onlyMainContent: false,
     waitFor: 2500,
+    blockAds: true,
+    proxy: "auto",
+  });
+}
+
+/**
+ * Scrape a competitor landing page for content drafting — markdown-first.
+ */
+export async function firecrawlScrapeForContent(
+  url: string,
+): Promise<FirecrawlScrapeResult> {
+  return firecrawlPost<FirecrawlScrapeResult>("/scrape", {
+    url,
+    formats: ["markdown", "html", "links"],
+    onlyMainContent: false,
+    waitFor: 3000,
     blockAds: true,
     proxy: "auto",
   });

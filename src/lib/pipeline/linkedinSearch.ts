@@ -9,7 +9,14 @@ import {
   expandKeywordQueries,
   hasServiceKeywordSignal,
 } from "../openai/analyzer";
-import { saveCompetitor, saveJob, saveLookupAd, saveLookupJob } from "../db";
+import {
+  isSearchJobSuppressed,
+  saveCompetitor,
+  saveJob,
+  saveLookupAd,
+  saveLookupJob,
+} from "../db";
+import { runLookupOffersReportPhase } from "./lookupOffersReport";
 import {
   TARGET_COMPETITORS,
   type AdCandidate,
@@ -39,7 +46,10 @@ const MAX_LI_PAGES = 12;
 const MAX_COMPANY_COUNT_PAGES = 8;
 
 /** Count company ads across LinkedIn Ad Library pages for active-ads gate. */
-async function countLinkedInCompanyAds(companyName: string): Promise<{
+async function countLinkedInCompanyAds(
+  companyName: string,
+  countries: string,
+): Promise<{
   count: number;
   maxDays: number;
   sample: AdCandidate | null;
@@ -55,7 +65,7 @@ async function countLinkedInCompanyAds(companyName: string): Promise<{
   do {
     const res = await searchLinkedInAds({
       company: companyName,
-      countries: "US,AU",
+      countries,
       paginationToken: token,
     });
     const ads = extractLinkedInAds(res);
@@ -169,11 +179,13 @@ export async function runLinkedInSearch(
     }
 
     outer: for (const query of Array.from(queries).slice(0, 16)) {
+      if (isSearchJobSuppressed(jobId)) break outer;
       let token: string | null = null;
       let pages = 0;
 
       do {
         if (accepted.length >= TARGET_COMPETITORS) break outer;
+        if (isSearchJobSuppressed(jobId)) break outer;
         job.progress.message = `LinkedIn keyword "${query}" — page ${pages + 1}…`;
         saveJob(job);
 
@@ -227,7 +239,7 @@ export async function runLinkedInSearch(
               null,
               pool.filter((a) => a.adArchiveId !== primary.adArchiveId).slice(0, 5),
               {
-                relaxed: accepted.length >= 5,
+                relaxed: accepted.length >= 2,
                 businessProfile,
                 searchKeywords: keywords,
                 selectedCategory,
@@ -251,7 +263,10 @@ export async function runLinkedInSearch(
 
           let activeCount = pageAds.length;
           try {
-            const counted = await countLinkedInCompanyAds(primary.pageName);
+            const counted = await countLinkedInCompanyAds(
+              primary.pageName,
+              liCountries,
+            );
             if (counted.count > activeCount) activeCount = counted.count;
             if (counted.sample) {
               primary = pickBestLinkedInCandidate([primary, counted.sample]);
@@ -653,13 +668,21 @@ export async function runLinkedInLookup(
       saveLookupJob(job);
     }
 
-    job.status = stored.length > 0 ? "completed" : "partial";
-    job.progress.stage = "done";
+    job.status = "running";
+    job.progress.stage = "analyzing_offers";
     job.progress.message =
       stored.length > 0
-        ? `Loaded ${stored.length} LinkedIn ads for "${name}".`
+        ? `Loaded ${stored.length} LinkedIn ads — analyzing unique creatives & landing pages…`
         : `No LinkedIn ads found for "${name}".`;
     saveLookupJob(job);
+
+    if (stored.length > 0) {
+      await runLookupOffersReportPhase(job.id, { finalStatus: "completed" });
+    } else {
+      job.status = "partial";
+      job.progress.stage = "done";
+      saveLookupJob(job);
+    }
   } catch (err) {
     job.status = "failed";
     job.error = (err as Error).message;

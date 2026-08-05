@@ -21,6 +21,10 @@ export type BrandSiteAssets = {
   navLinks: BrandLink[];
   footerLinks: BrandLink[];
   socialLinks: BrandLink[];
+  /** Service / product / treatment pages from Firecrawl map */
+  servicePages?: BrandLink[];
+  /** High-intent CTA pages (contact, book, apply, quote) */
+  ctaLinks?: BrandLink[];
   images: BrandImage[];
   emails: string[];
   phones: string[];

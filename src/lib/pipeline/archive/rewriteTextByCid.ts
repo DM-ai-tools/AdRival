@@ -1,4 +1,5 @@
 import * as cheerio from "cheerio";
+import { clipToCompletePhrase, lengthBudgetForRole } from "../slotTextBudget";
 import {
   getAnthropicClient,
   getAnthropicModel,
@@ -41,34 +42,91 @@ function normalizeText(t: string): string {
 }
 
 /**
- * Set visible text without destroying icons/chevrons inside interactive controls
- * (FAQ buttons, accordion headers, etc.).
+ * Replace visible text in a node. Never leave competitor copy beside the new text.
+ * Preserves icon/svg/img chrome inside buttons/controls.
  */
 function setTextPreservingStructure(
   $: ReturnType<typeof cheerio.load>,
   $el: cheerio.Cheerio<any>,
   text: string,
 ): void {
-  if ($el.children().length === 0) {
-    $el.text(text);
+  const tag = String(($el.get(0) as { tagName?: string } | undefined)?.tagName || "")
+    .toLowerCase();
+
+  const isChrome = ($c: cheerio.Cheerio<any>) => {
+    if ($c.is("svg, i, img, br, [aria-hidden='true']")) return true;
+    const cls = `${$c.attr("class") || ""}`;
+    if (/\bicon\b|chevron|caret|arrow/i.test(cls) && normalizeText($c.text()).length < 2) {
+      return true;
+    }
+    return (
+      $c.children("svg, i, img").length > 0 &&
+      normalizeText($c.text()).length < 2
+    );
+  };
+
+  const chromeHtml = $el
+    .children()
+    .toArray()
+    .filter((c) => isChrome($(c)))
+    .map((c) => $.html(c))
+    .join("");
+
+  const childTags = $el
+    .children()
+    .toArray()
+    .map((c) => String((c as { tagName?: string }).tagName || "").toLowerCase());
+  const onlyFormatOrChrome =
+    childTags.length === 0 ||
+    childTags.every((t) =>
+      ["span", "strong", "em", "b", "small", "svg", "i", "img", "br", "a"].includes(
+        t,
+      ),
+    );
+
+  // Headings / paragraphs / simple wrappers: wipe and rewrite (keep icon chrome)
+  if (
+    $el.children().length === 0 ||
+    /^(h1|h2|h3|h4|h5|h6|p|label|li)$/i.test(tag) ||
+    onlyFormatOrChrome
+  ) {
+    const safe = text
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+    if (chromeHtml) {
+      $el.html(`${safe}${chromeHtml}`);
+    } else {
+      $el.text(text);
+    }
     return;
   }
 
-  // Prefer a dedicated text-bearing child that isn't an icon wrapper
+  // Interactive controls: clear ALL direct text, write into first text child, blank siblings
+  $el.contents().each((_, child) => {
+    const node = child as { type?: string; data?: string };
+    if (node.type === "text") node.data = "";
+  });
+
   const $textChild = $el
-    .children("span, p, strong, em, label, a")
-    .filter((_, c) => {
-      const $c = $(c);
-      if ($c.is("svg, i, img")) return false;
-      if ($c.children("svg, i, img").length && normalizeText($c.text()).length < 3) {
-        return false;
-      }
-      return normalizeText($c.text()).length > 0 || $c.children().length === 0;
-    })
+    .children("span, p, strong, em, label, a, small")
+    .filter((_, c) => !isChrome($(c)))
     .first();
 
   if ($textChild.length) {
-    if ($textChild.children().length === 0) {
+    $el.children("span, p, strong, em, label, a, small").each((_, c) => {
+      const $c = $(c);
+      if (isChrome($c) || $c[0] === $textChild[0]) return;
+      if ($c.children().filter((_, x) => !isChrome($(x))).length === 0) {
+        $c.text("");
+      } else {
+        $c.contents().each((__, ch) => {
+          const n = ch as { type?: string; data?: string };
+          if (n.type === "text") n.data = "";
+        });
+      }
+    });
+    if ($textChild.children().filter((_, x) => !isChrome($(x))).length === 0) {
       $textChild.text(text);
     } else {
       setTextPreservingStructure($, $textChild, text);
@@ -76,31 +134,16 @@ function setTextPreservingStructure(
     return;
   }
 
-  // Replace first non-empty direct text node; keep element children (icons)
-  let replaced = false;
-  $el.contents().each((_, child) => {
-    const node = child as { type?: string; data?: string };
-    if (node.type === "text") {
-      if (!replaced && normalizeText(node.data || "").length > 0) {
-        node.data = text;
-        replaced = true;
-      } else if (replaced) {
-        node.data = "";
-      }
-    }
-  });
-  if (!replaced) {
-    $el.prepend(text);
-  }
+  // Fallback: append escaped text after cleared nodes (never prepend beside leftovers)
+  const safe = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  $el.append(safe);
 }
 
-function lengthBudget(len: number): { minLen: number; maxLen: number } {
-  // Match content-gen budgets so approved copy fits placements
-  const pad = Math.max(2, Math.round(len * 0.18));
-  return {
-    minLen: Math.max(1, len - pad),
-    maxLen: len + pad,
-  };
+function lengthBudget(len: number, role?: string): { minLen: number; maxLen: number } {
+  return lengthBudgetForRole(len, role || "body");
 }
 
 /**
@@ -155,7 +198,7 @@ export function stampTextCids(html: string): {
           id,
           role: tag,
           text,
-          ...lengthBudget(text.length),
+          ...lengthBudget(text.length, tag),
         });
         if (nodes.length >= 320) return false;
         return;
@@ -168,7 +211,7 @@ export function stampTextCids(html: string): {
         id,
         role: tag,
         text,
-        ...lengthBudget(text.length),
+        ...lengthBudget(text.length, tag),
       });
       if (nodes.length >= 320) return false;
     },
@@ -198,7 +241,7 @@ export function collectStampedCidNodes(html: string): {
       id,
       role: tag,
       text,
-      ...lengthBudget(text.length),
+      ...lengthBudget(text.length, tag),
       inFooter: $el.closest(FOOTER_SEL).length > 0,
     });
   });
@@ -301,10 +344,18 @@ export function ensureUniqueReplacements(
     }
 
     const alts = [
-      normalizeText(`Also: ${text}`).slice(0, node.maxLen),
-      normalizeText(`${text} — next steps`).slice(0, node.maxLen),
-      normalizeText(`Another option: ${text}`).slice(0, node.maxLen),
-      normalizeText(`Explore: ${text}`).slice(0, node.maxLen),
+      clipToCompletePhrase(normalizeText(`Also: ${text}`), node.maxLen, {
+        role: node.role,
+      }),
+      clipToCompletePhrase(normalizeText(`${text} — next steps`), node.maxLen, {
+        role: node.role,
+      }),
+      clipToCompletePhrase(normalizeText(`Another option: ${text}`), node.maxLen, {
+        role: node.role,
+      }),
+      clipToCompletePhrase(normalizeText(`Explore: ${text}`), node.maxLen, {
+        role: node.role,
+      }),
     ];
     let variant = text;
     for (const pick of alts) {
@@ -345,7 +396,13 @@ export function applyCidReplacements(
 
     // Duplicate stamped copies of the same original string: clear secondary
     // instances so the page doesn't show the same block twice.
-    if ($el.attr("data-cid-dup") === "1") {
+    // Never hide FAQ/accordion items — answers must stay replaceable + interactive.
+    const inFaq = Boolean(
+      $el.closest(
+        ".accordion, .accordion-item, .faq, .faq-item, [class*='faq'], [class*='accordion'], details",
+      ).length,
+    );
+    if ($el.attr("data-cid-dup") === "1" && !inFaq) {
       const primary = nodes.find(
         (n) =>
           n.id !== id &&
@@ -360,6 +417,9 @@ export function applyCidReplacements(
         if (
           $block.length &&
           !$block.is("body, html, main, header, nav") &&
+          !$block.closest(
+            ".accordion, .accordion-item, .faq, .faq-item, [class*='faq'], [class*='accordion'], details",
+          ).length &&
           normalizeText($block.text()).length <
             normalizeText(meta.text).length * 3 + 80
         ) {
@@ -379,12 +439,12 @@ export function applyCidReplacements(
     if (!next) return;
 
     let text = normalizeText(next);
-    // Approved path: never truncate — approved copy wins over slot budgets
+    // Approved path: never hard-truncate mid-sentence — approved copy wins
     if (!force) {
       if (text.length > meta.maxLen) {
-        text = text.slice(0, meta.maxLen).replace(/\s+\S*$/, "").trim();
+        text = clipToCompletePhrase(text, meta.maxLen, { role: meta.role });
       }
-      if (text.length < meta.minLen && text.length < meta.text.length) {
+      if (text.length < Math.min(meta.minLen, 8) && text.length < meta.text.length) {
         // too short — keep original to avoid layout collapse
         return;
       }

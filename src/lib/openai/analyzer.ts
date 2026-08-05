@@ -13,6 +13,22 @@ import {
 } from "../types";
 
 const KEYWORD_STOPWORDS = new Set([
+  "a",
+  "an",
+  "the",
+  "and",
+  "or",
+  "for",
+  "to",
+  "of",
+  "in",
+  "on",
+  "at",
+  "by",
+  "as",
+  "is",
+  "are",
+  "be",
   "with",
   "from",
   "that",
@@ -57,7 +73,7 @@ function tokenizeSignal(raw: string): string[] {
   return raw
     .toLowerCase()
     .split(/[^a-z0-9]+/)
-    .filter((t) => t.length >= 4 && !KEYWORD_STOPWORDS.has(t));
+    .filter((t) => t.length >= 3 && !KEYWORD_STOPWORDS.has(t));
 }
 
 export type ServiceSignalOptions = {
@@ -739,8 +755,8 @@ function normalizeDomain(raw: string): string | null {
 }
 
 /**
- * Rank domains (from web search and/or Transparency) that are most likely
- * marketing-agency advertisers for the keyword.
+ * Rank domains (from web search and/or Transparency) most likely to be
+ * relevant advertisers for the keyword / seed business.
  */
 export async function pickGoogleAdDomains(
   keyword: string,
@@ -750,9 +766,11 @@ export async function pickGoogleAdDomains(
     platform?: "google" | "youtube";
     limit?: number;
     webSnippets?: Array<{ title?: string; url?: string; description?: string }>;
+    businessProfile?: BusinessProfile | null;
   },
 ): Promise<{ domains: string[]; reason: string }> {
   const limit = opts?.limit ?? 12;
+  const profile = opts?.businessProfile || null;
   const unique = Array.from(
     new Set(
       domains
@@ -771,14 +789,30 @@ export async function pickGoogleAdDomains(
   }
 
   const platform = opts?.platform || "google";
-  const raw = await jsonCompletion<{ domains: string[]; reason: string }>(
-    `You select website domains for marketing agencies / PPC / SEO / SMM / AEO firms that are MOST LIKELY to run ${platform === "youtube" ? "YouTube video" : "Google"} ads related to the user's keyword.
+  const system = profile
+    ? `You select website domains of DIRECT COMPETITORS for a seed business that are MOST LIKELY to run ${platform === "youtube" ? "YouTube video" : "Google"} ads.
+
+SEED BUSINESS:
+- Name: ${profile.businessName}
+- Industry: ${profile.industry}${profile.subIndustry ? ` / ${profile.subIndustry}` : ""}
+- Offerings: ${(profile.offerings || []).join(", ") || "n/a"}
+- Positioning: ${profile.positioningSummary}
+
+Prefer domains of rivals in the SAME industry / offerings as the seed (e.g. lenders, brokers, clinics — whatever matches).
+Prefer domains that appear in Google Ads Transparency results for the keyword.
+Exclude marketing agencies (unless the seed is an agency), directories, social networks, and unrelated e-commerce.
+
+Return up to ${limit} domains EXACTLY as they appear in the candidate list (hostname only).`
+    : `You select website domains for marketing agencies / PPC / SEO / SMM / AEO firms that are MOST LIKELY to run ${platform === "youtube" ? "YouTube video" : "Google"} ads related to the user's keyword.
 
 Use BOTH the candidate domain list AND any web-search snippets provided.
 Prefer agency / digital marketing / ads consultancy domains that match the keyword intent.
 Exclude product brands, directories, social networks, and irrelevant e-commerce.
 
-Return up to ${limit} domains EXACTLY as they appear in the candidate list (normalize to hostname only).`,
+Return up to ${limit} domains EXACTLY as they appear in the candidate list (normalize to hostname only).`;
+
+  const raw = await jsonCompletion<{ domains: string[]; reason: string }>(
+    system,
     JSON.stringify(
       {
         keyword,
@@ -786,6 +820,13 @@ Return up to ${limit} domains EXACTLY as they appear in the candidate list (norm
         candidateDomains: unique,
         sampleAdvertisers: advertisers.slice(0, 20),
         webSnippets: (opts?.webSnippets || []).slice(0, 24),
+        seedBusiness: profile
+          ? {
+              name: profile.businessName,
+              industry: profile.industry,
+              offerings: profile.offerings,
+            }
+          : null,
       },
       null,
       2,
@@ -813,20 +854,39 @@ Return up to ${limit} domains EXACTLY as they appear in the candidate list (norm
 }
 
 /**
- * Ask the LLM to propose agency domains for a keyword (used when web search
- * returns few/no extractable domains).
+ * Propose competitor / advertiser domains when web search returns few results.
  */
 export async function proposeAgencyDomains(
   keyword: string,
   platform: "google" | "youtube",
   limit = 10,
+  businessProfile?: BusinessProfile | null,
 ): Promise<{ domains: string[]; reason: string }> {
-  const raw = await jsonCompletion<{ domains: string[]; reason: string }>(
-    `Propose real marketing-agency website domains (hostname only) that are likely running ${platform === "youtube" ? "YouTube" : "Google"} ads for the keyword.
+  const system = businessProfile
+    ? `Propose real competitor website domains (hostname only) likely running ${platform === "youtube" ? "YouTube" : "Google"} ads against this seed business.
+Seed: ${businessProfile.businessName} (${businessProfile.industry}) — offerings: ${(businessProfile.offerings || []).join(", ") || "n/a"}.
+Return well-known or plausible SAME-INDUSTRY competitor domains in English-speaking markets (prefer AU/US/UK when relevant).
+Do NOT invent fake TLDs. Do NOT propose marketing agencies unless the seed is an agency.
+Return up to ${limit} domains.`
+    : `Propose real marketing-agency website domains (hostname only) that are likely running ${platform === "youtube" ? "YouTube" : "Google"} ads for the keyword.
 Return well-known or plausible agency domains in English-speaking markets (US/AU/UK).
 Do NOT invent fake TLDs. Prefer .com agency sites.
-Return up to ${limit} domains.`,
-    JSON.stringify({ keyword, platform }),
+Return up to ${limit} domains.`;
+
+  const raw = await jsonCompletion<{ domains: string[]; reason: string }>(
+    system,
+    JSON.stringify({
+      keyword,
+      platform,
+      seed: businessProfile
+        ? {
+            name: businessProfile.businessName,
+            industry: businessProfile.industry,
+            offerings: businessProfile.offerings,
+            url: businessProfile.url,
+          }
+        : null,
+    }),
     `{ "domains": string[], "reason": string }`,
   );
   const parsed = googleDomainPickSchema.safeParse(raw);
@@ -838,6 +898,6 @@ Return up to ${limit} domains.`,
     domains,
     reason: parsed.success
       ? parsed.data.reason
-      : String(raw.reason || "LLM proposed agency domains"),
+      : String(raw.reason || "LLM proposed domains"),
   };
 }

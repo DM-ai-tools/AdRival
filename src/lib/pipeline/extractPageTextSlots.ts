@@ -7,6 +7,8 @@ import { fetchRawLandingHtml } from "./htmlFetch";
 import { captureArchivedPage } from "./archive/capturePage";
 import type { StoredPageArchive } from "../types";
 
+import { lengthBudgetForRole } from "./slotTextBudget";
+
 export type PageTextSlot = {
   id: string;
   sectionIndex: number;
@@ -26,15 +28,6 @@ export type PageTextSlot = {
 
 function normalize(s: string): string {
   return s.replace(/\s+/g, " ").trim();
-}
-
-function lengthBudget(len: number): { minLen: number; maxLen: number } {
-  // Tight budgets so generated copy fits the real placement
-  const pad = Math.max(2, Math.round(len * 0.18));
-  return {
-    minLen: Math.max(1, len - pad),
-    maxLen: len + pad,
-  };
 }
 
 function semanticRole(node: CidTextNode): string {
@@ -79,7 +72,8 @@ function roleLabel(role: string, sectionName: string, index: number): string {
 }
 
 /**
- * Convert stamped CID nodes into content-generation slots with hard length budgets.
+ * Convert stamped CID nodes into content-generation slots with length budgets
+ * that leave room for complete phrases (not mid-sentence stubs).
  */
 export function slotsFromCidNodes(nodes: CidTextNode[]): PageTextSlot[] {
   const slots: PageTextSlot[] = [];
@@ -102,7 +96,7 @@ export function slotsFromCidNodes(nodes: CidTextNode[]): PageTextSlot[] {
       sectionItem = 0;
     }
 
-    const budget = lengthBudget(node.text.length);
+    const budget = lengthBudgetForRole(node.text.length, role);
     slots.push({
       id: node.id,
       sectionIndex,
@@ -110,7 +104,7 @@ export function slotsFromCidNodes(nodes: CidTextNode[]): PageTextSlot[] {
       role,
       htmlRole: tag,
       label: roleLabel(role, sectionName, sectionItem),
-      purpose: `Replace competitor ${tag} text in “${sectionName}” — keep similar length`,
+      purpose: `Replace competitor ${tag} text in “${sectionName}” — write a COMPLETE phrase near the original length`,
       targetLen: node.text.length,
       minLen: budget.minLen,
       maxLen: budget.maxLen,

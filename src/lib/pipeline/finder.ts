@@ -18,7 +18,13 @@ import {
   type AdFilterResult,
 } from "../openai/analyzer";
 import { runBrandReview, newId } from "./brandReview";
-import { markPageSeen, saveCompetitor, saveJob, updateCompetitor } from "../db";
+import {
+  isSearchJobSuppressed,
+  markPageSeen,
+  saveCompetitor,
+  saveJob,
+  updateCompetitor,
+} from "../db";
 import {
   cheapLocationFromText,
   locationRankScore,
@@ -594,6 +600,7 @@ export async function runCompetitorSearch(
 
         do {
           if (accepted.length >= TARGET_COMPETITORS) break outer;
+          if (isSearchJobSuppressed(job.id)) break outer;
           if (pageBudget >= MAX_SEARCH_PAGES) break outer;
           if (pagesForQuery >= MAX_PAGES_PER_QUERY) break;
 

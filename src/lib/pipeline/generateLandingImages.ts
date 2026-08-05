@@ -6,11 +6,16 @@ import { getOpenAiContentModel } from "./contentDraft";
 import {
   generateGptImage2,
   hasRunwayKey,
+  logoUrlToReferenceUri,
   pickGptImage2Ratio,
   type GptImage2Ratio,
 } from "../runway/client";
+import {
+  isPartnerLogoContext,
+  isSiteLogoCandidate,
+} from "./archive/applyBrandDeterministic";
 
-const MAX_SLOTS = 6;
+const MAX_SLOTS = 10;
 const CONCURRENCY = 2;
 
 export type ImageSlot = {
@@ -49,6 +54,17 @@ function looksLikeJunkImage(hay: string): boolean {
   );
 }
 
+/** Archived pages often inline photos as data: URIs — treat those as photos. */
+function looksLikePhotoSrc(src: string): boolean {
+  if (!src) return false;
+  if (/^data:image\/(jpeg|jpg|png|webp|gif|avif)/i.test(src)) return true;
+  if (/^data:image\/svg/i.test(src)) return false;
+  return (
+    /\.(jpe?g|png|webp|avif)(\?|#|$)/i.test(src) ||
+    /unsplash|pexels|cloudinary|imgix|cdn\.|media\./i.test(src)
+  );
+}
+
 function nearestText($: cheerio.CheerioAPI, el: any): string {
   const $el = $(el);
   const parts: string[] = [];
@@ -72,6 +88,19 @@ export function inventoryImageSlots(html: string): {
   const slots: ImageSlot[] = [];
   let heroTaken = false;
 
+  // Promote lazy-loaded sources onto src before inventory
+  $("img").each((_, el) => {
+    const $el = $(el);
+    if (($el.attr("src") || "").trim()) return;
+    const lazy =
+      $el.attr("data-src") ||
+      $el.attr("data-lazy-src") ||
+      $el.attr("data-original") ||
+      $el.attr("data-bg") ||
+      "";
+    if (lazy.trim()) $el.attr("src", lazy.trim());
+  });
+
   $("img").each((_, el) => {
     if (slots.length >= MAX_SLOTS) return;
     const $el = $(el);
@@ -81,13 +110,36 @@ export function inventoryImageSlots(html: string): {
     if (!src) return;
     const alt = ($el.attr("alt") || "").trim();
     const className = `${$el.attr("class") || ""} ${$el.parent().attr("class") || ""}`;
-    const hay = `${src.slice(0, 120)} ${alt} ${className}`.toLowerCase();
+    const hay = `${src.slice(0, 160)} ${alt} ${className}`.toLowerCase();
+
+    // Logos / partner marks never become AI slots
+    if (isSiteLogoCandidate($el, src, alt, className)) return;
+    if (isPartnerLogoContext($el)) return;
     if (looksLikeJunkImage(hay)) return;
+    if (/^data:image\/svg/i.test(src) || /\.svg(\?|#|$)/i.test(src)) return;
+
+    // Never inventory header/nav/footer brand chrome (photos in hero still ok)
+    const inChrome = $el.closest(
+      "header, nav, [role='banner'], .navbar, .site-header, a.logo, .navbar-brand",
+    ).length;
+    if (inChrome && !/hero|banner|cover|photo|team|people|portrait/i.test(hay)) {
+      return;
+    }
     if (
-      $el.closest(
-        "li, ul, ol, footer, [role='contentinfo'], [class*='Footer'], nav, header .menu",
-      ).length &&
-      !/hero|banner|cover/i.test(hay)
+      $el.closest("footer, [role='contentinfo'], [class*='Footer']").length &&
+      !/hero|banner|cover|photo|team/i.test(hay)
+    ) {
+      return;
+    }
+    const looksPhotoFile = looksLikePhotoSrc(src);
+
+    // Allow list items when they look like photo cards OR are real photo data/files
+    if (
+      $el.closest("li, ul, ol").length &&
+      !looksPhotoFile &&
+      !/hero|banner|cover|team|staff|doctor|clinic|treatment|before|after|photo|gallery|card/i.test(
+        hay,
+      )
     ) {
       return;
     }
@@ -100,12 +152,19 @@ export function inventoryImageSlots(html: string): {
       $el.closest(
         ".hero, .banner, .jumbotron, [class*='hero'], [class*='Hero'], [class*='banner'], [class*='masthead'], section:first-of-type",
       ).length > 0;
+    const inMain =
+      $el.closest("main, article, section, [class*='section'], [class*='Section']")
+        .length > 0;
+    // Large inline data-URI photos (common after Playwright archive) count as content
+    const dataUriPhoto = /^data:image\/(jpeg|jpg|png|webp|gif|avif)/i.test(src);
     const looksLarge =
-      (width != null && width >= 240) ||
-      (height != null && height >= 180) ||
-      /hero|banner|cover|main-image|featured|team|clinic|office|smile|before|after/i.test(
+      (width != null && width >= 180) ||
+      (height != null && height >= 140) ||
+      /hero|banner|cover|main-image|featured|team|clinic|office|smile|before|after|gallery|photo|portrait|treatment/i.test(
         hay,
-      );
+      ) ||
+      (inMain && looksPhotoFile && !width && !height) ||
+      (dataUriPhoto && src.length > 8_000);
 
     if (!inHero && !looksLarge) return;
 
@@ -137,17 +196,26 @@ export function inventoryImageSlots(html: string): {
 
   if (slots.length < MAX_SLOTS) {
     $(
-      ".hero, [class*='hero'], [class*='Hero'], .banner, [class*='banner'], [class*='masthead']",
+      ".hero, [class*='hero'], [class*='Hero'], .banner, [class*='banner'], [class*='masthead'], section, [class*='section']",
     ).each((_, el) => {
       if (slots.length >= MAX_SLOTS) return;
       const $el = $(el);
       if ($el.attr("data-adrival-gen-id")) return;
       if ($el.closest("header, nav, footer").length) return;
+      if ($el.find("[data-adrival-gen-id]").length) return;
       const style = $el.attr("style") || "";
       const match = style.match(/url\(\s*(['"]?)([^)'"]+)\1\s*\)/i);
       if (!match?.[2]) return;
       const src = match[2].trim();
       if (!src || looksLikeJunkImage(src)) return;
+      // Prefer larger background containers
+      const className = ($el.attr("class") || "").slice(0, 160);
+      if (
+        !/hero|banner|masthead|cover|bg|background/i.test(className) &&
+        slots.length >= 3
+      ) {
+        return;
+      }
 
       const id = `img${slots.length}`;
       $el.attr("data-adrival-gen-id", id);
@@ -156,7 +224,7 @@ export function inventoryImageSlots(html: string): {
         kind: heroTaken ? "background" : "hero",
         selectorHint: "background",
         alt: "",
-        className: ($el.attr("class") || "").slice(0, 160),
+        className,
         sectionContext: nearestText($, el),
         width: 1600,
         height: 900,
@@ -217,6 +285,7 @@ async function decideImageBriefs(input: {
   industry?: string | null;
   brandColors: BrandColors;
   competitorName: string;
+  hasLogoReference?: boolean;
 }): Promise<
   Array<{
     id: string;
@@ -237,6 +306,9 @@ async function decideImageBriefs(input: {
 
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const model = getOpenAiContentModel();
+  const logoRule = input.hasLogoReference
+    ? `5) When a logo/signage would appear (office wall, storefront, desk, packaging), instruct placing the brand logo from the @brandlogo reference EXACTLY — same wordmark and colors. Never invent a different logo. Never mention competitor "${input.competitorName}". No watermarks or fake UI chrome.`
+    : `5) Never mention competitor "${input.competitorName}". Do not invent company logos or wordmarks. No watermarks, no unreadable text overlays, no UI chrome.`;
 
   try {
     const completion = await client.chat.completions.create({
@@ -254,8 +326,8 @@ Rules:
 1) One brief per slot id provided — same ids, no extras.
 2) prompt must describe a photorealistic marketing photo for brand "${input.brandName}" (${input.businessUrl}).
 3) Match the slot's role (hero / team / product / content / background) and page context.
-4) Use brand palette hints: primary ${input.brandColors.primary}, accent ${input.brandColors.accent}, secondary ${input.brandColors.secondary}. Prefer white / clean clinical interiors when industry fits.
-5) Never mention competitor "${input.competitorName}". No logos, no watermarks, no unreadable text overlays, no UI chrome.
+4) Use brand palette hints: primary ${input.brandColors.primary}, accent ${input.brandColors.accent}, secondary ${input.brandColors.secondary}. Prefer clean professional interiors when industry fits.
+${logoRule}
 6) Keep composition compatible with the slot (wide hero vs portrait team headshot).
 7) prompt length 40–120 words, concrete and visual.`,
         },
@@ -266,6 +338,7 @@ Rules:
               brand: input.brandName,
               keyword: input.keyword,
               industry: input.industry || null,
+              hasLogoReference: Boolean(input.hasLogoReference),
               slots: input.slots.map((s) => ({
                 id: s.id,
                 kind: s.kind,
@@ -317,6 +390,7 @@ function fallbackPrompt(
     keyword: string;
     industry?: string | null;
     brandColors: BrandColors;
+    hasLogoReference?: boolean;
   },
 ): string {
   const industry = input.industry || "professional services";
@@ -328,7 +402,10 @@ function fallbackPrompt(
         : slot.kind === "product"
           ? `clean close-up of ${industry} treatment or service in use`
           : `lifestyle photograph supporting ${input.keyword} for a modern ${industry} brand`;
-  return `Photorealistic ${scene} for ${input.brandName}. Soft natural light, premium marketing photography, brand accents near ${input.brandColors.primary} and ${input.brandColors.accent}, uncluttered composition, no logos, no text overlays, no watermarks. Context: ${slot.sectionContext || slot.alt || slot.kind}.`;
+  const logoBit = input.hasLogoReference
+    ? ` If any wall signage or logo appears, use the exact @brandlogo mark for ${input.brandName}.`
+    : ` Do not invent logos or wordmarks.`;
+  return `Photorealistic ${scene} for ${input.brandName}. Soft natural light, premium marketing photography, brand accents near ${input.brandColors.primary} and ${input.brandColors.accent}, uncluttered composition, no watermarks.${logoBit} Context: ${slot.sectionContext || slot.alt || slot.kind}.`;
 }
 
 async function mapPool<T, R>(
@@ -357,21 +434,36 @@ export function embedGeneratedImages(
   const $ = cheerio.load(html);
   let embedded = 0;
   const byId = new Map(images.map((img) => [img.id, img]));
+  const usedIds = new Set<string>();
 
-  $("[data-adrival-gen-id]").each((_, el) => {
-    const $el = $(el);
-    const id = $el.attr("data-adrival-gen-id") || "";
-    const img = byId.get(id);
-    if (!img?.publicUrl) return;
-
+  const applyToEl = ($el: any, img: GeneratedLandingImage) => {
+    // Never put AI images onto logo marks
+    if ($el.attr("data-adrival-logo")) return;
     if ($el.is("img")) {
+      const src = ($el.attr("src") || "").trim();
+      const alt = ($el.attr("alt") || "").trim();
+      const className = `${$el.attr("class") || ""} ${$el.parent().attr("class") || ""}`;
+      if (isSiteLogoCandidate($el, src, alt, className) || isPartnerLogoContext($el)) {
+        return;
+      }
       $el.attr("src", img.publicUrl);
       $el.removeAttr("srcset");
+      $el.removeAttr("sizes");
       $el.removeAttr("data-src");
       $el.removeAttr("data-lazy-src");
+      $el.removeAttr("data-original");
+      $el.attr("data-adrival-gen-id", img.id);
       $el.attr("data-adrival-image", "1");
       $el.attr("loading", $el.attr("loading") || "lazy");
-      // Preserve layout: keep existing width/height; enforce contain/cover via object-fit if missing
+      // Neutralize <picture><source> which otherwise wins over img[src]
+      const $picture = $el.parent("picture");
+      if ($picture.length) {
+        $picture.find("source").each((_: number, srcEl: any) => {
+          const $s = $(srcEl);
+          $s.attr("srcset", img.publicUrl);
+          $s.removeAttr("data-srcset");
+        });
+      }
       const style = $el.attr("style") || "";
       if (!/object-fit/i.test(style)) {
         $el.attr(
@@ -380,6 +472,7 @@ export function embedGeneratedImages(
         );
       }
       embedded += 1;
+      usedIds.add(img.id);
       return;
     }
 
@@ -392,14 +485,65 @@ export function embedGeneratedImages(
           `url("${img.publicUrl}")`,
         ),
       );
-      embedded += 1;
     } else {
       $el.attr(
         "style",
         `${style}${style && !style.trim().endsWith(";") ? ";" : ""}background-image:url("${img.publicUrl}");background-size:cover;background-position:center;`,
       );
-      embedded += 1;
     }
+    $el.attr("data-adrival-gen-id", img.id);
+    $el.attr("data-adrival-image", "1");
+    embedded += 1;
+    usedIds.add(img.id);
+  };
+
+  // 1) Exact stamp match
+  $("[data-adrival-gen-id]").each((_, el) => {
+    const $el = $(el);
+    const id = $el.attr("data-adrival-gen-id") || "";
+    const img = byId.get(id);
+    if (!img?.publicUrl) return;
+    applyToEl($el, img);
+  });
+
+  // 2) Place unused generated images into remaining large CONTENT imgs only
+  const unused = images.filter((img) => img.publicUrl && !usedIds.has(img.id));
+  if (unused.length) {
+    let ui = 0;
+    $("img").each((_, el) => {
+      if (ui >= unused.length) return;
+      const $el = $(el);
+      if ($el.attr("data-adrival-logo")) return;
+      if (isPartnerLogoContext($el)) return;
+      const srcAttr = ($el.attr("src") || "").trim();
+      const alt = ($el.attr("alt") || "").trim();
+      const className = `${$el.attr("class") || ""} ${$el.parent().attr("class") || ""}`;
+      if (isSiteLogoCandidate($el, srcAttr, alt, className)) return;
+      if (
+        $el.attr("data-adrival-gen-id") &&
+        usedIds.has($el.attr("data-adrival-gen-id")!)
+      ) {
+        return;
+      }
+      if ($el.closest("footer, nav, header").length) return;
+      const hay = `${srcAttr} ${alt} ${className}`.toLowerCase();
+      if (looksLikeJunkImage(hay)) return;
+      if ($el.attr("data-adrival-image") === "1" && /\/generated\//i.test(srcAttr)) {
+        return;
+      }
+      // Only fill clear photo-sized content slots
+      const width = Number($el.attr("width") || 0);
+      const height = Number($el.attr("height") || 0);
+      if ((width && width <= 120) || (height && height <= 120)) return;
+      applyToEl($el, unused[ui++]);
+    });
+  }
+
+  // 3) Never leave AI src on logo stamps (safety if order raced)
+  $("img[data-adrival-logo]").each((_, el) => {
+    const $el = $(el);
+    $el.removeAttr("data-adrival-gen-id");
+    $el.removeAttr("data-adrival-image");
   });
 
   return { html: $.html(), embedded };
@@ -418,6 +562,11 @@ export function replaceGeneratedImageInHtml(
     if ($el.is("img")) {
       $el.attr("src", image.publicUrl);
       $el.removeAttr("srcset");
+      $el.removeAttr("sizes");
+      const $picture = $el.parent("picture");
+      if ($picture.length) {
+        $picture.find("source").attr("srcset", image.publicUrl);
+      }
       return;
     }
     const style = $el.attr("style") || "";
@@ -454,6 +603,8 @@ export async function generateAndEmbedLandingImages(input: {
   competitorName: string;
   industry?: string | null;
   brandColors: BrandColors;
+  /** Brand logo URL — fed to Runway as @brandlogo reference */
+  logoUrl?: string | null;
   /** Pre-inventoried slots (avoids re-stamping) */
   slots?: ImageSlot[] | null;
 }): Promise<GenerateLandingImagesResult> {
@@ -489,6 +640,11 @@ export async function generateAndEmbedLandingImages(input: {
     };
   }
 
+  const logoReferenceUri = await logoUrlToReferenceUri(input.logoUrl);
+  if (input.logoUrl && !logoReferenceUri) {
+    warnings.push("Brand logo could not be loaded as an image reference");
+  }
+
   const briefs = await decideImageBriefs({
     slots,
     brandName: input.brandName,
@@ -497,6 +653,7 @@ export async function generateAndEmbedLandingImages(input: {
     industry: input.industry,
     brandColors: input.brandColors,
     competitorName: input.competitorName,
+    hasLogoReference: Boolean(logoReferenceUri),
   });
 
   const slotById = new Map(slots.map((s) => [s.id, s]));
@@ -504,15 +661,17 @@ export async function generateAndEmbedLandingImages(input: {
     const slot = slotById.get(brief.id)!;
     const ratio: GptImage2Ratio = pickGptImage2Ratio(slot.width, slot.height);
     try {
+      // Raster refs only — SVG / junk URIs are stripped inside usableRefUri
+      const compositionRef =
+        slot.src.startsWith("data:image/") || slot.src.startsWith("http")
+          ? slot.src
+          : null;
       const result = await generateGptImage2({
         promptText: brief.prompt,
         ratio,
         quality: "medium",
-        referenceImageUri: slot.src.startsWith("data:image/")
-          ? slot.src
-          : slot.src.startsWith("http")
-            ? slot.src
-            : null,
+        referenceImageUri: compositionRef,
+        logoReferenceUri: logoReferenceUri || null,
         competitorId: input.competitorId,
         imageId: brief.id,
       });
@@ -556,6 +715,7 @@ export async function regenerateLandingImage(input: {
   image: GeneratedLandingImage;
   competitorId: string;
   feedback?: string | null;
+  logoUrl?: string | null;
 }): Promise<GeneratedLandingImage> {
   if (!hasRunwayKey()) {
     throw new Error("RUNWAYML_API_SECRET is not set");
@@ -565,10 +725,12 @@ export async function regenerateLandingImage(input: {
     ? `${input.image.prompt}\n\nRevision notes: ${feedback}`
     : `${input.image.prompt}\n\nCreate a fresh alternate take with the same subject and composition goals.`;
 
+  const logoReferenceUri = await logoUrlToReferenceUri(input.logoUrl);
   const result = await generateGptImage2({
     promptText: prompt,
     ratio: (input.image.ratio as GptImage2Ratio) || "auto",
     quality: "medium",
+    logoReferenceUri,
     competitorId: input.competitorId,
     imageId: input.image.id,
   });

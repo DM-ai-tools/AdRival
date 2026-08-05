@@ -3,6 +3,7 @@ import type {
   BusinessProfile,
   CompetitorRecord,
   LandingContentBlock,
+  LandingContentDocument,
   LandingContentDraft,
   RecreatedLandingPage,
   SearchJob,
@@ -13,9 +14,12 @@ import { cloneAndAdaptLandingPage } from "./cloneLandingPage";
 import { resolveBrandBundle } from "./resolveBrandBundle";
 import {
   brandAssetsFromContentDraft,
-  generateLandingContentDraft,
   normalizeEditedContentDraft,
 } from "./contentDraft";
+import {
+  generateLandingContentDraftPreferred,
+  syncDocumentIntoBlocks,
+} from "./markdownContentDraft";
 import {
   extractBrandLinksWithFirecrawl,
   mergeFirecrawlIntoBrandAssets,
@@ -193,7 +197,7 @@ export async function generateRecreationContent(
       );
     }
 
-    const { draft, sourceArchive } = await generateLandingContentDraft({
+    const { draft, sourceArchive } = await generateLandingContentDraftPreferred({
       analysis: ctx.competitor.pageAnalysis!,
       brandName: ctx.brandName,
       businessUrl: ctx.businessUrl,
@@ -259,16 +263,31 @@ export async function generateRecreationContent(
 export function saveRecreationContentEdits(
   competitorId: string,
   blocks: LandingContentBlock[],
+  document?: LandingContentDocument | null,
 ): CompetitorRecord {
   const competitor = getCompetitor(competitorId);
   if (!competitor?.recreatedPage?.contentDraft) {
     throw new Error("No content draft to save. Generate content first.");
   }
 
+  let nextBlocks = blocks;
+  let nextDocument =
+    document ?? competitor.recreatedPage.contentDraft.document ?? null;
+  if (document) {
+    nextDocument = document;
+    nextBlocks = syncDocumentIntoBlocks(
+      document,
+      blocks.length
+        ? blocks
+        : competitor.recreatedPage.contentDraft.blocks,
+    );
+  }
+
   const draft = normalizeEditedContentDraft(
     competitor.recreatedPage.contentDraft,
-    blocks,
+    nextBlocks,
   );
+  draft.document = nextDocument;
   draft.status = "ready";
 
   const updated = updateCompetitor(competitorId, {
@@ -291,6 +310,7 @@ export async function buildRecreationDesign(
   competitorId: string,
   options?: {
     blocks?: LandingContentBlock[];
+    document?: LandingContentDocument | null;
     userFeedback?: string;
   },
 ): Promise<CompetitorRecord> {
@@ -303,7 +323,14 @@ export async function buildRecreationDesign(
   }
 
   let draft: LandingContentDraft = existing.contentDraft;
-  if (options?.blocks?.length) {
+  if (options?.document) {
+    const synced = syncDocumentIntoBlocks(
+      options.document,
+      options.blocks?.length ? options.blocks : draft.blocks,
+    );
+    draft = normalizeEditedContentDraft(draft, synced);
+    draft.document = options.document;
+  } else if (options?.blocks?.length) {
     draft = normalizeEditedContentDraft(draft, options.blocks);
   }
   draft = {
@@ -491,6 +518,9 @@ export async function regenerateGeneratedImageForRecreation(
     image: existing,
     competitorId,
     feedback: feedback || null,
+    logoUrl:
+      (ctx.job as { businessProfile?: { brandAssets?: { logoUrl?: string } } })
+        .businessProfile?.brandAssets?.logoUrl || null,
   });
   const html = replaceGeneratedImageInHtml(page.html, nextImage);
   const nextImages = images.map((img) =>

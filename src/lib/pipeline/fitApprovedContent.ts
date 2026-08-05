@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import type { LandingContentDraft } from "../types";
 import type { CidTextNode } from "./archive/rewriteTextByCid";
 import { getOpenAiContentModel } from "./contentDraft";
+import { clipToCompletePhrase } from "./slotTextBudget";
 
 function normalize(s: string): string {
   return s.replace(/\s+/g, " ").trim();
@@ -140,7 +141,7 @@ Hard rules:
         if (!meta) continue;
         let text = normalize(row.newText);
         if (text.length > meta.maxLen) {
-          text = text.slice(0, meta.maxLen).replace(/\s+\S*$/, "").trim();
+          text = clipToCompletePhrase(text, meta.maxLen, { role: meta.role });
         }
         // If still too short, keep it anyway — apply step will force-write
         if (text.length >= 2) map.set(row.id, text);
@@ -164,13 +165,9 @@ Hard rules:
     packIdx += 1;
     if (!seed) continue;
     let text = seed.text;
-    // Expand short seed toward min length by appending brand/keyword once
-    if (text.length < budget.minLen) {
-      const pad = ` ${input.brandName} helps with ${input.keyword}.`.trim();
-      text = normalize(`${text} ${pad}`);
-    }
+    // Prefer a complete pack line; don't glue on filler that creates awkward doubles
     if (text.length > budget.maxLen) {
-      text = text.slice(0, budget.maxLen).replace(/\s+\S*$/, "").trim();
+      text = clipToCompletePhrase(text, budget.maxLen, { role: node.role });
     }
     if (text.length >= 2) map.set(node.id, text);
   }

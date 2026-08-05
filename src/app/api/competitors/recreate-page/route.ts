@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { getCompetitor } from "@/lib/db";
-import type { LandingContentBlock } from "@/lib/types";
+import type {
+  LandingContentBlock,
+  LandingContentDocument,
+} from "@/lib/types";
 import {
   buildRecreationDesign,
   generateRecreationContent,
@@ -40,6 +43,10 @@ export async function POST(request: Request) {
     const blocks = Array.isArray(body.blocks)
       ? (body.blocks as LandingContentBlock[])
       : undefined;
+    const document =
+      body.document && typeof body.document === "object"
+        ? (body.document as LandingContentDocument)
+        : undefined;
 
     // Cached completed page with approved content
     if (
@@ -64,13 +71,17 @@ export async function POST(request: Request) {
     }
 
     if (action === "save_content") {
-      if (!blocks?.length) {
+      if (!blocks?.length && !document?.sections?.length) {
         return NextResponse.json(
-          { error: "blocks are required to save content edits" },
+          { error: "document or blocks are required to save content edits" },
           { status: 400 },
         );
       }
-      const competitor = saveRecreationContentEdits(competitorId, blocks);
+      const competitor = saveRecreationContentEdits(
+        competitorId,
+        blocks || existing.recreatedPage?.contentDraft?.blocks || [],
+        document,
+      );
       return NextResponse.json({ competitor, cached: false });
     }
 
@@ -106,6 +117,7 @@ export async function POST(request: Request) {
     ) {
       const competitor = await buildRecreationDesign(competitorId, {
         blocks,
+        document,
         userFeedback: userFeedback || undefined,
       });
       return NextResponse.json({ competitor, cached: false });

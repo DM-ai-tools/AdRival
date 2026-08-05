@@ -6,6 +6,7 @@ import type {
   CompetitorRecord,
   GeneratedLandingImage,
   LandingContentBlock,
+  LandingContentDocument,
   RecreatedLandingPage,
 } from "@/lib/types";
 import { stripDraftBanner } from "@/lib/pipeline/stripDraftBanner";
@@ -14,6 +15,9 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
   const [competitor, setCompetitor] = useState<CompetitorRecord | null>(null);
   const [page, setPage] = useState<RecreatedLandingPage | null>(null);
   const [blocks, setBlocks] = useState<LandingContentBlock[]>([]);
+  const [contentDoc, setContentDoc] = useState<LandingContentDocument | null>(
+    null,
+  );
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [building, setBuilding] = useState(false);
@@ -35,6 +39,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
   const syncFromPage = useCallback((nextPage: RecreatedLandingPage | null) => {
     setPage(nextPage);
     setBlocks(nextPage?.contentDraft?.blocks || []);
+    setContentDoc(nextPage?.contentDraft?.document || null);
     if (nextPage?.contentDraft?.userFeedback) {
       setContentFeedback(nextPage.contentDraft.userFeedback);
     }
@@ -105,6 +110,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
           competitorId,
           action: "save_content",
           blocks,
+          document: contentDoc || undefined,
         }),
       });
       const data = await res.json();
@@ -117,7 +123,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     } finally {
       setSaving(false);
     }
-  }, [blocks, competitorId, syncFromPage]);
+  }, [blocks, contentDoc, competitorId, syncFromPage]);
 
   const approveAndBuild = useCallback(async () => {
     setError(null);
@@ -130,6 +136,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
           competitorId,
           action: "approve_and_build",
           blocks,
+          document: contentDoc || undefined,
           userFeedback: designFeedback.trim() || undefined,
         }),
       });
@@ -144,7 +151,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     } finally {
       setBuilding(false);
     }
-  }, [blocks, competitorId, designFeedback, syncFromPage]);
+  }, [blocks, contentDoc, competitorId, designFeedback, syncFromPage]);
 
   const regenerateDesign = useCallback(async () => {
     setError(null);
@@ -327,6 +334,56 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     );
   }
 
+  function updateDocMeta(field: "title" | "description", value: string) {
+    setContentDoc((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        meta: {
+          title: field === "title" ? value : prev.meta?.title || "",
+          description:
+            field === "description" ? value : prev.meta?.description || "",
+        },
+      };
+    });
+  }
+
+  function updateDocSection(
+    sectionId: string,
+    patch: Partial<LandingContentDocument["sections"][number]>,
+  ) {
+    setContentDoc((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        sections: prev.sections.map((s) =>
+          s.id === sectionId ? { ...s, ...patch } : s,
+        ),
+      };
+    });
+  }
+
+  function updateDocFaq(
+    sectionId: string,
+    index: number,
+    field: "question" | "answer",
+    value: string,
+  ) {
+    setContentDoc((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        sections: prev.sections.map((s) => {
+          if (s.id !== sectionId || !s.faqs) return s;
+          const faqs = s.faqs.map((f, i) =>
+            i === index ? { ...f, [field]: value } : f,
+          );
+          return { ...s, faqs };
+        }),
+      };
+    });
+  }
+
   function isLinkRole(role: string) {
     return (
       role === "nav" ||
@@ -335,6 +392,8 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
       role === "internal_link"
     );
   }
+
+  const hasDocument = Boolean(contentDoc?.sections?.length);
 
   async function copyHtml() {
     if (!page?.html) return;
@@ -644,7 +703,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
         <div className="recreate-status panel">
           <p>
             {generating
-              ? "Reading competitor text placements and writing length-matched content…"
+              ? "Scraping the competitor page (Firecrawl markdown) and drafting a unified content plan with Claude…"
               : "Loading…"}
           </p>
         </div>
@@ -679,15 +738,17 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
             <div>
               <h2>Review content</h2>
               <p className="muted">
-                Copy is written for each real text placement on the competitor
-                page (length-matched). Edit below, then approve to paste into
-                the design.
+                {hasDocument
+                  ? "Page content is presented as one coherent document (sections, FAQs, links, logos). Edit, then approve to fit into the design."
+                  : "Copy is written for each real text placement on the competitor page. Edit below, then approve to paste into the design."}
                 {page?.contentDraft?.model
                   ? ` · model ${page.contentDraft.model}`
                   : null}
-                {page?.contentDraft?.slotCount
-                  ? ` · ${page.contentDraft.slotCount} page slots`
-                  : null}
+                {page?.contentDraft?.slotSource === "firecrawl_markdown"
+                  ? " · Firecrawl markdown"
+                  : page?.contentDraft?.slotCount
+                    ? ` · ${page.contentDraft.slotCount} page slots`
+                    : null}
               </p>
             </div>
             <div className="recreate-content-actions">
@@ -716,72 +777,231 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
             </div>
           </div>
 
-          {sections.map((section) => (
-            <div
-              key={`${section.index}-${section.name}`}
-              className="recreate-section panel"
-            >
-              <h3 className="recreate-section-title">{section.name}</h3>
-              <div className="recreate-block-list">
-                {section.items.map((block) => (
-                  <label key={block.id} className="recreate-block">
-                    <span className="recreate-block-label">
-                      {block.label}
-                      <em>{block.role}</em>
-                      {block.minLen != null && block.maxLen != null ? (
+          {hasDocument && contentDoc ? (
+            <div className="recreate-document">
+              {contentDoc.summary ? (
+                <p className="recreate-doc-summary muted">{contentDoc.summary}</p>
+              ) : null}
+              {contentDoc.meta ? (
+                <div className="recreate-section panel">
+                  <h3 className="recreate-section-title">Meta</h3>
+                  <div className="recreate-block-list">
+                    <label className="recreate-block">
+                      <span className="recreate-block-label">Title</span>
+                      <textarea
+                        className="recreate-block-input"
+                        rows={2}
+                        disabled={busy}
+                        value={contentDoc.meta.title}
+                        onChange={(e) => updateDocMeta("title", e.target.value)}
+                      />
+                    </label>
+                    <label className="recreate-block">
+                      <span className="recreate-block-label">Description</span>
+                      <textarea
+                        className="recreate-block-input"
+                        rows={3}
+                        disabled={busy}
+                        value={contentDoc.meta.description}
+                        onChange={(e) =>
+                          updateDocMeta("description", e.target.value)
+                        }
+                      />
+                    </label>
+                  </div>
+                </div>
+              ) : null}
+
+              {contentDoc.sections.map((section) => (
+                <div key={section.id} className="recreate-section panel">
+                  <h3 className="recreate-section-title">
+                    {section.title}
+                    <em className="recreate-section-kind">{section.kind}</em>
+                  </h3>
+
+                  {section.kind === "faq" || (section.faqs && section.faqs.length > 0) ? (
+                    <div className="recreate-faq-list">
+                      {(section.faqs || []).map((faq, i) => (
+                        <div key={`${section.id}-faq-${i}`} className="recreate-faq-item">
+                          <label className="recreate-block">
+                            <span className="recreate-block-label">
+                              Question {i + 1}
+                            </span>
+                            <textarea
+                              className="recreate-block-input"
+                              rows={2}
+                              disabled={busy}
+                              value={faq.question}
+                              onChange={(e) =>
+                                updateDocFaq(
+                                  section.id,
+                                  i,
+                                  "question",
+                                  e.target.value,
+                                )
+                              }
+                            />
+                          </label>
+                          <label className="recreate-block">
+                            <span className="recreate-block-label">Answer</span>
+                            <textarea
+                              className="recreate-block-input"
+                              rows={4}
+                              disabled={busy}
+                              value={faq.answer}
+                              onChange={(e) =>
+                                updateDocFaq(
+                                  section.id,
+                                  i,
+                                  "answer",
+                                  e.target.value,
+                                )
+                              }
+                            />
+                          </label>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {section.links && section.links.length > 0 ? (
+                    <ul className="recreate-doc-links">
+                      {section.links.map((link, i) => (
+                        <li key={`${section.id}-link-${i}`}>
+                          <strong>{link.label}</strong>
+                          <span className="muted"> · {link.href}</span>
+                          {link.role ? (
+                            <em className="muted"> ({link.role})</em>
+                          ) : null}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+
+                  {section.logos && section.logos.length > 0 ? (
+                    <ul className="recreate-doc-logos">
+                      {section.logos.map((logo, i) => (
+                        <li key={`${section.id}-logo-${i}`}>
+                          <strong>{logo.label}</strong>
+                          {logo.note ? (
+                            <span className="muted"> — {logo.note}</span>
+                          ) : null}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+
+                  {section.kind !== "faq" &&
+                  section.kind !== "links" &&
+                  section.kind !== "logos" ? (
+                    <label className="recreate-block">
+                      <span className="recreate-block-label">Section copy</span>
+                      <textarea
+                        className="recreate-block-input recreate-doc-body"
+                        rows={Math.min(
+                          12,
+                          Math.max(4, (section.body || "").split("\n").length + 2),
+                        )}
+                        disabled={busy}
+                        value={section.body}
+                        onChange={(e) =>
+                          updateDocSection(section.id, { body: e.target.value })
+                        }
+                      />
+                    </label>
+                  ) : section.body &&
+                    section.kind !== "faq" &&
+                    !(section.links && section.links.length) &&
+                    !(section.logos && section.logos.length) ? (
+                    <label className="recreate-block">
+                      <span className="recreate-block-label">Notes</span>
+                      <textarea
+                        className="recreate-block-input"
+                        rows={3}
+                        disabled={busy}
+                        value={section.body}
+                        onChange={(e) =>
+                          updateDocSection(section.id, { body: e.target.value })
+                        }
+                      />
+                    </label>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ) : (
+            sections.map((section) => (
+              <div
+                key={`${section.index}-${section.name}`}
+                className="recreate-section panel"
+              >
+                <h3 className="recreate-section-title">{section.name}</h3>
+                <div className="recreate-block-list">
+                  {section.items.map((block) => (
+                    <label key={block.id} className="recreate-block">
+                      <span className="recreate-block-label">
+                        {block.label}
+                        <em>{block.role}</em>
+                        {block.minLen != null && block.maxLen != null ? (
+                          <span
+                            className={
+                              block.text.length < (block.minLen || 0) ||
+                              block.text.length > (block.maxLen || 0)
+                                ? "recreate-len-warn"
+                                : "muted"
+                            }
+                          >
+                            {" "}
+                            · {block.text.length}/{block.minLen}–{block.maxLen}{" "}
+                            chars
+                            {block.targetLen ? ` (was ${block.targetLen})` : ""}
+                          </span>
+                        ) : block.targetLen ? (
+                          <span className="muted">
+                            {" "}
+                            · {block.text.length}/{block.targetLen} chars
+                          </span>
+                        ) : null}
+                      </span>
+                      {block.originalText ? (
                         <span
-                          className={
-                            block.text.length < (block.minLen || 0) ||
-                            block.text.length > (block.maxLen || 0)
-                              ? "recreate-len-warn"
-                              : "muted"
-                          }
+                          className="recreate-block-original muted"
+                          title={block.originalText}
                         >
-                          {" "}
-                          · {block.text.length}/{block.minLen}–{block.maxLen} chars
-                          {block.targetLen ? ` (was ${block.targetLen})` : ""}
-                        </span>
-                      ) : block.targetLen ? (
-                        <span className="muted">
-                          {" "}
-                          · {block.text.length}/{block.targetLen} chars
+                          Competitor: {block.originalText.slice(0, 120)}
+                          {block.originalText.length > 120 ? "…" : ""}
                         </span>
                       ) : null}
-                    </span>
-                    {block.originalText ? (
-                      <span
-                        className="recreate-block-original muted"
-                        title={block.originalText}
-                      >
-                        Competitor: {block.originalText.slice(0, 120)}
-                        {block.originalText.length > 120 ? "…" : ""}
-                      </span>
-                    ) : null}
-                    {block.href ? (
-                      <span className="recreate-block-href muted" title={block.href}>
-                        {block.href}
-                      </span>
-                    ) : null}
-                    <textarea
-                      className="recreate-block-input"
-                      rows={
-                        isLinkRole(block.role)
-                          ? 1
-                          : block.role === "body" ||
-                              block.role === "testimonial" ||
-                              block.role === "meta_description"
-                            ? 4
-                            : 2
-                      }
-                      disabled={busy}
-                      value={block.text}
-                      onChange={(e) => updateBlock(block.id, e.target.value)}
-                    />
-                  </label>
-                ))}
+                      {block.href ? (
+                        <span
+                          className="recreate-block-href muted"
+                          title={block.href}
+                        >
+                          {block.href}
+                        </span>
+                      ) : null}
+                      <textarea
+                        className="recreate-block-input"
+                        rows={
+                          isLinkRole(block.role)
+                            ? 1
+                            : block.role === "body" ||
+                                block.role === "testimonial" ||
+                                block.role === "meta_description" ||
+                                block.role === "faq_answer"
+                              ? 4
+                              : 2
+                        }
+                        disabled={busy}
+                        value={block.text}
+                        onChange={(e) => updateBlock(block.id, e.target.value)}
+                      />
+                    </label>
+                  ))}
+                </div>
               </div>
-            </div>
-          ))}
+            ))
+          )}
         </section>
       )}
 

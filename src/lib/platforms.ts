@@ -97,21 +97,21 @@ export function getPlatformAdThresholds(p: AdPlatform): PlatformAdThresholds {
       activeAdsInclusive: false,
     };
   }
-  // LinkedIn: ≥3 ads, no duration rule
+  // LinkedIn: ≥2 ads, no duration rule
   if (p === "linkedin") {
     return {
       minDaysExclusive: 0,
-      minActiveAds: 3,
+      minActiveAds: 2,
       requireDaysGreaterThan: false,
       skipDuration: true,
       activeAdsInclusive: true,
     };
   }
-  // Google / YouTube: loosened so runs can return results
+  // Google / YouTube: one public creative is enough to consider the advertiser
   if (p === "google" || p === "youtube") {
     return {
       minDaysExclusive: 0,
-      minActiveAds: 3,
+      minActiveAds: 1,
       requireDaysGreaterThan: false,
       skipDuration: true,
       activeAdsInclusive: true,

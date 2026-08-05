@@ -13,6 +13,21 @@ import type {
 const DATA_DIR = path.join(process.cwd(), "data");
 const DB_PATH = path.join(DATA_DIR, "store.json");
 
+/**
+ * Tombstones for runs deleted while a pipeline is still in-flight.
+ * Without this, saveJob() re-creates the deleted row on the next progress tick.
+ */
+const suppressedSearchJobIds = new Set<string>();
+const suppressedLookupJobIds = new Set<string>();
+
+export function isSearchJobSuppressed(jobId: string): boolean {
+  return suppressedSearchJobIds.has(jobId);
+}
+
+export function isLookupJobSuppressed(lookupId: string): boolean {
+  return suppressedLookupJobIds.has(lookupId);
+}
+
 function emptyDb(): DatabaseShape {
   return {
     jobs: [],
@@ -142,7 +157,9 @@ export function markPageSeen(pageId: string) {
   }
 }
 
-export function saveJob(job: SearchJob) {
+/** Persist a search job. Returns false if the run was deleted and must not resurrect. */
+export function saveJob(job: SearchJob): boolean {
+  if (suppressedSearchJobIds.has(job.id)) return false;
   const db = ensureDb();
   const idx = db.jobs.findIndex((j) => j.id === job.id);
   if (idx >= 0) {
@@ -156,6 +173,7 @@ export function saveJob(job: SearchJob) {
     db.jobs.unshift(job);
   }
   writeDb(db);
+  return true;
 }
 
 export function getJob(id: string): SearchJob | null {
@@ -166,6 +184,7 @@ export function updateJob(
   id: string,
   patch: Partial<SearchJob>,
 ): SearchJob | null {
+  if (suppressedSearchJobIds.has(id)) return null;
   const db = ensureDb();
   const idx = db.jobs.findIndex((j) => j.id === id);
   if (idx < 0) return null;
@@ -194,8 +213,11 @@ export function listHistoryRuns(limit = 100): HistoryRunSummary[] {
   });
 }
 
-export function saveCompetitor(competitor: CompetitorRecord) {
+export function saveCompetitor(competitor: CompetitorRecord): boolean {
+  if (suppressedSearchJobIds.has(competitor.runId)) return false;
   const db = ensureDb();
+  // Don't orphan competitors onto a deleted / missing run
+  if (!db.jobs.some((j) => j.id === competitor.runId)) return false;
   db.competitors.unshift(competitor);
   if (!db.seenPageIds.includes(competitor.pageId)) {
     db.seenPageIds.push(competitor.pageId);
@@ -206,6 +228,7 @@ export function saveCompetitor(competitor: CompetitorRecord) {
     job.updatedAt = new Date().toISOString();
   }
   writeDb(db);
+  return true;
 }
 
 export function getCompetitorsByRun(runId: string): CompetitorRecord[] {
@@ -241,9 +264,14 @@ export function deleteHistoryRun(runId: string): {
   ok: boolean;
   removedCompetitors: number;
 } {
+  // Tombstone first so an in-flight pipeline cannot recreate the row
+  suppressedSearchJobIds.add(runId);
   const db = ensureDb();
   const jobIdx = db.jobs.findIndex((j) => j.id === runId);
-  if (jobIdx < 0) return { ok: false, removedCompetitors: 0 };
+  if (jobIdx < 0) {
+    // Still ok — job may have been deleted already while pipeline kept running
+    return { ok: true, removedCompetitors: 0 };
+  }
 
   const removed = db.competitors.filter((c) => c.runId === runId);
   const removedPageIds = new Set(removed.map((c) => c.pageId));
@@ -266,6 +294,7 @@ export function deleteHistoryRun(runId: string): {
 /** Delete every run + competitor + clear seen page ids */
 export function clearAllHistory(): { removedRuns: number; removedCompetitors: number } {
   const db = ensureDb();
+  for (const job of db.jobs) suppressedSearchJobIds.add(job.id);
   const removedRuns = db.jobs.length;
   const removedCompetitors = db.competitors.length;
   db.jobs = [];
@@ -277,7 +306,8 @@ export function clearAllHistory(): { removedRuns: number; removedCompetitors: nu
 
 /* ── Competitor name lookup (separate from keyword search history) ── */
 
-export function saveLookupJob(job: LookupJob) {
+export function saveLookupJob(job: LookupJob): boolean {
+  if (suppressedLookupJobIds.has(job.id)) return false;
   const db = ensureDb();
   if (!db.lookupJobs) db.lookupJobs = [];
   const idx = db.lookupJobs.findIndex((j) => j.id === job.id);
@@ -291,6 +321,7 @@ export function saveLookupJob(job: LookupJob) {
     db.lookupJobs.unshift(job);
   }
   writeDb(db);
+  return true;
 }
 
 export function getLookupJob(id: string): LookupJob | null {
@@ -311,10 +342,12 @@ export function listLookupHistory(limit = 100): LookupHistorySummary[] {
   });
 }
 
-export function saveLookupAd(ad: LookupAdRecord) {
+export function saveLookupAd(ad: LookupAdRecord): boolean {
+  if (suppressedLookupJobIds.has(ad.lookupId)) return false;
   const db = ensureDb();
   if (!db.lookupAds) db.lookupAds = [];
   if (!db.lookupJobs) db.lookupJobs = [];
+  if (!db.lookupJobs.some((j) => j.id === ad.lookupId)) return false;
   const existing = db.lookupAds.findIndex((a) => a.id === ad.id);
   if (existing >= 0) {
     db.lookupAds[existing] = ad;
@@ -327,6 +360,7 @@ export function saveLookupAd(ad: LookupAdRecord) {
     job.updatedAt = new Date().toISOString();
   }
   writeDb(db);
+  return true;
 }
 
 export function getLookupAd(adId: string): LookupAdRecord | null {
@@ -356,11 +390,12 @@ export function deleteLookupHistoryRun(lookupId: string): {
   ok: boolean;
   removedAds: number;
 } {
+  suppressedLookupJobIds.add(lookupId);
   const db = ensureDb();
   if (!db.lookupJobs) db.lookupJobs = [];
   if (!db.lookupAds) db.lookupAds = [];
   const idx = db.lookupJobs.findIndex((j) => j.id === lookupId);
-  if (idx < 0) return { ok: false, removedAds: 0 };
+  if (idx < 0) return { ok: true, removedAds: 0 };
   const before = db.lookupAds.length;
   db.lookupAds = db.lookupAds.filter((a) => a.lookupId !== lookupId);
   db.lookupJobs.splice(idx, 1);
@@ -373,6 +408,7 @@ export function clearAllLookupHistory(): {
   removedAds: number;
 } {
   const db = ensureDb();
+  for (const job of db.lookupJobs ?? []) suppressedLookupJobIds.add(job.id);
   const removedRuns = db.lookupJobs?.length ?? 0;
   const removedAds = db.lookupAds?.length ?? 0;
   db.lookupJobs = [];

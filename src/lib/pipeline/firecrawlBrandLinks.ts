@@ -13,6 +13,7 @@ export type FirecrawlBrandLinkPack = {
   footerLinks: BrandLink[];
   socialLinks: BrandLink[];
   servicePages: BrandLink[];
+  ctaLinks: BrandLink[];
   warnings: string[];
 };
 
@@ -95,7 +96,7 @@ function uniqLinks(links: BrandLink[], max: number): BrandLink[] {
 }
 
 function looksServicePath(href: string): boolean {
-  return /\/(services?|solutions?|products?|offerings?|what-we-do|loans?|mortgage|insurance|refinance|home-loans?|personal-loans?|car-loans?|business|pricing|packages?|plans?|programs?)(\/|$)/i.test(
+  return /\/(services?|solutions?|products?|offerings?|what-we-do|loans?|mortgage|insurance|refinance|home-loans?|personal-loans?|car-loans?|business|pricing|packages?|plans?|programs?|treatments?)(\/|$)/i.test(
     href,
   );
 }
@@ -103,6 +104,18 @@ function looksServicePath(href: string): boolean {
 function looksFooterPath(href: string): boolean {
   return /\/(about|contact|privacy|terms|cookie|disclaimer|complaints?|licence|license|team|careers?|faq|help|support|blog|resources?|guides?)(\/|$)/i.test(
     href,
+  );
+}
+
+function looksCtaPath(href: string): boolean {
+  return /\/(contact|book|booking|schedule|appoint|consultation|apply|signup|sign-up|get-started|getstarted|quote|enquiry|inquiry|demo|trial|register)(\/|$)/i.test(
+    href,
+  );
+}
+
+function looksCtaLabel(label: string): boolean {
+  return /^(contact|book|schedule|apply|get started|start|try|demo|quote|enquire|inquire|sign up|register)\b/i.test(
+    (label || "").trim(),
   );
 }
 
@@ -138,6 +151,7 @@ export async function extractBrandLinksWithFirecrawl(
       footerLinks: [],
       socialLinks: [],
       servicePages: [],
+      ctaLinks: [],
       warnings: ["FIRECRAWL_API_KEY not set — skipped Firecrawl link scrape"],
     };
   }
@@ -147,6 +161,7 @@ export async function extractBrandLinksWithFirecrawl(
   const footer: BrandLink[] = [];
   const social: BrandLink[] = [];
   const services: BrandLink[] = [];
+  const ctas: BrandLink[] = [];
   const allInternal: BrandLink[] = [];
   let siteName: string | null = null;
 
@@ -166,6 +181,7 @@ export async function extractBrandLinksWithFirecrawl(
       footerLinks?: unknown;
       socialLinks?: unknown;
       servicePages?: unknown;
+      ctaLinks?: unknown;
     };
     if (extracted.siteName) siteName = extracted.siteName;
 
@@ -173,6 +189,7 @@ export async function extractBrandLinksWithFirecrawl(
     footer.push(...asLinkList(extracted.footerLinks, finalUrl));
     social.push(...asLinkList(extracted.socialLinks, finalUrl));
     services.push(...asLinkList(extracted.servicePages, finalUrl));
+    ctas.push(...asLinkList(extracted.ctaLinks, finalUrl));
 
     for (const raw of data?.links || []) {
       const href = absolutize(finalUrl, raw);
@@ -189,11 +206,15 @@ export async function extractBrandLinksWithFirecrawl(
       const base = hostOf(finalUrl);
       if (!h || !base || h !== base) continue;
       if (isHomepage(href, finalUrl)) continue;
-      allInternal.push({ label: labelFromUrl(href), href });
+      const label = labelFromUrl(href);
+      allInternal.push({ label, href });
+      if (looksCtaPath(href) || looksCtaLabel(label)) {
+        ctas.push({ label, href });
+      }
       if (looksServicePath(href)) {
-        services.push({ label: labelFromUrl(href), href });
+        services.push({ label, href });
       } else if (looksFooterPath(href)) {
-        footer.push({ label: labelFromUrl(href), href });
+        footer.push({ label, href });
       }
     }
   } catch (err) {
@@ -221,6 +242,9 @@ export async function extractBrandLinksWithFirecrawl(
       if (isHomepage(href, finalUrl)) continue;
       const label = (row.title || labelFromUrl(href)).trim().slice(0, 60);
       allInternal.push({ label, href });
+      if (looksCtaPath(href) || looksCtaLabel(label)) {
+        ctas.push({ label, href });
+      }
       if (looksServicePath(href)) services.push({ label, href });
       else if (looksFooterPath(href)) footer.push({ label, href });
       else if (/\/(services?|solutions?|products?)\b/i.test(href)) {
@@ -260,6 +284,19 @@ export async function extractBrandLinksWithFirecrawl(
     14,
   );
 
+  const ctaClean = uniqLinks(
+    [
+      ...ctas.filter((l) => !isHomepage(l.href, finalUrl)),
+      ...allInternal.filter(
+        (l) =>
+          !isHomepage(l.href, finalUrl) &&
+          (looksCtaPath(l.href) || looksCtaLabel(l.label)),
+      ),
+      ...serviceClean.filter((l) => looksCtaPath(l.href)),
+    ],
+    10,
+  );
+
   // If footer still thin, promote service pages into footer inventory
   const footerMerged = uniqLinks(
     [
@@ -279,7 +316,8 @@ export async function extractBrandLinksWithFirecrawl(
     !navClean.length &&
     !footerMerged.length &&
     !serviceClean.length &&
-    !socialClean.length
+    !socialClean.length &&
+    !ctaClean.length
   ) {
     warnings.push(
       "Firecrawl returned no usable non-homepage links — check the business URL / site structure",
@@ -293,6 +331,7 @@ export async function extractBrandLinksWithFirecrawl(
     footerLinks: footerMerged,
     socialLinks: socialClean,
     servicePages: serviceClean,
+    ctaLinks: ctaClean,
     warnings,
   };
 }
@@ -338,6 +377,21 @@ export function mergeFirecrawlIntoBrandAssets(
     ),
     socialLinks: uniqLinks(
       pack.socialLinks.length ? pack.socialLinks : fallback.socialLinks,
+      10,
+    ),
+    servicePages: uniqLinks(
+      [
+        ...(pack.servicePages.length
+          ? pack.servicePages
+          : fallback.servicePages || []),
+      ].filter((l) => !isHomepage(l.href, businessUrl)),
+      14,
+    ),
+    ctaLinks: uniqLinks(
+      [
+        ...(pack.ctaLinks.length ? pack.ctaLinks : fallback.ctaLinks || []),
+        ...pack.servicePages.filter((l) => looksCtaPath(l.href)),
+      ].filter((l) => !isHomepage(l.href, businessUrl)),
       10,
     ),
   };

@@ -346,9 +346,73 @@ export interface LookupJob {
   llmReason?: string | null;
   llmConfidence?: number | null;
   adIds: string[];
+  /**
+   * Post-fetch report: unique ad-copy hooks/offers + unique landing-page offers.
+   * Built automatically after ads are loaded; shown on lookup results + history.
+   */
+  offersReport?: LookupOffersReport | null;
   error?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/** One unique creative cluster (same/similar ad copy). */
+export interface LookupUniqueAdCreative {
+  id: string;
+  hook: string;
+  offer: string;
+  /** Short sample of the creative body */
+  sampleCopy: string;
+  adCount: number;
+  sampleAdIds: string[];
+  landingPageUrl?: string | null;
+}
+
+/** One unique landing-page destination with its analyzed offer. */
+export interface LookupUniqueLandingPage {
+  url: string;
+  matchKey: string;
+  adCount: number;
+  status: "completed" | "failed" | "skipped";
+  headline?: string | null;
+  primaryOffer?: string | null;
+  pricing?: string | null;
+  cta?: string | null;
+  uniqueValueProps?: string[];
+  summary?: string | null;
+  error?: string | null;
+  sampleAdId?: string | null;
+}
+
+/** Deduped offer line appearing across creatives or LPs. */
+export interface LookupUniqueOfferLine {
+  offer: string;
+  source: "ad_copy" | "landing_page" | "both";
+  adCount: number;
+  urls?: string[];
+  sampleHooks?: string[];
+}
+
+export interface LookupOffersReport {
+  status: "pending" | "completed" | "failed";
+  createdAt: string;
+  updatedAt: string;
+  error?: string | null;
+  /** Short narrative for the UI */
+  summary?: string | null;
+  adsAnalyzed: number;
+  adCopy: {
+    uniqueCreatives: number;
+    creatives: LookupUniqueAdCreative[];
+    uniqueOffers: LookupUniqueOfferLine[];
+  };
+  landingPages: {
+    uniqueUrls: number;
+    analyzed: number;
+    failed: number;
+    pages: LookupUniqueLandingPage[];
+    uniqueOffers: LookupUniqueOfferLine[];
+  };
 }
 
 export interface LookupAdRecord {
@@ -498,8 +562,17 @@ export interface LandingContentDraft {
   tone?: string | null;
   differentiationSummary?: string | null;
   blocks: LandingContentBlock[];
+  /**
+   * Unified page document from Firecrawl markdown + Claude
+   * (presented together in the content UI, not as micro-blocks).
+   */
+  document?: LandingContentDocument | null;
   /** How page slots were extracted for this draft */
-  slotSource?: "page_text_slots" | "architecture_scaffold" | null;
+  slotSource?:
+    | "page_text_slots"
+    | "architecture_scaffold"
+    | "firecrawl_markdown"
+    | null;
   slotCount?: number | null;
   /** CID paste coverage from last design fit (0–1) */
   cidCoverage?: number | null;
@@ -508,6 +581,42 @@ export interface LandingContentDraft {
   userFeedback?: string | null;
   approvedAt?: string | null;
   error?: string | null;
+}
+
+/** Coherent landing-page content plan (section-level, not micro-slots). */
+export type LandingContentSectionKind =
+  | "meta"
+  | "hero"
+  | "features"
+  | "faq"
+  | "cta"
+  | "testimonials"
+  | "links"
+  | "logos"
+  | "body"
+  | "other";
+
+export interface LandingContentDocSection {
+  id: string;
+  kind: LandingContentSectionKind | string;
+  title: string;
+  /** Unified section copy for review */
+  body: string;
+  faqs?: Array<{ question: string; answer: string; qBlockId?: string; aBlockId?: string }>;
+  links?: Array<{ label: string; href: string; role?: string | null }>;
+  logos?: Array<{ label: string; note?: string | null }>;
+  /** CID block ids that this section feeds into design paste */
+  blockIds?: string[];
+}
+
+export interface LandingContentDocument {
+  pageType?: string | null;
+  tone?: string | null;
+  summary?: string | null;
+  meta?: { title: string; description: string } | null;
+  sections: LandingContentDocSection[];
+  sourceMarkdownChars?: number | null;
+  competitorUrl?: string | null;
 }
 
 /** Playwright/fetch archive captured at content phase — reused for design CIDs. */
