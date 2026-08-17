@@ -1,8 +1,9 @@
-import OpenAI from "openai";
 import type { LandingContentDraft } from "../types";
 import type { CidTextNode } from "./archive/rewriteTextByCid";
-import { getOpenAiContentModel } from "./contentDraft";
+import { getOpenAiContentModel, hasContentLlmKey } from "./contentDraft";
+import { getOpenAICompatClient } from "../openrouter/openaiCompat";
 import { clipToCompletePhrase } from "./slotTextBudget";
+import { designMdPromptExcerpt } from "./designMd";
 
 function normalize(s: string): string {
   return s.replace(/\s+/g, " ").trim();
@@ -41,12 +42,16 @@ export async function fitApprovedContentToCids(input: {
   industry?: string | null;
   /** Design-only feedback — adjust tone, emphasis, CTAs, layout-sensitive copy while staying on-pack */
   userFeedback?: string | null;
+  /** Per-run brand design.md SSOT */
+  designMd?: string | null;
 }): Promise<Map<string, string>> {
   const map = new Map<string, string>();
   const nodes = input.nodes.filter((n) => !n.inFooter);
   if (!nodes.length) return map;
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY is required to fit approved content into the design");
+  if (!hasContentLlmKey()) {
+    throw new Error(
+      "OPENROUTER_API_KEY or OPENAI_API_KEY is required to fit approved content into the design",
+    );
   }
 
   const pack = input.draft.blocks
@@ -64,7 +69,10 @@ export async function fitApprovedContentToCids(input: {
   }
 
   const designFeedback = input.userFeedback?.trim().slice(0, 4000) || "";
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const designExcerpt = input.designMd
+    ? designMdPromptExcerpt(input.designMd, 3500)
+    : null;
+  const client = getOpenAICompatClient();
   const model = getOpenAiContentModel();
 
   const system = `You embed an APPROVED brand content pack into a landing-page design's text slots.
@@ -73,6 +81,7 @@ You receive:
 1) approvedPack — the ONLY allowed messaging source (already reviewed by the user)
 2) slots — every visible text node in the design (ids, role, competitorLength, minLen/maxLen)
 3) designFeedback — optional user notes for this design pass (tone, emphasis, CTA wording, what to fix)
+4) designMd — brand visual/voice SSOT (use for tone/personality only; layout comes from slots)
 
 Return ONLY JSON:
 { "replacements": [ { "id": "n0", "newText": "..." }, ... ] }
@@ -87,7 +96,8 @@ Hard rules:
 7) Each substantial newText (len≥24) must be unique across this response.
 8) Do not invent regulated guarantees or licence numbers.
 9) Expand approved pack ideas across many slots — one approved body may seed several related paragraphs with fresh wording.
-10) If designFeedback is present, prioritize satisfying it while still staying within approvedPack facts/claims (rephrase/emphasize/reorder angles — do not invent off-pack offers).`;
+10) If designFeedback is present, prioritize satisfying it while still staying within approvedPack facts/claims (rephrase/emphasize/reorder angles — do not invent off-pack offers).
+11) When design.md is present, follow its personality/tone notes; never adopt competitor brand voice.`;
 
   // Batch slots; include full pack each time for consistency
   for (let i = 0; i < nodes.length; i += 35) {
@@ -118,6 +128,7 @@ Hard rules:
               keyword: input.keyword,
               industry: input.industry || null,
               designFeedback: designFeedback || null,
+              designMd: designExcerpt,
               approvedPack: pack,
               slots: batch,
             },

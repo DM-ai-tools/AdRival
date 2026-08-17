@@ -221,18 +221,25 @@ export async function generateGptImage2(input: {
     } catch (firstErr) {
       const msg =
         firstErr instanceof Error ? firstErr.message : String(firstErr);
-      // Bad reference (SVG/mime) → retry once with no references so slots still generate
+      // Bad/unstable refs or transient API 500 → retry once without references
       if (
         referenceImages.length &&
-        /Unsupported Content-Type|referenceImages|Validation of body failed|svg\+xml/i.test(
+        /Unsupported Content-Type|referenceImages|Validation of body failed|svg\+xml|Internal server error|\b500\b/i.test(
           msg,
         )
       ) {
         console.warn(
-          "[runway] referenceImages rejected — retrying without refs",
+          "[runway] create failed with refs — retrying without refs",
           msg.slice(0, 180),
         );
         task = await runCreate([]);
+      } else if (/Internal server error|\b500\b/i.test(msg)) {
+        console.warn(
+          "[runway] transient 500 — retrying once",
+          msg.slice(0, 180),
+        );
+        await new Promise((r) => setTimeout(r, 1500));
+        task = await runCreate(referenceImages.length ? [] : referenceImages);
       } else {
         throw firstErr;
       }

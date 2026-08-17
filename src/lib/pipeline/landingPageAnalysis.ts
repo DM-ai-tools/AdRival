@@ -8,15 +8,19 @@ import type {
 } from "../types";
 import {
   getCompetitor,
+  getJob,
   getLookupAd,
   getLookupAds,
   updateCompetitor,
   updateLookupAd,
 } from "../db";
+import { enrichCompetitorDeepLocation } from "./competitorLocation";
 import {
   getOpenRouterClient,
+  hasOpenRouterKey,
   OPENROUTER_PERPLEXITY_MODEL,
 } from "../openrouter/client";
+import { OPENROUTER_OPENAI_MODEL } from "../openrouter/openaiCompat";
 import {
   getAnthropicClient,
   getAnthropicModel,
@@ -504,8 +508,28 @@ async function analyzeWithLlm(input: {
 
   let raw: string | null = null;
 
+  // Offers / page offer extraction: prefer direct OpenAI API
+  if (process.env.OPENAI_API_KEY) {
+    try {
+      const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+      const completion = await client.chat.completions.create({
+        model: process.env.OFFERS_OPENAI_MODEL?.trim() || "gpt-4o",
+        temperature: 0.15,
+        max_tokens: 6000,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+      });
+      raw = completion.choices[0]?.message?.content || null;
+    } catch (err) {
+      console.error("[page-analysis] direct OpenAI failed, falling back", err);
+    }
+  }
+
   // Prefer Claude when available — stronger at long structured extraction
-  if (process.env.ANTHROPIC_API_KEY) {
+  if (!raw && process.env.ANTHROPIC_API_KEY) {
     try {
       const client = getAnthropicClient();
       const completion = await client.messages.create({
@@ -524,39 +548,49 @@ async function analyzeWithLlm(input: {
     }
   }
 
-  if (!raw && process.env.OPENAI_API_KEY) {
-    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const completion = await client.chat.completions.create({
-      model: "gpt-4o",
-      temperature: 0.15,
-      max_tokens: 6000,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
-    });
-    raw = completion.choices[0]?.message?.content || null;
-    if (!raw) throw new Error("Empty OpenAI landing-page analysis");
+  if (!raw && hasOpenRouterKey()) {
+    try {
+      const client = getOpenRouterClient();
+      const completion = await client.chat.completions.create({
+        model: OPENROUTER_OPENAI_MODEL,
+        temperature: 0.15,
+        max_tokens: 6000,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+      });
+      raw = completion.choices[0]?.message?.content?.trim() || null;
+    } catch (err) {
+      console.error(
+        "[page-analysis] OpenRouter OpenAI failed, falling back",
+        err,
+      );
+    }
   }
 
-  if (!raw && process.env.OPENROUTER_API_KEY) {
-    const client = getOpenRouterClient();
-    const completion = await client.chat.completions.create({
-      model: OPENROUTER_PERPLEXITY_MODEL,
-      temperature: 0.15,
-      max_tokens: 6000,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
-    });
-    raw = completion.choices[0]?.message?.content?.trim() || "";
+  if (!raw && hasOpenRouterKey()) {
+    try {
+      const client = getOpenRouterClient();
+      const completion = await client.chat.completions.create({
+        model: OPENROUTER_PERPLEXITY_MODEL,
+        temperature: 0.15,
+        max_tokens: 6000,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+      });
+      raw = completion.choices[0]?.message?.content?.trim() || "";
+    } catch (err) {
+      console.error("[page-analysis] OpenRouter Perplexity failed", err);
+    }
   }
 
   if (!raw) {
     throw new Error(
-      "ANTHROPIC_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY is required",
+      "ANTHROPIC_API_KEY, OPENROUTER_API_KEY, or OPENAI_API_KEY is required",
     );
   }
 
@@ -573,33 +607,45 @@ async function analyzeWithLlm(input: {
   // If architecture is still thin, ask once more for sections only
   if (
     data.pageArchitecture.sections.length < 4 &&
-    input.outline.headingOutline.length >= 4 &&
-    process.env.ANTHROPIC_API_KEY
+    input.outline.headingOutline.length >= 4
   ) {
+    const expandSystem = `Expand landing-page architecture into 5–12 ordered sections from the heading outline. Return ONLY JSON: { "sections": [{ "name", "purpose", "summary", "keyElements": string[] }] }`;
+    const expandUser = JSON.stringify(
+      {
+        headingOutline: input.outline.headingOutline,
+        existingSections: data.pageArchitecture.sections,
+      },
+      null,
+      2,
+    );
     try {
-      const client = getAnthropicClient();
-      const completion = await client.messages.create({
-        model: getAnthropicModel(),
-        max_tokens: 3500,
-        temperature: 0.1,
-        system: `Expand landing-page architecture into 5–12 ordered sections from the heading outline. Return ONLY JSON: { "sections": [{ "name", "purpose", "summary", "keyElements": string[] }] }`,
-        messages: [
-          {
-            role: "user",
-            content: JSON.stringify(
-              {
-                headingOutline: input.outline.headingOutline,
-                existingSections: data.pageArchitecture.sections,
-              },
-              null,
-              2,
-            ),
-          },
-        ],
-      });
-      const content = completion.content
-        .map((b) => (b.type === "text" ? b.text : ""))
-        .join("\n");
+      let content = "";
+      if (process.env.ANTHROPIC_API_KEY) {
+        const client = getAnthropicClient();
+        const completion = await client.messages.create({
+          model: getAnthropicModel(),
+          max_tokens: 3500,
+          temperature: 0.1,
+          system: expandSystem,
+          messages: [{ role: "user", content: expandUser }],
+        });
+        content = completion.content
+          .map((b) => (b.type === "text" ? b.text : ""))
+          .join("\n");
+      } else if (hasOpenRouterKey()) {
+        const client = getOpenRouterClient();
+        const completion = await client.chat.completions.create({
+          model: OPENROUTER_OPENAI_MODEL,
+          temperature: 0.1,
+          max_tokens: 3500,
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: expandSystem },
+            { role: "user", content: expandUser },
+          ],
+        });
+        content = completion.choices[0]?.message?.content || "";
+      }
       const m = content.match(/\{[\s\S]*\}/);
       if (m) {
         const extra = JSON.parse(m[0]) as {
@@ -858,7 +904,35 @@ export async function analyzeCompetitorLandingPage(
 
     const updated = updateCompetitor(competitorId, { pageAnalysis: analysis });
     if (!updated) throw new Error("Failed to save page analysis");
-    return updated;
+
+    // Deep location runs here (not during keyword search accept)
+    try {
+      const job = getJob(competitor.runId);
+      await enrichCompetitorDeepLocation({
+        competitorId,
+        pageName: competitor.pageName,
+        website:
+          competitor.brand?.website ||
+          competitor.sampleAd?.landingPageUrl ||
+          page.finalUrl,
+        facebookUrl: competitor.brand?.facebookUrl,
+        linkedinUrl: competitor.brand?.linkedinUrl,
+        geoMode: job?.geoMode || "countrywide",
+        targetLocations: job?.targetLocations || [],
+        provisional: {
+          locationLabel: competitor.locationLabel ?? null,
+          locationCity: competitor.locationCity ?? null,
+          locationSuburb: competitor.locationSuburb ?? null,
+          locationCountry: competitor.locationCountry ?? null,
+          locationStatus: competitor.locationStatus || "unknown",
+          locationSource: competitor.locationSource || "none",
+        },
+      });
+    } catch (err) {
+      console.warn("[page-analysis] location enrich failed", err);
+    }
+
+    return getCompetitor(competitorId) || updated;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     // Preserve last good analysis on refresh failure

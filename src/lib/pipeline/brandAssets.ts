@@ -402,6 +402,22 @@ export function extractBrandAssetsFromHtml(
     }
   });
 
+  // Plaintext phones in chrome (many AU sites show "Call 1300 …" without tel:)
+  const phoneTextRe =
+    /(?:\+?61[\s.-]?)?(?:0?13\d{2}|1300|1800|13\s?\d{2})[\s.-]?\d{3}[\s.-]?\d{3}|(?:\+?\d{1,3}[\s.-]?)?\(?\d{2,4}\)?[\s.-]?\d{3}[\s.-]?\d{3,4}/gi;
+  $("header, nav, footer, [role='banner'], [role='contentinfo'], a, button")
+    .find("*")
+    .addBack()
+    .each((_, el) => {
+      const t = normalizeText($(el).text() || "");
+      if (t.length < 8 || t.length > 60) return;
+      for (const m of t.matchAll(phoneTextRe)) {
+        const raw = m[0].replace(/\s+/g, " ").trim();
+        const digits = raw.replace(/\D/g, "");
+        if (digits.length >= 8 && digits.length <= 15) phones.add(raw);
+      }
+    });
+
   // Fallback: if no footer links, use remaining nav-ish page links
   if (footerLinks.length === 0) {
     $("a[href]").each((_, el) => {

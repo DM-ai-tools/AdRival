@@ -4,6 +4,7 @@ import {
   getAnthropicClient,
   getAnthropicModel,
 } from "../../anthropic/client";
+import { designMdPromptExcerpt } from "../designMd";
 
 export type CidTextNode = {
   id: string;
@@ -470,6 +471,7 @@ export async function rewriteTextsByCid(input: {
   competitorName: string;
   userFeedback?: string | null;
   industry?: string | null;
+  designMd?: string | null;
 }): Promise<Map<string, string>> {
   const map = new Map<string, string>();
   if (!input.nodes.length) return map;
@@ -480,6 +482,9 @@ export async function rewriteTextsByCid(input: {
   const client = getAnthropicClient();
   const model = getAnthropicModel();
   const feedback = input.userFeedback?.trim() || "";
+  const designExcerpt = input.designMd
+    ? designMdPromptExcerpt(input.designMd, 3500)
+    : null;
 
   // Skip pure duplicate stamps — they are hidden in apply
   const rewriteNodes = input.nodes.filter((n) => {
@@ -509,7 +514,8 @@ Hard rules:
 7) Rewrite meaningfully — not light paraphrases.
 8) UNIQUENESS: Every newText for h1/h2/h3/p/li (length ≥ 20) MUST be distinct from every other newText in this response. Do not reuse the same headline or paragraph for multiple ids. Carousel/slide duplicates must each get a fresh angle.
 9) Never concatenate the same phrase twice inside one newText.
-${feedback ? `10) HIGHEST PRIORITY user feedback:\n"""${feedback.slice(0, 2000)}"""` : ""}`;
+10) When design.md is provided, follow its brand personality/tone; layout constraints come from slots only — never copy competitor brand voice.
+${feedback ? `11) HIGHEST PRIORITY user feedback:\n"""${feedback.slice(0, 2000)}"""` : ""}`;
 
   for (let i = 0; i < rewriteNodes.length; i += 50) {
     const batch = rewriteNodes.slice(i, i + 50);
@@ -528,6 +534,7 @@ ${feedback ? `10) HIGHEST PRIORITY user feedback:\n"""${feedback.slice(0, 2000)}
               keyword: input.keyword,
               industry: input.industry || null,
               userFeedback: feedback || null,
+              designMd: designExcerpt,
               nodes: batch.map((n) => ({
                 id: n.id,
                 role: n.role,

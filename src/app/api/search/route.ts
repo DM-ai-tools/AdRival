@@ -8,6 +8,7 @@ import {
   defaultGeoForPlatform,
   geosForPlatform,
 } from "@/lib/geo";
+import { hasOpenAICompatKey } from "@/lib/openrouter/openaiCompat";
 import type {
   BusinessCategory,
   BusinessProfile,
@@ -94,15 +95,31 @@ export async function POST(request: Request) {
         ? (body.selectedCategory as BusinessCategory)
         : null;
 
+    const skipGuardrails = Boolean(body.skipGuardrails);
+    const guardrailOverride =
+      body.guardrailOverride && typeof body.guardrailOverride === "object"
+        ? {
+            enabled: Boolean(body.guardrailOverride.enabled),
+            seekCompetitors:
+              typeof body.guardrailOverride.seekCompetitors === "string"
+                ? body.guardrailOverride.seekCompetitors.trim() || null
+                : null,
+            notes:
+              typeof body.guardrailOverride.notes === "string"
+                ? body.guardrailOverride.notes.trim() || null
+                : null,
+          }
+        : null;
+
     if (!process.env.SOCIAVAULT_API_KEY) {
       return NextResponse.json(
         { error: "SOCIAVAULT_API_KEY is not configured" },
         { status: 500 },
       );
     }
-    if (!process.env.OPENAI_API_KEY) {
+    if (!hasOpenAICompatKey()) {
       return NextResponse.json(
-        { error: "OPENAI_API_KEY is not configured" },
+        { error: "OPENROUTER_API_KEY or OPENAI_API_KEY is not configured" },
         { status: 500 },
       );
     }
@@ -118,6 +135,8 @@ export async function POST(request: Request) {
         selectedCategory,
         targetLocations: geoCtx.targetLocations,
         keywordLocation: geoCtx.keywordLocation,
+        skipGuardrails,
+        guardrailOverride,
       });
     });
 
@@ -130,10 +149,13 @@ export async function POST(request: Request) {
       geoMode: geoCtx.geoMode,
       keywordLocation: geoCtx.keywordLocation,
       businessUrl,
+      skipGuardrails,
+      guardrailOverride,
       businessProfile: businessProfile
         ? {
             businessName: businessProfile.businessName,
             industry: businessProfile.industry,
+            subIndustry: businessProfile.subIndustry,
             url: businessProfile.url || businessUrl,
           }
         : null,

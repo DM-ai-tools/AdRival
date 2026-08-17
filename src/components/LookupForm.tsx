@@ -12,6 +12,7 @@ interface LookupFormProps {
 
 export function LookupForm({ platform, onStarted, disabled }: LookupFormProps) {
   const [name, setName] = useState("");
+  const [businessUrl, setBusinessUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -23,7 +24,11 @@ export function LookupForm({ platform, onStarted, disabled }: LookupFormProps) {
       const res = await fetch("/api/lookup", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, platform }),
+        body: JSON.stringify({
+          name,
+          platform,
+          businessUrl: businessUrl.trim() || undefined,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to start lookup");
@@ -67,9 +72,23 @@ export function LookupForm({ platform, onStarted, disabled }: LookupFormProps) {
           {loading ? "Starting…" : "Fetch ads"}
         </button>
       </div>
+      <label htmlFor="lookup-business-url" className="search-label" style={{ marginTop: 12 }}>
+        Your brand website{" "}
+        <span className="muted">(for landing page content &amp; design)</span>
+      </label>
+      <input
+        id="lookup-business-url"
+        type="url"
+        value={businessUrl}
+        onChange={(e) => setBusinessUrl(e.target.value)}
+        placeholder="https://yourbrand.com"
+        className="search-input"
+        disabled={disabled || loading}
+      />
       <p className="form-hint">
         Resolves the advertiser on {meta.source}, verifies the match when names
-        collide, then pulls creatives for preview and Excel export.
+        collide, then pulls creatives. Add your website to unlock Content + Design
+        recreation for their landing pages.
       </p>
       {error && <p className="error-text">{error}</p>}
     </form>

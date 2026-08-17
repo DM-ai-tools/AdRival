@@ -3,6 +3,7 @@ import {
   detectSocialNetwork,
   type BrandSiteAssets,
 } from "./brandAssets";
+import { applyBrandContactInfo } from "./applyBrandContacts";
 import { rebuildBrandFooter, findSafeFooterRoot } from "./rebuildFooter";
 
 function normalizeText(t: string): string {
@@ -388,12 +389,6 @@ export function applyBrandSiteAssets(
     });
   }
 
-  if (assets.emails[0]) {
-    $doc("a[href^='mailto:']").attr("href", `mailto:${assets.emails[0]}`);
-  }
-  if (assets.phones[0]) {
-    $doc("a[href^='tel:']").attr("href", `tel:${assets.phones[0]}`);
-  }
-
-  return { html: $doc.html(), stats };
+  const contacts = applyBrandContactInfo($doc.html() || "", assets);
+  return { html: contacts.html, stats };
 }

@@ -2,9 +2,10 @@ import {
   extractAds,
   extractCursor,
   extractFullAdCopy,
-  getCompanyAds,
+  extractSearchResultsCount,
   isLandingPageUrl,
   searchAdLibrary,
+  getCompanyAds,
   adRunsOnFacebook,
   adRunsOnInstagram,
   type AdLibrarySearchResult,
@@ -17,26 +18,29 @@ import {
   serviceKeywordOverlapScore,
   type AdFilterResult,
 } from "../openai/analyzer";
-import { runBrandReview, newId } from "./brandReview";
+import { newId } from "./brandReview";
 import {
   isSearchJobSuppressed,
   markPageSeen,
   saveCompetitor,
   saveJob,
-  updateCompetitor,
 } from "../db";
 import {
   cheapLocationFromText,
   locationRankScore,
-  resolveAndMatchCompetitorLocation,
 } from "./competitorLocation";
 import type { SearchDispatchOptions } from "./searchOptions";
 import {
+  buildGuardrailContext,
+  getSopForContext,
+  guardCompetitorHeuristic,
+} from "../guardrails";
+import {
   MAX_PAGES_PER_QUERY,
   MAX_SEARCH_PAGES,
+  MAX_SEARCH_QUERIES_META,
   RELAXED_MIN_ACTIVE_ADS,
   RELAXED_MIN_AD_DURATION_DAYS,
-  SEARCH_COUNTRIES,
   TARGET_COMPETITORS,
   type AdCandidate,
   type BrandReview,
@@ -267,32 +271,42 @@ function setProgress(job: SearchJob, progress: Partial<JobProgress>) {
   saveJob(job);
 }
 
-async function getActiveAdsCount(pageId: string): Promise<number> {
-  // Count across US + AU (API is single-country); take the max so we don't double-count
-  const counts: number[] = [];
-  for (const country of SEARCH_COUNTRIES) {
-    try {
-      const res = await getCompanyAds({
-        pageId,
-        status: "ACTIVE",
-        country,
-        language: "EN",
-        trim: true,
-      });
-      const count = res.data?.searchResultsCount;
-      if (typeof count === "number") counts.push(count);
-      else counts.push(extractAds(res).length);
-    } catch {
-      // ignore country-specific failures
+/** Active-ads proxy from creatives already seen in this search (no extra API round-trips). */
+function activeAdsSeenInSearch(pageAds: AdCandidate[]): number {
+  const active = pageAds.filter((a) => a.isActive !== false).length;
+  return Math.max(active, pageAds.length > 0 ? 1 : 0);
+}
+
+/**
+ * Active Meta Ad Library volume for a page in the selected ad market.
+ * Prefer `searchResultsCount` from company-ads (one request) — no pagination.
+ */
+async function countMetaActiveAds(
+  pageId: string,
+  country: string,
+): Promise<number> {
+  const primary = String(country || "US").toUpperCase();
+  try {
+    const response = await getCompanyAds({
+      pageId,
+      status: "ACTIVE",
+      country: primary,
+      language: "EN",
+      trim: true,
+    });
+    const reported = extractSearchResultsCount(response);
+    if (reported != null) return reported;
+    // Fallback if the field is missing: first-page unique ids only
+    const ads = extractAds(response);
+    const seen = new Set<string>();
+    for (const ad of ads) {
+      const id = ad.ad_archive_id ? String(ad.ad_archive_id) : "";
+      if (id) seen.add(id);
     }
+    return seen.size;
+  } catch {
+    return 0;
   }
-  if (counts.length === 0) {
-    const res = await getCompanyAds({ pageId, status: "ACTIVE", trim: true });
-    const count = res.data?.searchResultsCount;
-    if (typeof count === "number") return count;
-    return extractAds(res).length;
-  }
-  return Math.max(...counts);
 }
 
 /**
@@ -322,6 +336,14 @@ export async function runCompetitorSearch(
     searchKeywords: keywords,
     selectedCategory,
   };
+  const guardrailCtx = buildGuardrailContext({
+    businessProfile,
+    selectedCategoryLabel: selectedCategory?.label || null,
+    searchKeywords: keywords,
+    override: options?.guardrailOverride || null,
+    skipGuardrails: Boolean(options?.skipGuardrails),
+  });
+  const industrySop = getSopForContext(guardrailCtx);
   const now = new Date().toISOString();
   const job: SearchJob = {
     id: jobId,
@@ -336,6 +358,8 @@ export async function runCompetitorSearch(
     countries,
     businessUrl,
     businessProfile,
+    skipGuardrails: Boolean(options?.skipGuardrails),
+    guardrailOverride: options?.guardrailOverride || null,
     status: "running",
     progress: {
       stage: "expanding_queries",
@@ -345,7 +369,7 @@ export async function runCompetitorSearch(
       target: TARGET_COMPETITORS,
       rejected: 0,
       message: businessProfile
-        ? `Finding ${platform} competitors for ${businessProfile.industry}…`
+        ? `Finding ${platform} competitors for ${businessProfile.industry} (${industrySop.label} SOP)…`
         : `Expanding ${keywords.length} keyword(s) for ${platform}…`,
       rejectReasons: {
         inactive: 0,
@@ -357,6 +381,7 @@ export async function runCompetitorSearch(
         llmError: 0,
         lowActiveAds: 0,
         countError: 0,
+        guardrailReject: 0,
       },
     },
     competitorIds: [],
@@ -400,9 +425,11 @@ export async function runCompetitorSearch(
         llmError: 0,
         lowActiveAds: 0,
         countError: 0,
+        guardrailReject: 0,
       };
     }
-    job.progress.rejectReasons[key] += 1;
+    job.progress.rejectReasons[key] =
+      (job.progress.rejectReasons[key] || 0) + 1;
     job.progress.rejected += 1;
   };
 
@@ -475,84 +502,15 @@ export async function runCompetitorSearch(
       job.competitorIds.push(competitor.id);
     }
 
-    setProgress(job, {
-      accepted: accepted.length,
-      message: `Accepted ${primary.pageName} (${accepted.length}/${TARGET_COMPETITORS}) — location pending…`,
-    });
-    saveJob(job);
-
-    // 3) Enrich brand + full location after accept (never discard the row)
-    setProgress(job, {
-      stage: "brand_review",
-      message: `Enriching brand for ${primary.pageName}…`,
-    });
-    try {
-      brand = await runBrandReview({
-        pageId,
-        pageName: primary.pageName,
-        pageProfileUri: primary.pageProfileUri,
-      });
-    } catch (err) {
-      setProgress(job, {
-        message: `Partial brand review for ${primary.pageName}: ${(err as Error).message}`,
-      });
-    }
-
-    setProgress(job, {
-      stage: "location_check",
-      message: `Resolving location for ${primary.pageName}…`,
-    });
-    let loc = provisional;
-    try {
-      const locResult = await resolveAndMatchCompetitorLocation({
-        pageName: primary.pageName,
-        website: brand.website,
-        facebookUrl: brand.facebookUrl || primary.pageProfileUri,
-        linkedinUrl: brand.linkedinUrl,
-        geoMode,
-        targetLocations,
-        provisional,
-        skipPerplexityIfResolved: provisional.locationStatus === "matched",
-      });
-      loc = locResult.location;
-    } catch (err) {
-      console.warn("[finder] location enrich failed", err);
-    }
-
-    const enriched: CompetitorRecord = {
-      ...competitor,
-      brand,
-      locationLabel: loc.locationLabel,
-      locationCity: loc.locationCity,
-      locationSuburb: loc.locationSuburb,
-      locationCountry: loc.locationCountry,
-      locationStatus: loc.locationStatus,
-      locationSource: loc.locationSource,
-    };
-    updateCompetitor(competitor.id, {
-      brand,
-      locationLabel: loc.locationLabel,
-      locationCity: loc.locationCity,
-      locationSuburb: loc.locationSuburb,
-      locationCountry: loc.locationCountry,
-      locationStatus: loc.locationStatus,
-      locationSource: loc.locationSource,
-    });
-    const idx = accepted.findIndex((c) => c.id === competitor.id);
-    if (idx >= 0) accepted[idx] = enriched;
-
-    const locNote =
-      loc.locationStatus === "unknown"
-        ? " · location unknown"
-        : loc.locationStatus === "mismatch"
-          ? ` · location mismatch${loc.locationLabel ? ` (${loc.locationLabel})` : ""}`
-          : loc.locationLabel
-            ? ` · ${loc.locationLabel}`
-            : "";
+    // Location network enrich is deferred to offer / page analysis (cheap text only here)
+    const locNote = provisional.locationLabel
+      ? ` · ${provisional.locationLabel}`
+      : "";
     setProgress(job, {
       accepted: accepted.length,
       message: `Accepted ${primary.pageName} (${accepted.length}/${TARGET_COMPETITORS})${locNote} — services: ${filter.services.join(", ")}`,
     });
+    saveJob(job);
   };
 
   try {
@@ -583,7 +541,7 @@ export async function runCompetitorSearch(
         }
       }
     }
-    const queries = Array.from(querySet).slice(0, 28);
+    const queries = Array.from(querySet).slice(0, MAX_SEARCH_QUERIES_META);
     setProgress(job, {
       stage: "searching_ads",
       message: `Searching ${platform} Ad Library with ${queries.length} queries${
@@ -816,6 +774,22 @@ export async function runCompetitorSearch(
               continue;
             }
 
+            const guard = guardCompetitorHeuristic(guardrailCtx, {
+              pageName: primary.pageName,
+              adText: pageText,
+              landingPageUrl: primary.landingPageUrl,
+              services: filter.services,
+              llmReason: filter.reason,
+            });
+            if (!guard.ok) {
+              rejectedPages.add(pageId);
+              bumpReason("guardrailReject");
+              setProgress(job, {
+                message: `Guardrail blocked ${primary.pageName}: ${guard.reason}`,
+              });
+              continue;
+            }
+
             const cheapGeo = cheapLocationFromText({
               pageName: primary.pageName,
               adText: pageText,
@@ -842,27 +816,19 @@ export async function runCompetitorSearch(
               });
               continue;
             }
-            setProgress(job, {
-              stage: "counting_ads",
-              message: `Checking active ads for ${primary.pageName}…`,
-            });
-
-            let activeCount = 0;
+            const seenCount = activeAdsSeenInSearch(pageAds);
+            let activeCount = seenCount;
             try {
-              activeCount = await getActiveAdsCount(pageId);
-            } catch (err) {
-              rejectedPages.add(pageId);
-              bumpReason("countError");
               setProgress(job, {
-                message: `Could not count ads for ${primary.pageName}: ${(err as Error).message}`,
+                message: `Counting active ads for ${primary.pageName} (${country})…`,
               });
-              continue;
+              const counted = await countMetaActiveAds(pageId, country);
+              activeCount = Math.max(seenCount, counted);
+            } catch {
+              activeCount = seenCount;
             }
 
-            const adsOk =
-              platform === "facebook"
-                ? activeCount > thr.minActiveAds
-                : activeCount >= thr.minActiveAds;
+            const adsOk = activeCount >= thr.minActiveAds;
 
             if (!adsOk) {
               // Queue relevant rivals with low ad volume for fill (prefer locals in sort)
@@ -888,9 +854,7 @@ export async function runCompetitorSearch(
               }
               bumpReason("lowActiveAds");
               setProgress(job, {
-                message: `Soft-hold ${primary.pageName}: ${activeCount} active ads (need ${
-                  platform === "facebook" ? `>${thr.minActiveAds}` : `≥${thr.minActiveAds}`
-                })`,
+                message: `Soft-hold ${primary.pageName}: ${activeCount} active ads (need ≥${thr.minActiveAds})`,
               });
               continue;
             }
@@ -911,30 +875,35 @@ export async function runCompetitorSearch(
       } // country
     } // query
 
-    // Fill remaining slots: locals + keyword-strong first; geo mismatches last
+    // Fill remaining slots from geo-held rivals that still clear the ad-volume floor
     if (accepted.length < TARGET_COMPETITORS && nearMisses.length > 0) {
       setProgress(job, {
         stage: "filling_quota",
-        message: `Filling remaining slots from ${nearMisses.length} held candidates (prefer geo-local)…`,
+        message: `Filling remaining slots from ${nearMisses.length} held candidates (prefer geo-local, ≥${currentThresholds(accepted.length, platform).minActiveAds} ads)…`,
       });
 
       const fillFrom = async (pool: NearMiss[]) => {
         const ranked = [...pool].sort((a, b) => b.score - a.score);
+        const floor = currentThresholds(accepted.length, platform).minActiveAds;
         for (const miss of ranked) {
           if (accepted.length >= TARGET_COMPETITORS) break;
           if (seen.has(miss.pageId) || rejectedPages.has(miss.pageId)) continue;
           if (!miss.filter.relevant) continue;
           if (!businessProfile && !miss.filter.isMarketingAgency) continue;
 
-          let activeCount = Math.max(miss.activeCount, 1);
-          if (miss.activeCount <= 0) {
-            try {
-              activeCount = await getActiveAdsCount(miss.pageId);
-            } catch {
-              activeCount = 1;
-            }
-            if (activeCount <= 0) continue;
+          let activeCount = miss.activeCount;
+          const missCountry = String(
+            miss.primary.country || countries[0] || "US",
+          );
+          try {
+            activeCount = Math.max(
+              activeCount,
+              await countMetaActiveAds(miss.pageId, missCountry),
+            );
+          } catch {
+            /* keep prior count */
           }
+          if (activeCount < floor) continue;
 
           await acceptCompetitor(
             miss.pageId,
@@ -948,34 +917,30 @@ export async function runCompetitorSearch(
         }
       };
 
-      await fillFrom(nearMisses.filter((m) => m.reason !== "geoMismatch"));
-      if (accepted.length < TARGET_COMPETITORS) {
-        await fillFrom(nearMisses.filter((m) => m.reason === "geoMismatch"));
-      }
+      await fillFrom(nearMisses.filter((m) => m.reason === "geoMismatch"));
     }
 
-    if (accepted.length >= TARGET_COMPETITORS) {
+    const status =
+      accepted.length >= TARGET_COMPETITORS
+        ? "completed"
+        : accepted.length > 0
+          ? "partial"
+          : "failed";
+    if (!isSearchJobSuppressed(jobId)) {
+      const geoNote =
+        preferLocalGeo && matchedLocalCount()
+          ? ` (${matchedLocalCount()} geo-matched)`
+          : "";
       updateJob(job, {
-        status: "completed",
+        status,
         progress: {
           ...job.progress,
           stage: "done",
           accepted: accepted.length,
-          message: `Found ${accepted.length} competitors${
-            preferLocalGeo && matchedLocalCount()
-              ? ` (${matchedLocalCount()} geo-matched)`
-              : ""
-          }.`,
-        },
-      });
-    } else {
-      updateJob(job, {
-        status: "partial",
-        progress: {
-          ...job.progress,
-          stage: "done",
-          accepted: accepted.length,
-          message: `Found ${accepted.length}/${TARGET_COMPETITORS} competitors after full scan + fill pass. Try a broader keyword.`,
+          message:
+            accepted.length > 0
+              ? `Found ${accepted.length} competitors${geoNote}. Brand review & deep location run on demand / during offer analysis.`
+              : `Found 0/${TARGET_COMPETITORS} competitors after scan. Try a broader keyword.`,
         },
       });
     }

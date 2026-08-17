@@ -1,8 +1,18 @@
 import * as cheerio from "cheerio";
-import OpenAI from "openai";
+import type OpenAI from "openai";
 import { z } from "zod";
 import type { BrandColors, GeneratedLandingImage } from "../types";
-import { getOpenAiContentModel } from "./contentDraft";
+import { getOpenAiContentModel, hasContentLlmKey } from "./contentDraft";
+import { designMdPromptExcerpt } from "./designMd";
+import {
+  firecrawlScrapeScreenshot,
+  hasFirecrawlKey,
+} from "../firecrawl/client";
+import { hasOpenRouterKey } from "../openrouter/client";
+import {
+  getOpenAICompatClient,
+  OPENROUTER_OPENAI_MINI_MODEL,
+} from "../openrouter/openaiCompat";
 import {
   generateGptImage2,
   hasRunwayKey,
@@ -285,17 +295,22 @@ async function decideImageBriefs(input: {
   industry?: string | null;
   brandColors: BrandColors;
   competitorName: string;
+  competitorUrl?: string | null;
   hasLogoReference?: boolean;
+  designMd?: string | null;
+  /** Firecrawl (or other) competitor page screenshot URL for vision context */
+  competitorScreenshotUrl?: string | null;
 }): Promise<
   Array<{
     id: string;
     label: string;
     prompt: string;
     kind: ImageSlot["kind"];
+    skip?: boolean;
   }>
 > {
   if (!input.slots.length) return [];
-  if (!process.env.OPENAI_API_KEY) {
+  if (!hasContentLlmKey()) {
     return input.slots.map((s) => ({
       id: s.id,
       label: `${s.kind} image`,
@@ -304,13 +319,67 @@ async function decideImageBriefs(input: {
     }));
   }
 
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  const model = getOpenAiContentModel();
+  const client = getOpenAICompatClient();
+  // Vision-capable model when we have a screenshot
+  const model = input.competitorScreenshotUrl
+    ? hasOpenRouterKey()
+      ? process.env.OPENROUTER_OPENAI_MINI_MODEL?.trim() ||
+        OPENROUTER_OPENAI_MINI_MODEL
+      : process.env.OPENAI_VISION_MODEL?.trim() || "gpt-4o-mini"
+    : getOpenAiContentModel();
   const logoRule = input.hasLogoReference
     ? `5) When a logo/signage would appear (office wall, storefront, desk, packaging), instruct placing the brand logo from the @brandlogo reference EXACTLY — same wordmark and colors. Never invent a different logo. Never mention competitor "${input.competitorName}". No watermarks or fake UI chrome.`
     : `5) Never mention competitor "${input.competitorName}". Do not invent company logos or wordmarks. No watermarks, no unreadable text overlays, no UI chrome.`;
 
+  const designExcerpt = input.designMd
+    ? designMdPromptExcerpt(input.designMd, 3500)
+    : null;
+
+  const slotPayload = input.slots.map((s) => ({
+    id: s.id,
+    kind: s.kind,
+    alt: s.alt,
+    className: s.className,
+    sectionContext: s.sectionContext,
+    width: s.width,
+    height: s.height,
+    isBackground: s.isBackground,
+  }));
+
   try {
+    const userContent: Array<
+      | { type: "text"; text: string }
+      | { type: "image_url"; image_url: { url: string; detail?: string } }
+    > = [
+      {
+        type: "text",
+        text: JSON.stringify(
+          {
+            brand: input.brandName,
+            keyword: input.keyword,
+            industry: input.industry || null,
+            hasLogoReference: Boolean(input.hasLogoReference),
+            designMd: designExcerpt,
+            slots: slotPayload,
+            instruction:
+              "Use the competitor landing-page screenshot to see WHERE images sit and WHICH are logos vs photos. Return skip:true for any logo/wordmark/icon slot — those are replaced from brand assets, never AI photos.",
+          },
+          null,
+          2,
+        ),
+      },
+    ];
+
+    if (input.competitorScreenshotUrl) {
+      userContent.push({
+        type: "image_url",
+        image_url: {
+          url: input.competitorScreenshotUrl,
+          detail: "low",
+        },
+      });
+    }
+
     const completion = await client.chat.completions.create({
       model,
       temperature: 0.45,
@@ -320,56 +389,57 @@ async function decideImageBriefs(input: {
         {
           role: "system",
           content: `You write image-generation prompts for a brand landing page recreation.
-Return ONLY JSON: { "briefs": [ { "id": "img0", "label": "Hero clinic photo", "kind": "hero", "prompt": "..." } ] }
+You may receive a screenshot of the COMPETITOR landing page for layout/image-role context only.
+Return ONLY JSON: { "briefs": [ { "id": "img0", "label": "Hero clinic photo", "kind": "hero", "prompt": "...", "skip": false } ] }
 
 Rules:
 1) One brief per slot id provided — same ids, no extras.
 2) prompt must describe a photorealistic marketing photo for brand "${input.brandName}" (${input.businessUrl}).
-3) Match the slot's role (hero / team / product / content / background) and page context.
-4) Use brand palette hints: primary ${input.brandColors.primary}, accent ${input.brandColors.accent}, secondary ${input.brandColors.secondary}. Prefer clean professional interiors when industry fits.
+3) Match the slot's role (hero / team / product / content / background) and page placement from the screenshot when available.
+4) Use brand palette hints: primary ${input.brandColors.primary}, accent ${input.brandColors.accent}, secondary ${input.brandColors.secondary}.
 ${logoRule}
 6) Keep composition compatible with the slot (wide hero vs portrait team headshot).
-7) prompt length 40–120 words, concrete and visual.`,
+7) prompt length 40–120 words, concrete and visual.
+8) When design.md is provided, ALL visual identity MUST follow it. Competitor screenshot = placement/role only — never copy competitor brand look.
+9) CRITICAL: If a slot is clearly a logo, wordmark, favicon, social icon, or partner badge in the screenshot or from alt/class, set skip:true and leave prompt empty. Do not invent AI photos for logos.`,
         },
         {
           role: "user",
-          content: JSON.stringify(
-            {
-              brand: input.brandName,
-              keyword: input.keyword,
-              industry: input.industry || null,
-              hasLogoReference: Boolean(input.hasLogoReference),
-              slots: input.slots.map((s) => ({
-                id: s.id,
-                kind: s.kind,
-                alt: s.alt,
-                className: s.className,
-                sectionContext: s.sectionContext,
-                width: s.width,
-                height: s.height,
-                isBackground: s.isBackground,
-              })),
-            },
-            null,
-            2,
-          ),
+          // Multimodal: text slot list + optional Firecrawl screenshot
+          content: userContent as OpenAI.Chat.Completions.ChatCompletionContentPart[],
         },
       ],
     });
 
     const raw = completion.choices[0]?.message?.content;
     if (!raw) throw new Error("empty LLM response");
-    const parsed = briefSchema.parse(JSON.parse(raw));
+    const parsed = z
+      .object({
+        briefs: z.array(
+          z.object({
+            id: z.string(),
+            label: z.string().optional(),
+            kind: z.string().optional(),
+            prompt: z.string().optional(),
+            skip: z.boolean().optional(),
+          }),
+        ),
+      })
+      .parse(JSON.parse(raw));
     const byId = new Map(parsed.briefs.map((b) => [b.id, b]));
 
     return input.slots.map((s) => {
       const b = byId.get(s.id);
-      const prompt = (b?.prompt || "").trim() || fallbackPrompt(s, input);
+      const skip = Boolean(b?.skip);
+      const prompt = skip
+        ? ""
+        : (b?.prompt || "").trim() || fallbackPrompt(s, input);
       return {
         id: s.id,
         label: (b?.label || `${s.kind} image`).trim().slice(0, 80),
         kind: (b?.kind as ImageSlot["kind"]) || s.kind,
         prompt: prompt.slice(0, 2000),
+        skip,
       };
     });
   } catch (err) {
@@ -601,10 +671,14 @@ export async function generateAndEmbedLandingImages(input: {
   businessUrl: string;
   keyword: string;
   competitorName: string;
+  /** Competitor LP URL — used for Firecrawl screenshot context */
+  competitorUrl?: string | null;
   industry?: string | null;
   brandColors: BrandColors;
   /** Brand logo URL — fed to Runway as @brandlogo reference */
   logoUrl?: string | null;
+  /** Per-run brand design.md SSOT excerpt */
+  designMd?: string | null;
   /** Pre-inventoried slots (avoids re-stamping) */
   slots?: ImageSlot[] | null;
 }): Promise<GenerateLandingImagesResult> {
@@ -640,6 +714,25 @@ export async function generateAndEmbedLandingImages(input: {
     };
   }
 
+  let competitorScreenshotUrl: string | null = null;
+  const shotUrl = (input.competitorUrl || "").trim();
+  if (shotUrl && hasFirecrawlKey()) {
+    try {
+      const shot = await firecrawlScrapeScreenshot(shotUrl, {
+        fullPage: true,
+        quality: 70,
+      });
+      competitorScreenshotUrl = shot.screenshotUrl;
+      if (!competitorScreenshotUrl) {
+        warnings.push("Firecrawl screenshot returned empty URL");
+      }
+    } catch (err) {
+      warnings.push(
+        `Firecrawl screenshot failed: ${(err as Error).message || String(err)}`,
+      );
+    }
+  }
+
   const logoReferenceUri = await logoUrlToReferenceUri(input.logoUrl);
   if (input.logoUrl && !logoReferenceUri) {
     warnings.push("Brand logo could not be loaded as an image reference");
@@ -653,11 +746,36 @@ export async function generateAndEmbedLandingImages(input: {
     industry: input.industry,
     brandColors: input.brandColors,
     competitorName: input.competitorName,
+    competitorUrl: input.competitorUrl,
     hasLogoReference: Boolean(logoReferenceUri),
+    designMd: input.designMd,
+    competitorScreenshotUrl,
   });
 
+  // Clear AI stamps on slots the vision model marked as logos
+  const skipIds = new Set(
+    briefs.filter((b) => b.skip || !b.prompt.trim()).map((b) => b.id),
+  );
+  if (skipIds.size) {
+    const $ = cheerio.load(html);
+    for (const id of skipIds) {
+      const $el = $(`[data-adrival-gen-id="${id}"]`);
+      $el.removeAttr("data-adrival-gen-id");
+      if (input.logoUrl) {
+        if ($el.is("img")) {
+          $el.attr("src", input.logoUrl);
+          $el.attr("data-adrival-logo", "1");
+          $el.attr("alt", input.brandName);
+        }
+      }
+    }
+    html = $.html();
+    warnings.push(`Skipped ${skipIds.size} logo/icon slot(s) (kept for brand logo)`);
+  }
+
+  const runnable = briefs.filter((b) => !skipIds.has(b.id) && b.prompt.trim());
   const slotById = new Map(slots.map((s) => [s.id, s]));
-  const generated = await mapPool(briefs, CONCURRENCY, async (brief) => {
+  const generated = await mapPool(runnable, CONCURRENCY, async (brief) => {
     const slot = slotById.get(brief.id)!;
     const ratio: GptImage2Ratio = pickGptImage2Ratio(slot.width, slot.height);
     try {

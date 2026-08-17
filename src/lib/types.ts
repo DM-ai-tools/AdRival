@@ -4,27 +4,34 @@ export type SearchCountry = (typeof SEARCH_COUNTRIES)[number] | string;
 export const TARGET_COMPETITORS = 10;
 /** Facebook: prefer ads live at least this many days (relaxed further if under target). */
 export const MIN_AD_DURATION_DAYS = 7;
-/** Facebook: prefer advertisers with more than this many active ads. */
-export const MIN_ACTIVE_ADS = 5;
+/** Facebook: prefer advertisers with at least this many active ads. */
+export const MIN_ACTIVE_ADS = 10;
 /**
  * Instagram — ads must be active more than this many days.
  * Enforced as daysRunning > NEW_PLATFORM_MIN_AD_DURATION_DAYS.
  */
 export const NEW_PLATFORM_MIN_AD_DURATION_DAYS = 10;
 /** Instagram — minimum active ads required (>=). */
-export const NEW_PLATFORM_MIN_ACTIVE_ADS = 5;
+export const NEW_PLATFORM_MIN_ACTIVE_ADS = 10;
 /** LinkedIn / Google / YouTube — looser active-ads floor (>=). */
 export const LOOSE_PLATFORM_MIN_ACTIVE_ADS = 3;
-/** Total Ad Library result pages across all queries/countries. */
-export const MAX_SEARCH_PAGES = 220;
+/**
+ * Total Ad Library result pages across all queries/countries.
+ * Kept modest so keyword search finishes in minutes, not ~30m.
+ */
+export const MAX_SEARCH_PAGES = 64;
 /** Cap pages spent on a single query+country before rotating. */
-export const MAX_PAGES_PER_QUERY = 16;
-export const RELEVANCE_THRESHOLD = 0.42;
+export const MAX_PAGES_PER_QUERY = 6;
+/** Max expanded queries per platform (seed + LLM expansions). */
+export const MAX_SEARCH_QUERIES_META = 12;
+export const MAX_SEARCH_QUERIES_GOOGLE = 10;
+export const MAX_SEARCH_QUERIES_LINKEDIN = 10;
+export const RELEVANCE_THRESHOLD = 0.48;
 /** Softer bar used when filling remaining slots near end of run. */
-export const RELAXED_RELEVANCE_THRESHOLD = 0.3;
+export const RELAXED_RELEVANCE_THRESHOLD = 0.38;
 /** Prefer local rivals; only fill with clear geo mismatches after this many matched/unknown. */
 export const PREFER_LOCAL_BEFORE_MISMATCH = 4;
-export const RELAXED_MIN_ACTIVE_ADS = 3;
+export const RELAXED_MIN_ACTIVE_ADS = 10;
 export const RELAXED_MIN_AD_DURATION_DAYS = 5;
 
 export const SERVICE_LABELS = [
@@ -164,6 +171,71 @@ export interface BrandDesignSystem {
   source?: string;
 }
 
+/**
+ * Structured brand visual identity for one landing-page recreation run.
+ * Serialized to ephemeral `design.md` and used as SSOT for styling decisions.
+ */
+export interface BrandDesignSpec {
+  brandName: string;
+  businessUrl: string;
+  extractedAt: string;
+  /** Competitor whose layout is reused — never copy their brand chrome */
+  competitorName?: string | null;
+  colors: BrandColors & { icon?: string };
+  logos: {
+    primary: string | null;
+    dark: string | null;
+    favicon: string | null;
+  };
+  fonts: string[];
+  typography: {
+    headingFont: string | null;
+    bodyFont: string | null;
+    fontSizes?: Record<string, string> | null;
+    fontWeights?: Record<string, number | string> | null;
+  };
+  buttons: {
+    primary: {
+      background: string;
+      textColor: string;
+      borderRadius: string | null;
+      borderColor: string | null;
+    };
+    secondary: {
+      background: string | null;
+      textColor: string;
+      borderRadius: string | null;
+      borderColor: string | null;
+    };
+  };
+  borderRadii: string[];
+  boxShadows: string[];
+  spacing: {
+    baseUnit?: number | null;
+    borderRadius?: string | null;
+  };
+  sectionBackgrounds: {
+    page: string;
+    surface: string;
+    muted: string | null;
+  };
+  imagery: {
+    styleNotes: string[];
+    sampleSubjects: string[];
+  };
+  links: {
+    nav: Array<{ label: string; href: string }>;
+    footer: Array<{ label: string; href: string }>;
+    social: Array<{ label: string; href: string }>;
+    cta: Array<{ label: string; href: string }>;
+  };
+  /** Explicit implementor rules (do-not-use competitor brand, etc.) */
+  rules: string[];
+  design: BrandDesignSystem | null;
+  source: string;
+  warnings: string[];
+}
+
 export interface AdCandidate {
   adArchiveId: string;
   pageId: string;
@@ -261,6 +333,10 @@ export interface JobProgress {
   target: number;
   rejected: number;
   message: string;
+  /** Batch brand-review progress (set while stage === brand_review) */
+  brandReviewDone?: number;
+  brandReviewTotal?: number;
+  brandReviewCurrentName?: string | null;
   /** Breakdown so we can see where candidates die */
   rejectReasons?: {
     inactive: number;
@@ -272,7 +348,16 @@ export interface JobProgress {
     llmError: number;
     lowActiveAds: number;
     countError: number;
+    /** Industry SOP / guardrail agent rejects */
+    guardrailReject?: number;
   };
+  /** Offers analysis progress when stage === "analyzing_offers" */
+  offersPhase?: string | null;
+  offersDone?: number;
+  offersTotal?: number;
+  offersCurrentName?: string | null;
+  /** 0–100 overall offers analysis percent */
+  offersPct?: number;
 }
 
 export interface SearchJob {
@@ -300,6 +385,21 @@ export interface SearchJob {
   businessUrl?: string | null;
   /** Industry context from business URL analysis */
   businessProfile?: BusinessProfile | null;
+  /** When true, industry SOP guardrails are not applied */
+  skipGuardrails?: boolean;
+  /** Manual override: seek specific competitor types / relax SOP excludes */
+  guardrailOverride?: {
+    enabled: boolean;
+    seekCompetitors?: string | null;
+    notes?: string | null;
+  } | null;
+  /**
+   * Optional report: unique ad-copy hooks/offers + unique landing-page offers
+   * across accepted keyword-search competitors.
+   */
+  offersReport?: LookupOffersReport | null;
+  /** Competitor ids selected for the latest offers dashboard run (fresh searches). */
+  offersCompetitorIds?: string[] | null;
   status: JobStatus;
   progress: JobProgress;
   competitorIds: string[];
@@ -333,6 +433,13 @@ export interface LookupJobProgress {
   candidatesFound: number;
   adsFetched: number;
   pagesScanned: number;
+  /** Offers analysis progress when stage === "analyzing_offers" */
+  offersPhase?: string | null;
+  offersDone?: number;
+  offersTotal?: number;
+  offersCurrentName?: string | null;
+  /** 0–100 overall offers analysis percent */
+  offersPct?: number;
 }
 
 export interface LookupJob {
@@ -347,16 +454,50 @@ export interface LookupJob {
   llmConfidence?: number | null;
   adIds: string[];
   /**
-   * Post-fetch report: unique ad-copy hooks/offers + unique landing-page offers.
-   * Built automatically after ads are loaded; shown on lookup results + history.
+   * User brand website for landing-page recreation (content + design).
+   * Same role as SearchJob.businessUrl.
+   */
+  businessUrl?: string | null;
+  /** Brand colors / assets / design tokens from business URL analyze */
+  businessProfile?: BusinessProfile | null;
+  /**
+   * Optional report: unique ad-copy hooks/offers + unique landing-page offers.
+   * Built only when the user runs offers analysis (not during ad fetch).
+   * Per-ad landing analysis still runs via “Get offer & page details”.
    */
   offersReport?: LookupOffersReport | null;
+  /** Deep location resolved during offers intelligence (not during ad fetch) */
+  locationLabel?: string | null;
+  locationCity?: string | null;
+  locationSuburb?: string | null;
+  locationCountry?: string | null;
+  locationStatus?: CompetitorLocationStatus | null;
+  locationSource?: CompetitorLocationSource | null;
+  /** Internal synthetic rows hidden from history UI. */
+  internalOnly?: boolean;
   error?: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
 /** One unique creative cluster (same/similar ad copy). */
+export type FunnelStage = "TOFU" | "MOFU" | "BOFU" | "unknown";
+export type OfferTicketTier = "low" | "mid" | "high" | "unknown";
+
+/** Ad leaf used under landing-page / service trees. */
+export interface LookupOfferAdLeaf {
+  creativeId: string;
+  hook: string;
+  offer: string;
+  cta: string | null;
+  serviceTargeted: string | null;
+  funnelStage: FunnelStage;
+  adCount: number;
+  sampleAdIds: string[];
+  sampleCopy?: string | null;
+  landingPageUrl?: string | null;
+}
+
 export interface LookupUniqueAdCreative {
   id: string;
   hook: string;
@@ -366,6 +507,9 @@ export interface LookupUniqueAdCreative {
   adCount: number;
   sampleAdIds: string[];
   landingPageUrl?: string | null;
+  cta?: string | null;
+  serviceTargeted?: string | null;
+  funnelStage?: FunnelStage;
 }
 
 /** One unique landing-page destination with its analyzed offer. */
@@ -382,6 +526,10 @@ export interface LookupUniqueLandingPage {
   summary?: string | null;
   error?: string | null;
   sampleAdId?: string | null;
+  funnelStage?: FunnelStage;
+  serviceTargeted?: string | null;
+  /** Ads (creative clusters) that use this landing page */
+  ads?: LookupOfferAdLeaf[];
 }
 
 /** Deduped offer line appearing across creatives or LPs. */
@@ -391,6 +539,79 @@ export interface LookupUniqueOfferLine {
   adCount: number;
   urls?: string[];
   sampleHooks?: string[];
+  funnelStage?: FunnelStage;
+  ticketTier?: OfferTicketTier;
+  cta?: string | null;
+  pricing?: string | null;
+}
+
+/** Service → landing pages → ads tree node. */
+export interface LookupServiceOfferingNode {
+  service: string;
+  adCount: number;
+  landingPageCount: number;
+  funnelStages?: Partial<Record<FunnelStage, number>>;
+  landingPages: Array<{
+    url: string;
+    matchKey: string;
+    adCount: number;
+    primaryOffer?: string | null;
+    funnelStage?: FunnelStage;
+    cta?: string | null;
+    ads: LookupOfferAdLeaf[];
+  }>;
+}
+
+/**
+ * One core offer value ladder.
+ * Core = unique landing-page offer; adOffers = mapped ad-copy offers for that core.
+ */
+export interface LookupCoreOfferLadder {
+  id: string;
+  rank: number;
+  /** Unique landing-page offer (the core) */
+  coreOffer: string;
+  details: string;
+  cta: string | null;
+  ticketTier: OfferTicketTier;
+  pricing: string | null;
+  funnelStage: FunnelStage;
+  landingPageUrl: string | null;
+  /** Ads that land on this core offer’s page(s) */
+  adCount: number;
+  /** Relevant ad-copy offers mapped under this core */
+  adOffers: LookupOfferAdLeaf[];
+  /** Present when no relevant ad-copy offers map to this core */
+  emptyMessage?: string | null;
+  /** Search mode: which competitors contributed to this ladder */
+  sourceCompetitors?: string[];
+  /** Search mode: sample ad references for traceability */
+  sourceAdRefs?: Array<{
+    adId: string;
+    lookupAdId?: string;
+    adArchiveId?: string;
+    competitorId: string;
+    competitorName: string;
+    adLibraryUrl?: string | null;
+    title?: string | null;
+    body?: string | null;
+    ctaText?: string | null;
+    landingPageUrl?: string | null;
+  }>;
+}
+
+/** @deprecated Prefer LookupCoreOfferLadder — kept for older stored reports */
+export interface LookupValueLadderStep {
+  id: string;
+  rank: number;
+  offer: string;
+  details: string;
+  cta: string | null;
+  ticketTier: OfferTicketTier;
+  pricing: string | null;
+  funnelStage: FunnelStage;
+  source: "ad_copy" | "landing_page" | "both";
+  adCount: number;
 }
 
 export interface LookupOffersReport {
@@ -412,6 +633,17 @@ export interface LookupOffersReport {
     failed: number;
     pages: LookupUniqueLandingPage[];
     uniqueOffers: LookupUniqueOfferLine[];
+  };
+  services?: {
+    uniqueServices: number;
+    nodes: LookupServiceOfferingNode[];
+  };
+  valueLadder?: {
+    /** One ladder per unique landing-page (core) offer */
+    ladders: LookupCoreOfferLadder[];
+    summary?: string | null;
+    /** Legacy flat steps (older reports only) */
+    steps?: LookupValueLadderStep[];
   };
 }
 
@@ -444,6 +676,11 @@ export interface LookupAdRecord {
   raw: Record<string, unknown>;
   /** Landing-page offer + architecture analysis (persisted for history) */
   pageAnalysis?: LandingPageOfferAnalysis | null;
+  /**
+   * Bridge to the shared recreate pipeline (CompetitorRecord id under a synthetic
+   * search job). Set when content/design recreation is started from lookup.
+   */
+  recreationCompetitorId?: string | null;
   createdAt: string;
 }
 
@@ -686,9 +923,21 @@ export interface RecreatedLandingPage {
   differentiationNotes?: string | null;
   /** Last user feedback applied during regenerate (if any) */
   userFeedback?: string | null;
+  /**
+   * Ephemeral brand design.md markdown generated for this run (SSOT for styling).
+   * File under data/recreate/{id}/design.md is deleted after a successful design build;
+   * this string is kept on the record for audit / UI until the next run.
+   */
+  designMd?: string | null;
   /** Publish readiness from last design fit */
   publishReady?: boolean | null;
   publishBlockers?: string[] | null;
+  /** Live progress while content/design is running (polled by UI) */
+  progress?: {
+    phase: string;
+    message: string;
+    pct: number;
+  } | null;
   error?: string | null;
 }
 
@@ -702,4 +951,36 @@ export interface DatabaseShape {
   seenPageIds: string[];
   lookupJobs?: LookupJob[];
   lookupAds?: LookupAdRecord[];
+  searchCompetitorAds?: SearchCompetitorAdRecord[];
+}
+
+/** Cached ads fetched for keyword-search competitors (SociaVault reuse). */
+export interface SearchCompetitorAdRecord {
+  id: string;
+  runId: string;
+  competitorId: string;
+  pageId: string;
+  pageName: string;
+  platform: import("./platforms").AdPlatform | string;
+  adArchiveId: string;
+  country: string;
+  isActive: boolean;
+  title: string;
+  body: string;
+  ctaText?: string | null;
+  landingPageUrl?: string | null;
+  startDateString?: string | null;
+  endDateString?: string | null;
+  daysRunning?: number;
+  adLibraryUrl: string;
+  format?: string | null;
+  imageUrl?: string | null;
+  videoUrl?: string | null;
+  youtubeUrl?: string | null;
+  domain?: string | null;
+  visibleUrl?: string | null;
+  impressions?: string | null;
+  advertiserPageUrl?: string | null;
+  raw: Record<string, unknown>;
+  createdAt: string;
 }

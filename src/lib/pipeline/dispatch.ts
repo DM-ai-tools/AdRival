@@ -40,14 +40,26 @@ export async function dispatchPlatformSearch(
   throw new Error(`Unsupported platform: ${platform}`);
 }
 
+export type LookupDispatchOptions = {
+  businessUrl?: string | null;
+  businessProfile?: import("../types").BusinessProfile | null;
+};
+
 export async function dispatchPlatformLookup(
   lookupId: string,
   queryName: string,
   platform: AdPlatform,
   forcedCandidate?: import("../types").LookupPageCandidate | null,
+  options?: LookupDispatchOptions,
 ) {
   if (isMetaPlatform(platform)) {
-    await runCompetitorLookup(lookupId, queryName, platform, forcedCandidate);
+    await runCompetitorLookup(
+      lookupId,
+      queryName,
+      platform,
+      forcedCandidate,
+      options,
+    );
     return;
   }
   if (isGoogleFamily(platform)) {
@@ -56,11 +68,12 @@ export async function dispatchPlatformLookup(
       queryName,
       platform as "google" | "youtube",
       forcedCandidate,
+      options,
     );
     return;
   }
   if (platform === "linkedin") {
-    await runLinkedInLookup(lookupId, queryName, forcedCandidate);
+    await runLinkedInLookup(lookupId, queryName, forcedCandidate, options);
     return;
   }
   throw new Error(`Unsupported platform: ${platform}`);

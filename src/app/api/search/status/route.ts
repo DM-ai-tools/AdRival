@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getCompetitorsByRun, getJob } from "@/lib/db";
+import { getCompetitorsByRun, getJob, getSearchCompetitorAdsByRun } from "@/lib/db";
 
 export const runtime = "nodejs";
 
@@ -16,5 +16,9 @@ export async function GET(request: Request) {
   }
 
   const competitors = getCompetitorsByRun(jobId);
-  return NextResponse.json({ job, competitors });
+  const ads = getSearchCompetitorAdsByRun(jobId).map((ad) => ({
+    ...ad,
+    raw: {},
+  }));
+  return NextResponse.json({ job, competitors, ads });
 }

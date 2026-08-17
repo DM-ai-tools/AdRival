@@ -10,6 +10,12 @@ import {
   pickCtaHref,
   resolveBrandPageHref,
 } from "../brandLinkRouting";
+import {
+  applyBrandContactInfo,
+  scrubEmptyChromePills,
+} from "../applyBrandContacts";
+import type { BrandDesignSpec } from "../../types";
+import { brandTokensFromDesignSpec } from "../designMd";
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -206,13 +212,44 @@ function applyBrandLogoMarks(
     logoHits += 1;
   });
 
+  // CSS-background logos in header/nav brand chrome
+  $(
+    "header [style*='background'], nav [style*='background'], .navbar [style*='background'], a.logo, .navbar-brand",
+  ).each((_, el) => {
+    if (logoHits >= 24) return;
+    const $el = $(el);
+    if ($el.attr("data-adrival-logo")) return;
+    const style = $el.attr("style") || "";
+    if (!/url\(/i.test(style)) return;
+    const className = `${$el.attr("class") || ""}`;
+    if (
+      !/logo|brand|wordmark|navbar-brand/i.test(className) &&
+      !$el.is("a.logo, .navbar-brand")
+    ) {
+      return;
+    }
+    $el.attr(
+      "style",
+      style.replace(
+        /url\(\s*(['"]?)([^)'"]+)\1\s*\)/gi,
+        `url("${logoUrl}")`,
+      ),
+    );
+    $el.attr("data-adrival-logo", "1");
+    logoHits += 1;
+  });
+
   if (logoHits === 0) {
     const $header = $(
       "header, [role='banner'], .navbar, .site-header, .masthead, nav",
     ).first();
+    const inject = `<a href="${input.businessUrl}" data-adrival-logo="1" style="display:inline-flex;align-items:center;padding:8px 12px;z-index:9999;position:relative;"><img src="${logoUrl}" alt="${input.brandName}" style="max-height:48px;width:auto;max-width:220px;object-fit:contain;" data-adrival-logo="1" /></a>`;
     if ($header.length) {
-      $header.prepend(
-        `<a href="${input.businessUrl}" data-adrival-logo="1" style="display:inline-flex;align-items:center;padding:8px 12px;z-index:5;position:relative;"><img src="${logoUrl}" alt="${input.brandName}" style="max-height:48px;width:auto;max-width:220px;object-fit:contain;" data-adrival-logo="1" /></a>`,
+      $header.prepend(inject);
+      logoHits += 1;
+    } else if ($("body").length) {
+      $("body").prepend(
+        `<div data-adrival-logo-bar="1" style="position:sticky;top:0;z-index:99998;background:rgba(255,255,255,.96);padding:8px 16px;border-bottom:1px solid rgba(0,0,0,.06);">${inject}</div>`,
       );
       logoHits += 1;
     }
@@ -224,6 +261,7 @@ function applyBrandLogoMarks(
 /**
  * Deterministic brand application — no AI on markup.
  * Colors, fonts, logo src (keep dimensions), link rules.
+ * When designSpec is provided it is the SSOT (same object serialized to design.md).
  */
 export function applyBrandDeterministic(input: {
   html: string;
@@ -231,6 +269,8 @@ export function applyBrandDeterministic(input: {
   brand: BrandTokens;
   businessUrl: string;
   brandName: string;
+  /** Per-run brand SSOT — preferred over raw tokens when present */
+  designSpec?: BrandDesignSpec | null;
 }): { html: string; stats: Record<string, number> } {
   const stats = {
     colors: 0,
@@ -239,10 +279,18 @@ export function applyBrandDeterministic(input: {
     links: 0,
     socials: 0,
     images: 0,
+    phones: 0,
+    emails: 0,
+    emptyChrome: 0,
   };
 
+  const brand = input.designSpec
+    ? brandTokensFromDesignSpec(input.designSpec, input.brand)
+    : input.brand;
+  const spec = input.designSpec || null;
+
   let html = input.html;
-  const colorMap = buildColorMap(input.archive.paintedColors, input.brand.colors);
+  const colorMap = buildColorMap(input.archive.paintedColors, brand.colors);
 
   // Also collect hex literals from the document for exact replacement
   const hexes = new Set<string>();
@@ -254,9 +302,9 @@ export function applyBrandDeterministic(input: {
   }
 
   const userTargets = [
-    input.brand.colors.primary,
-    input.brand.colors.secondary,
-    input.brand.colors.accent,
+    brand.colors.primary,
+    brand.colors.secondary,
+    brand.colors.accent,
   ];
   let hi = 0;
   for (const hex of hexes) {
@@ -289,10 +337,19 @@ export function applyBrandDeterministic(input: {
   const $ = cheerio.load(html);
 
   // Fonts: swap font-family declarations + inject @font-face stack hint
-  if (input.brand.fonts[0]) {
-    const family = input.brand.fonts[0];
-    const heading =
-      input.brand.design?.typography?.fontFamilies?.heading || family;
+  const bodyFont =
+    spec?.typography.bodyFont ||
+    brand.design?.typography?.fontFamilies?.primary ||
+    brand.fonts[0] ||
+    null;
+  const headingFont =
+    spec?.typography.headingFont ||
+    brand.design?.typography?.fontFamilies?.heading ||
+    bodyFont;
+
+  if (bodyFont) {
+    const family = bodyFont;
+    const heading = headingFont || family;
     const stack = `"${family}", system-ui, -apple-system, Segoe UI, Roboto, sans-serif`;
     const headingStack = `"${heading}", ${stack}`;
     $("style").each((_, el) => {
@@ -314,35 +371,57 @@ export function applyBrandDeterministic(input: {
       );
       stats.fonts += 1;
     });
-    // Inject brand font preference + Firecrawl button/radius tokens + Google Fonts
+    // Inject brand font preference + button/radius/shadow tokens from design SSOT
     const radius =
-      input.brand.design?.components?.buttonPrimary?.borderRadius ||
-      input.brand.design?.spacing?.borderRadius ||
-      input.brand.borderRadii[0] ||
+      spec?.buttons.primary.borderRadius ||
+      brand.design?.components?.buttonPrimary?.borderRadius ||
+      brand.design?.spacing?.borderRadius ||
+      brand.borderRadii[0] ||
       null;
     const btnBg =
-      input.brand.design?.components?.buttonPrimary?.background ||
-      input.brand.colors.accent ||
-      input.brand.colors.primary;
+      spec?.buttons.primary.background ||
+      brand.design?.components?.buttonPrimary?.background ||
+      brand.colors.accent ||
+      brand.colors.primary;
     const btnFg =
-      input.brand.design?.components?.buttonPrimary?.textColor || "#FFFFFF";
+      spec?.buttons.primary.textColor ||
+      brand.design?.components?.buttonPrimary?.textColor ||
+      "#FFFFFF";
     const btnSecFg =
-      input.brand.design?.components?.buttonSecondary?.textColor ||
-      input.brand.colors.accent ||
-      input.brand.colors.primary;
+      spec?.buttons.secondary.textColor ||
+      brand.design?.components?.buttonSecondary?.textColor ||
+      brand.colors.accent ||
+      brand.colors.primary;
     const btnSecBorder =
-      input.brand.design?.components?.buttonSecondary?.borderColor ||
+      spec?.buttons.secondary.borderColor ||
+      brand.design?.components?.buttonSecondary?.borderColor ||
       btnSecFg;
+    const btnSecBg = spec?.buttons.secondary.background || null;
+    const iconColor =
+      spec?.colors.icon || brand.colors.accent || brand.colors.primary;
+    const pageBg =
+      spec?.sectionBackgrounds.page || brand.colors.background;
+    const shadow =
+      spec?.boxShadows[0] || brand.boxShadows[0] || null;
 
     const radiusCss = radius
       ? `button,.btn,a.btn,.button,[class*='btn'],[class*='cta']{border-radius:${radius}!important}`
       : "";
     const btnCss = `button.btn-primary,.btn-primary,a.btn-primary,[class*='btn-primary'],[class*='cta-primary']{background:${btnBg}!important;color:${btnFg}!important;border-color:${btnBg}!important}
-button.btn-secondary,.btn-secondary,a.btn-secondary,[class*='btn-secondary'],[class*='cta-secondary']{color:${btnSecFg}!important;border-color:${btnSecBorder}!important}`;
+button.btn-secondary,.btn-secondary,a.btn-secondary,[class*='btn-secondary'],[class*='cta-secondary']{color:${btnSecFg}!important;border-color:${btnSecBorder}!important${btnSecBg ? `;background:${btnSecBg}!important` : ""}}`;
+    const surfaceCss = `html,body{background-color:${pageBg}}svg[fill]:not([fill='none']),.icon,[class*='icon'] svg{color:${iconColor}}`;
+    const shadowCss = shadow
+      ? `.card,[class*='card'],[class*='shadow'],.btn-primary,[class*='btn-primary']{box-shadow:${shadow}}`
+      : "";
 
     const fontFamilies = Array.from(
       new Set(
-        [family, heading, ...(input.brand.fonts || [])].filter(Boolean),
+        [
+          family,
+          heading,
+          ...(spec?.fonts || []),
+          ...(brand.fonts || []),
+        ].filter(Boolean),
       ),
     ).slice(0, 4);
     const googleFonts = fontFamilies
@@ -355,21 +434,26 @@ button.btn-secondary,.btn-secondary,a.btn-secondary,[class*='btn-secondary'],[cl
 
     $("head").append(fontLink);
     $("head").append(
-      `<style id="adrival-font-swap">html,body,button,input,textarea,select{font-family:${stack}!important}h1,h2,h3,h4,h5,h6{font-family:${headingStack}!important}${radiusCss}${btnCss}</style>`,
+      `<style id="adrival-font-swap">html,body,button,input,textarea,select{font-family:${stack}!important}h1,h2,h3,h4,h5,h6{font-family:${headingStack}!important}${radiusCss}${btnCss}${surfaceCss}${shadowCss}</style>`,
     );
   } else if (
-    input.brand.design?.spacing?.borderRadius ||
-    input.brand.design?.components?.buttonPrimary
+    spec?.buttons.primary ||
+    brand.design?.spacing?.borderRadius ||
+    brand.design?.components?.buttonPrimary
   ) {
     const radius =
-      input.brand.design?.components?.buttonPrimary?.borderRadius ||
-      input.brand.design?.spacing?.borderRadius ||
+      spec?.buttons.primary.borderRadius ||
+      brand.design?.components?.buttonPrimary?.borderRadius ||
+      brand.design?.spacing?.borderRadius ||
       null;
     const btnBg =
-      input.brand.design?.components?.buttonPrimary?.background ||
-      input.brand.colors.accent;
+      spec?.buttons.primary.background ||
+      brand.design?.components?.buttonPrimary?.background ||
+      brand.colors.accent;
     const btnFg =
-      input.brand.design?.components?.buttonPrimary?.textColor || "#FFFFFF";
+      spec?.buttons.primary.textColor ||
+      brand.design?.components?.buttonPrimary?.textColor ||
+      "#FFFFFF";
     const parts: string[] = [];
     if (radius) {
       parts.push(
@@ -389,9 +473,10 @@ button.btn-secondary,.btn-secondary,a.btn-secondary,[class*='btn-secondary'],[cl
   }
 
   // Logo: replace header/nav brand marks — preserve width/height/style
-  if (input.brand.logoUrl) {
+  const logoUrl = spec?.logos.primary || brand.logoUrl;
+  if (logoUrl) {
     const logoResult = applyBrandLogoMarks($, {
-      logoUrl: input.brand.logoUrl,
+      logoUrl,
       brandName: input.brandName,
       businessUrl: input.businessUrl,
     });
@@ -400,10 +485,10 @@ button.btn-secondary,.btn-secondary,a.btn-secondary,[class*='btn-secondary'],[cl
 
   // Hero / large content image swaps from brand assets (never icons/footer)
   // Skip slots reserved for Runway generation (`data-adrival-gen-id`).
-  const brandImages = input.brand.siteAssets?.images || [];
+  const brandImages = brand.siteAssets?.images || [];
   const heroPool = [
-    ...(input.brand.siteAssets?.ogImageUrl
-      ? [{ src: input.brand.siteAssets.ogImageUrl, kind: "og" as const }]
+    ...(brand.siteAssets?.ogImageUrl
+      ? [{ src: brand.siteAssets.ogImageUrl, kind: "og" as const }]
       : []),
     ...brandImages.filter((i) => i.kind === "hero" || i.kind === "og"),
   ];
@@ -496,19 +581,20 @@ button.btn-secondary,.btn-secondary,a.btn-secondary,[class*='btn-secondary'],[cl
     // ignore
   }
   const brandSocialByNet = new Map<string, string>();
-  for (const s of input.brand.socialLinks) {
+  for (const s of brand.socialLinks) {
     const net = detectSocialNetwork(s.href, s.label);
     if (net && !brandSocialByNet.has(net)) brandSocialByNet.set(net, s.href);
   }
 
   const pageLinks = collectRoutableBrandLinks(
-    input.brand.siteAssets,
+    brand.siteAssets,
     input.businessUrl,
   );
 
   $("a[href]").each((_, el) => {
     const $el = $(el);
     const href = $el.attr("href") || "";
+    // tel:/mailto: handled by applyBrandContactInfo after link pass
     if (!href || /^mailto:|^tel:|^#|^javascript:/i.test(href)) return;
 
     const label = ($el.text() || "").replace(/\s+/g, " ").trim();
@@ -544,10 +630,11 @@ button.btn-secondary,.btn-secondary,a.btn-secondary,[class*='btn-secondary'],[cl
             pickCtaHref({
               label,
               className,
-              assets: input.brand.siteAssets,
+              assets: brand.siteAssets,
               businessUrl: input.businessUrl,
             }),
           );
+          stats.links += 1;
         } else {
           const resolved = resolveBrandPageHref({
             label,
@@ -555,9 +642,20 @@ button.btn-secondary,.btn-secondary,a.btn-secondary,[class*='btn-secondary'],[cl
             links: pageLinks,
             businessUrl: input.businessUrl,
           });
-          $el.attr("href", resolved || input.businessUrl);
+          if (resolved) {
+            $el.attr("href", resolved);
+            stats.links += 1;
+          } else if ($el.closest("footer, [role='contentinfo'], [data-adrival-brand-footer]").length) {
+            // Footer leftovers are cleaned by rebuildBrandFooter — hide here
+            $el.attr("href", "#");
+            $el.attr("data-adrival-unmapped-link", "1");
+            $el.attr("hidden", "true");
+          } else {
+            // Non-footer: keep structure but point only to known brand pages, else home
+            $el.attr("href", pageLinks[0]?.href || input.businessUrl);
+            stats.links += 1;
+          }
         }
-        stats.links += 1;
         return;
       }
     } catch {
@@ -571,7 +669,7 @@ button.btn-secondary,.btn-secondary,a.btn-secondary,[class*='btn-secondary'],[cl
         pickCtaHref({
           label,
           className,
-          assets: input.brand.siteAssets,
+          assets: brand.siteAssets,
           businessUrl: input.businessUrl,
         }),
       );
@@ -583,7 +681,17 @@ button.btn-secondary,.btn-secondary,a.btn-secondary,[class*='btn-secondary'],[cl
 
   // Brand CSS variables + scoped CTA chrome (not every heading/link)
   let out = $.html();
-  out = injectBrandColorOverlay(out, input.brand.colors);
+  out = injectBrandColorOverlay(out, brand.colors);
+
+  // Phones / emails: href + visible "Call …" labels (archive path previously skipped these)
+  const contacts = applyBrandContactInfo(out, brand.siteAssets);
+  out = contacts.html;
+  stats.phones += contacts.stats.phones;
+  stats.emails += contacts.stats.emails;
+
+  const scrub = scrubEmptyChromePills(out);
+  out = scrub.html;
+  stats.emptyChrome += scrub.removed;
 
   void escapeRegExp;
   return { html: out, stats };

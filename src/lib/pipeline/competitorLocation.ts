@@ -477,6 +477,49 @@ export function locationRankScore(
  * Resolve competitor location: Sociavault → Perplexity → unknown flag.
  * Always soft-accepts — location is a ranking/label signal, never a hard gate.
  */
+/**
+ * Deep location (SociaVault / Perplexity) for a search competitor.
+ * Intended for offer / page analysis — not keyword search accept.
+ */
+export async function enrichCompetitorDeepLocation(input: {
+  competitorId: string;
+  pageName: string;
+  website?: string | null;
+  facebookUrl?: string | null;
+  linkedinUrl?: string | null;
+  geoMode?: SearchGeoMode | null;
+  targetLocations?: BusinessLocation[] | null;
+  provisional?: ResolvedCompetitorLocation | null;
+}): Promise<ResolvedCompetitorLocation | null> {
+  try {
+    const { updateCompetitor } = await import("../db");
+    const result = await resolveAndMatchCompetitorLocation({
+      pageName: input.pageName,
+      website: input.website,
+      facebookUrl: input.facebookUrl,
+      linkedinUrl: input.linkedinUrl,
+      geoMode: input.geoMode || "countrywide",
+      targetLocations: input.targetLocations || [],
+      provisional: input.provisional || null,
+      skipPerplexityIfResolved:
+        input.provisional?.locationStatus === "matched",
+    });
+    const loc = result.location;
+    updateCompetitor(input.competitorId, {
+      locationLabel: loc.locationLabel,
+      locationCity: loc.locationCity,
+      locationSuburb: loc.locationSuburb,
+      locationCountry: loc.locationCountry,
+      locationStatus: loc.locationStatus,
+      locationSource: loc.locationSource,
+    });
+    return loc;
+  } catch (err) {
+    console.warn("[location] deep enrich failed", err);
+    return null;
+  }
+}
+
 export async function resolveAndMatchCompetitorLocation(input: {
   pageName: string;
   website?: string | null;

@@ -28,6 +28,13 @@ import {
   regenerateLandingImage,
   replaceGeneratedImageInHtml,
 } from "./generateLandingImages";
+import { extractBrandTokens } from "./archive/brandTokens";
+import {
+  buildBrandDesignSpec,
+  serializeDesignMd,
+  writeDesignMd,
+} from "./designMd";
+import { resolveBrandDisplayName } from "./brandDisplayName";
 
 function resolveBusinessUrl(job: SearchJob): string | null {
   const fromJob = (job.businessUrl || "").trim();
@@ -35,6 +42,20 @@ function resolveBusinessUrl(job: SearchJob): string | null {
   const url = fromJob || fromProfile;
   if (!url) return null;
   return /^https?:\/\//i.test(url) ? url : `https://${url}`;
+}
+
+function setRecreationProgress(
+  competitorId: string,
+  page: RecreatedLandingPage,
+  progress: { phase: string; message: string; pct: number },
+): RecreatedLandingPage {
+  const next: RecreatedLandingPage = {
+    ...page,
+    progress,
+    updatedAt: new Date().toISOString(),
+  };
+  updateCompetitor(competitorId, { recreatedPage: next });
+  return next;
 }
 
 function resolveContext(competitorId: string) {
@@ -63,15 +84,12 @@ function resolveContext(competitorId: string) {
     job.keyword;
 
   const sourceUrl = competitor.pageAnalysis.analyzedUrl;
-  const brandName =
-    job.businessProfile?.businessName ||
-    (() => {
-      try {
-        return new URL(businessUrl).hostname.replace(/^www\./, "");
-      } catch {
-        return "Your Brand";
-      }
-    })();
+  const brandName = resolveBrandDisplayName({
+    businessUrl,
+    siteName: job.businessProfile?.brandAssets?.siteName,
+    profileName: job.businessProfile?.businessName,
+    competitorName: competitor.pageName,
+  });
 
   return { competitor, job, businessUrl, keyword, sourceUrl, brandName };
 }
@@ -87,7 +105,12 @@ function basePageFields(input: {
     createdAt:
       input.competitor.recreatedPage?.createdAt || new Date().toISOString(),
     businessUrl: input.businessUrl,
-    businessName: input.job.businessProfile?.businessName || null,
+    businessName: resolveBrandDisplayName({
+      businessUrl: input.businessUrl,
+      siteName: input.job.businessProfile?.brandAssets?.siteName,
+      profileName: input.job.businessProfile?.businessName,
+      competitorName: input.competitor.pageName,
+    }),
     keyword: input.keyword,
     sourceCompetitorName: input.competitor.pageName,
     sourceAnalyzedUrl: input.sourceUrl,
@@ -142,7 +165,7 @@ export async function generateRecreationContent(
     return ctx.competitor;
   }
 
-  const pending: RecreatedLandingPage = {
+  let pending: RecreatedLandingPage = {
     ...basePageFields(ctx),
     status: "pending",
     updatedAt: new Date().toISOString(),
@@ -157,12 +180,22 @@ export async function generateRecreationContent(
       error: null,
     },
     userFeedback: userFeedback || null,
+    progress: {
+      phase: "starting",
+      message: "Starting content creation…",
+      pct: 4,
+    },
     error: null,
   };
   updateCompetitor(competitorId, { recreatedPage: pending });
 
   try {
     // Resolve brand colors + link inventory for content pack
+    pending = setRecreationProgress(competitorId, pending, {
+      phase: "brand",
+      message: "Analyzing your brand colors & assets…",
+      pct: 12,
+    });
     let colors: BrandColors = pending.brandColors;
     let siteAssets = ctx.job.businessProfile?.brandAssets || null;
     const linkNotes: string[] = [];
@@ -178,6 +211,11 @@ export async function generateRecreationContent(
     }
 
     // Firecrawl first: real nav / footer / social / service URLs (not homepage-collapsed)
+    pending = setRecreationProgress(competitorId, pending, {
+      phase: "links",
+      message: "Collecting brand nav, footer & service links…",
+      pct: 28,
+    });
     let servicePages: Array<{ label: string; href: string }> = [];
     try {
       const pack = await extractBrandLinksWithFirecrawl(ctx.businessUrl);
@@ -197,6 +235,12 @@ export async function generateRecreationContent(
       );
     }
 
+    pending = setRecreationProgress(competitorId, pending, {
+      phase: "drafting",
+      message:
+        "Scraping competitor page & drafting full-page content for your brand…",
+      pct: 48,
+    });
     const { draft, sourceArchive } = await generateLandingContentDraftPreferred({
       analysis: ctx.competitor.pageAnalysis!,
       brandName: ctx.brandName,
@@ -231,6 +275,11 @@ export async function generateRecreationContent(
         .filter(Boolean)
         .join(" · "),
       userFeedback: userFeedback || null,
+      progress: {
+        phase: "done",
+        message: "Content ready for review",
+        pct: 100,
+      },
       error: null,
     };
 
@@ -245,6 +294,11 @@ export async function generateRecreationContent(
         status: "failed",
         updatedAt: new Date().toISOString(),
         error: message,
+        progress: {
+          phase: "failed",
+          message,
+          pct: progressPctSafe(pending.progress?.pct),
+        },
         contentDraft: {
           status: "failed",
           createdAt: pending.contentDraft?.createdAt || new Date().toISOString(),
@@ -257,6 +311,10 @@ export async function generateRecreationContent(
     });
     throw err;
   }
+}
+
+function progressPctSafe(pct?: number | null): number {
+  return typeof pct === "number" && Number.isFinite(pct) ? pct : 0;
 }
 
 /** Persist in-place edits to the content draft without building HTML. */
@@ -348,13 +406,18 @@ export async function buildRecreationDesign(
     .trim()
     .slice(0, 4000);
 
-  const pending: RecreatedLandingPage = {
+  let pending: RecreatedLandingPage = {
     ...basePageFields({ ...ctx, competitor: { ...ctx.competitor, recreatedPage: existing } }),
     status: "design_pending",
     updatedAt: new Date().toISOString(),
     contentDraft: draft,
     html: null,
     userFeedback: userFeedback || null,
+    progress: {
+      phase: "design",
+      message: "Fitting approved content into the page design…",
+      pct: 20,
+    },
     error: null,
   };
   updateCompetitor(competitorId, { recreatedPage: pending });
@@ -365,6 +428,11 @@ export async function buildRecreationDesign(
     let colors: BrandColors = pending.brandColors;
 
     try {
+      pending = setRecreationProgress(competitorId, pending, {
+        phase: "design",
+        message: "Capturing layout & applying brand content + images…",
+        pct: 45,
+      });
       const archived = await recreateFromArchive({
         sourceUrl: ctx.sourceUrl,
         businessUrl: ctx.businessUrl,
@@ -410,8 +478,14 @@ export async function buildRecreationDesign(
         generatedImages: archived.generatedImages,
         differentiationNotes,
         userFeedback: userFeedback || null,
+        designMd: archived.designMd || null,
         publishReady: archived.publishReady,
         publishBlockers: archived.publishBlockers,
+        progress: {
+          phase: "done",
+          message: "Design complete",
+          pct: 100,
+        },
         error: null,
       };
 
@@ -578,6 +652,26 @@ export async function refreshBrandColorsForRecreation(
     businessUrl: ctx.job.businessUrl || brand.finalUrl || ctx.businessUrl,
   });
 
+  let designMd: string | null = null;
+  try {
+    const tokens = await extractBrandTokens({
+      businessUrl: brand.finalUrl || ctx.businessUrl,
+      profileName: ctx.brandName,
+      profile: nextProfile,
+      preferredColors: brand.colors,
+    });
+    const spec = buildBrandDesignSpec({
+      tokens,
+      brandName: ctx.brandName,
+      businessUrl: brand.finalUrl || ctx.businessUrl,
+      competitorName: ctx.competitor.pageName,
+    });
+    designMd = serializeDesignMd(spec);
+    writeDesignMd(competitorId, designMd);
+  } catch (err) {
+    console.warn("[refreshBrandColors] design.md generation failed", err);
+  }
+
   const existing = ctx.competitor.recreatedPage;
   const nextPage: RecreatedLandingPage = existing
     ? {
@@ -586,6 +680,7 @@ export async function refreshBrandColorsForRecreation(
         businessUrl: brand.finalUrl || existing.businessUrl || ctx.businessUrl,
         businessName:
           nextProfile.businessName || existing.businessName || ctx.brandName,
+        designMd: designMd || existing.designMd || null,
         updatedAt: new Date().toISOString(),
       }
     : {
@@ -599,6 +694,7 @@ export async function refreshBrandColorsForRecreation(
         status: "content_ready",
         updatedAt: new Date().toISOString(),
         brandColors: brand.colors,
+        designMd,
         error: null,
       };
 

@@ -21,3 +21,7 @@ export function getOpenRouterClient() {
 
 export const OPENROUTER_PERPLEXITY_MODEL =
   process.env.OPENROUTER_MODEL || "perplexity/sonar";
+
+export function hasOpenRouterKey(): boolean {
+  return Boolean(process.env.OPENROUTER_API_KEY?.trim());
+}

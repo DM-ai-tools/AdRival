@@ -10,14 +10,20 @@ import {
   hasServiceKeywordSignal,
 } from "../openai/analyzer";
 import {
+  getJob,
   isSearchJobSuppressed,
+  isLookupJobSuppressed,
   saveCompetitor,
   saveJob,
   saveLookupAd,
   saveLookupJob,
 } from "../db";
-import { runLookupOffersReportPhase } from "./lookupOffersReport";
 import {
+  buildGuardrailContext,
+  guardCompetitorHeuristic,
+} from "../guardrails";
+import {
+  MAX_SEARCH_QUERIES_LINKEDIN,
   TARGET_COMPETITORS,
   type AdCandidate,
   type BrandReview,
@@ -33,7 +39,10 @@ import {
   meetsActiveAdsThreshold,
   parseKeywords,
 } from "../platforms";
-import { newId, normalizeLinkedInCompanyUrl, runBrandReview } from "./brandReview";
+import {
+  newId,
+  normalizeLinkedInCompanyUrl,
+} from "./brandReview";
 import {
   mapLinkedInAdToCandidate,
   pickBestLinkedInCandidate,
@@ -42,8 +51,8 @@ import {
 import { enrichLookupPageMetrics } from "./lookupEnrichment";
 import { linkedInCountriesFromGeo } from "../geo";
 
-const MAX_LI_PAGES = 12;
-const MAX_COMPANY_COUNT_PAGES = 8;
+const MAX_LI_PAGES = 5;
+const MAX_COMPANY_COUNT_PAGES = 5;
 
 /** Count company ads across LinkedIn Ad Library pages for active-ads gate. */
 async function countLinkedInCompanyAds(
@@ -115,6 +124,8 @@ export async function runLinkedInSearch(
     countries: liCountries.split(","),
     businessUrl,
     businessProfile,
+    skipGuardrails: Boolean(options?.skipGuardrails),
+    guardrailOverride: options?.guardrailOverride || null,
     status: "running",
     progress: {
       stage: "searching_ads",
@@ -178,7 +189,7 @@ export async function runLinkedInSearch(
       }
     }
 
-    outer: for (const query of Array.from(queries).slice(0, 16)) {
+    outer: for (const query of Array.from(queries).slice(0, MAX_SEARCH_QUERIES_LINKEDIN)) {
       if (isSearchJobSuppressed(jobId)) break outer;
       let token: string | null = null;
       let pages = 0;
@@ -258,6 +269,29 @@ export async function runLinkedInSearch(
             continue;
           }
 
+          const guard = guardCompetitorHeuristic(
+            buildGuardrailContext({
+              businessProfile,
+              selectedCategoryLabel: selectedCategory?.label || null,
+              searchKeywords: keywords,
+              override: options?.guardrailOverride || null,
+              skipGuardrails: Boolean(options?.skipGuardrails),
+            }),
+            {
+              pageName: primary.pageName,
+              adText: primary.fullText || primary.body,
+              landingPageUrl: primary.landingPageUrl,
+              services: filter.services,
+              llmReason: filter.reason,
+            },
+          );
+          if (!guard.ok) {
+            job.progress.rejected += 1;
+            job.progress.message = `Guardrail blocked ${primary.pageName}: ${guard.reason}`;
+            saveJob(job);
+            continue;
+          }
+
           job.progress.message = `Counting LinkedIn ads for ${primary.pageName}…`;
           saveJob(job);
 
@@ -287,11 +321,7 @@ export async function runLinkedInSearch(
             primary.pageProfileUri ||
             null;
 
-          const {
-            cheapLocationFromText,
-            resolveAndMatchCompetitorLocation,
-          } = await import("./competitorLocation");
-          const { updateCompetitor } = await import("../db");
+          const { cheapLocationFromText } = await import("./competitorLocation");
 
           const provisional = cheapLocationFromText({
             pageName: primary.pageName,
@@ -319,8 +349,8 @@ export async function runLinkedInSearch(
             continue;
           }
 
-          // Save first with minimal brand
-          let brand: BrandReview = {
+          // Save first with minimal brand — deep location deferred to offer analysis
+          const brand: BrandReview = {
             linkedinUrl: liUrl,
             website: primary.landingPageUrl || null,
             category: "LinkedIn advertiser",
@@ -350,80 +380,10 @@ export async function runLinkedInSearch(
           accepted.push(competitor);
           job.competitorIds.push(competitor.id);
           job.progress.accepted = accepted.length;
-          job.progress.message = `Accepted ${primary.pageName} (${accepted.length}/${TARGET_COMPETITORS}) — location pending…`;
-          saveJob(job);
-
-          job.progress.stage = "brand_review";
-          job.progress.message = `Enriching brand for ${primary.pageName}…`;
-          saveJob(job);
-          try {
-            brand = await runBrandReview({
-              pageId,
-              pageName: primary.pageName,
-              pageProfileUri: null,
-              linkedinUrlHint: liUrl,
-              websiteHint: primary.landingPageUrl,
-              categoryHint: "LinkedIn advertiser",
-              sourcePlatform: "linkedin",
-            });
-            if (!brand.linkedinUrl && liUrl) brand.linkedinUrl = liUrl;
-          } catch (err) {
-            job.progress.message = `Partial brand review for ${primary.pageName}: ${(err as Error).message}`;
-            saveJob(job);
-          }
-
-          job.progress.stage = "location_check";
-          job.progress.message = `Resolving location for ${primary.pageName}…`;
-          saveJob(job);
-          let loc = provisional;
-          try {
-            const locResult = await resolveAndMatchCompetitorLocation({
-              pageName: primary.pageName,
-              website: brand.website,
-              facebookUrl: brand.facebookUrl,
-              linkedinUrl: brand.linkedinUrl || liUrl,
-              geoMode: job.geoMode || "countrywide",
-              targetLocations: job.targetLocations || [],
-              provisional,
-              skipPerplexityIfResolved: provisional.locationStatus === "matched",
-            });
-            loc = locResult.location;
-          } catch {
-            // keep provisional
-          }
-
-          updateCompetitor(competitor.id, {
-            brand,
-            locationLabel: loc.locationLabel,
-            locationCity: loc.locationCity,
-            locationSuburb: loc.locationSuburb,
-            locationCountry: loc.locationCountry,
-            locationStatus: loc.locationStatus,
-            locationSource: loc.locationSource,
-          });
-          const idx = accepted.findIndex((c) => c.id === competitor.id);
-          if (idx >= 0) {
-            accepted[idx] = {
-              ...accepted[idx],
-              brand,
-              locationLabel: loc.locationLabel,
-              locationCity: loc.locationCity,
-              locationSuburb: loc.locationSuburb,
-              locationCountry: loc.locationCountry,
-              locationStatus: loc.locationStatus,
-              locationSource: loc.locationSource,
-            };
-          }
-
           job.progress.stage = "searching_ads";
-          const locNote =
-            loc.locationStatus === "unknown"
-              ? " · location unknown"
-              : loc.locationStatus === "mismatch"
-                ? ` · location mismatch${loc.locationLabel ? ` (${loc.locationLabel})` : ""}`
-                : loc.locationLabel
-                  ? ` · ${loc.locationLabel}`
-                  : "";
+          const locNote = provisional.locationLabel
+            ? ` · ${provisional.locationLabel}`
+            : "";
           job.progress.message = `Accepted ${primary.pageName} (${accepted.length}/${TARGET_COMPETITORS})${locNote}`;
           saveJob(job);
         }
@@ -438,11 +398,7 @@ export async function runLinkedInSearch(
       for (const held of heldGeo) {
         if (accepted.length >= TARGET_COMPETITORS) break;
         if (seenAdvertisers.has(held.pageId)) continue;
-        const {
-          cheapLocationFromText,
-          resolveAndMatchCompetitorLocation,
-        } = await import("./competitorLocation");
-        const { updateCompetitor } = await import("../db");
+        const { cheapLocationFromText } = await import("./competitorLocation");
         const provisional = cheapLocationFromText({
           pageName: held.primary.pageName,
           adText: held.primary.fullText || held.primary.body,
@@ -450,7 +406,7 @@ export async function runLinkedInSearch(
           targets: targetLocations,
           geoMode,
         });
-        let brand: BrandReview = {
+        const brand: BrandReview = {
           linkedinUrl: held.liUrl,
           website: held.primary.landingPageUrl || null,
           category: "LinkedIn advertiser",
@@ -478,45 +434,6 @@ export async function runLinkedInSearch(
         saveCompetitor(competitor);
         accepted.push(competitor);
         job.competitorIds.push(competitor.id);
-        try {
-          brand = await runBrandReview({
-            pageId: held.pageId,
-            pageName: held.primary.pageName,
-            pageProfileUri: null,
-            linkedinUrlHint: held.liUrl,
-            websiteHint: held.primary.landingPageUrl,
-            categoryHint: "LinkedIn advertiser",
-            sourcePlatform: "linkedin",
-          });
-          if (!brand.linkedinUrl && held.liUrl) brand.linkedinUrl = held.liUrl;
-        } catch {
-          /* keep minimal */
-        }
-        let loc = provisional;
-        try {
-          const locResult = await resolveAndMatchCompetitorLocation({
-            pageName: held.primary.pageName,
-            website: brand.website,
-            facebookUrl: brand.facebookUrl,
-            linkedinUrl: brand.linkedinUrl || held.liUrl,
-            geoMode,
-            targetLocations,
-            provisional,
-            skipPerplexityIfResolved: provisional.locationStatus === "matched",
-          });
-          loc = locResult.location;
-        } catch {
-          /* provisional */
-        }
-        updateCompetitor(competitor.id, {
-          brand,
-          locationLabel: loc.locationLabel,
-          locationCity: loc.locationCity,
-          locationSuburb: loc.locationSuburb,
-          locationCountry: loc.locationCountry,
-          locationStatus: loc.locationStatus,
-          locationSource: loc.locationSource,
-        });
         job.progress.accepted = accepted.length;
       }
     }
@@ -527,13 +444,20 @@ export async function runLinkedInSearch(
         : accepted.length > 0
           ? "partial"
           : "failed";
-    job.progress.stage = "done";
-    job.progress.message =
-      accepted.length > 0
-        ? `Found ${accepted.length} LinkedIn competitors.`
-        : "No qualifying LinkedIn competitors found.";
     job.updatedAt = new Date().toISOString();
     saveJob(job);
+
+    if (!isSearchJobSuppressed(jobId)) {
+      const final = getJob(jobId) || job;
+      final.status = job.status;
+      final.progress.stage = "done";
+      final.progress.message =
+        accepted.length > 0
+          ? `Found ${accepted.length} LinkedIn competitors. Brand review & deep location run on demand / during offer analysis.`
+          : "No qualifying LinkedIn competitors found.";
+      final.updatedAt = new Date().toISOString();
+      saveJob(final);
+    }
   } catch (err) {
     job.status = "failed";
     job.error = (err as Error).message;
@@ -547,9 +471,14 @@ export async function runLinkedInLookup(
   lookupId: string,
   queryName: string,
   forcedCandidate?: LookupPageCandidate | null,
+  options?: {
+    businessUrl?: string | null;
+    businessProfile?: import("../types").BusinessProfile | null;
+  },
 ) {
   const name = forcedCandidate?.name || queryName;
   const now = new Date().toISOString();
+  const businessUrl = (options?.businessUrl || "").trim() || null;
   const job: LookupJob = {
     id: lookupId,
     queryName: name,
@@ -581,10 +510,18 @@ export async function runLinkedInLookup(
       : "LinkedIn lookup uses company name search directly.",
     llmConfidence: forcedCandidate ? 1 : 0.7,
     adIds: [],
+    businessUrl: businessUrl
+      ? /^https?:\/\//i.test(businessUrl)
+        ? businessUrl
+        : `https://${businessUrl}`
+      : null,
+    businessProfile: options?.businessProfile || null,
     createdAt: now,
     updatedAt: now,
   };
   saveLookupJob(job);
+
+  if (isLookupJobSuppressed(lookupId)) return;
 
   try {
     let token: string | null = null;
@@ -593,6 +530,7 @@ export async function runLinkedInLookup(
     const seen = new Set<string>();
 
     do {
+      if (isLookupJobSuppressed(job.id)) return;
       const res = await searchLinkedInAds({
         company: name,
         countries: "US,AU",
@@ -668,21 +606,16 @@ export async function runLinkedInLookup(
       saveLookupJob(job);
     }
 
-    job.status = "running";
-    job.progress.stage = "analyzing_offers";
-    job.progress.message =
-      stored.length > 0
-        ? `Loaded ${stored.length} LinkedIn ads — analyzing unique creatives & landing pages…`
-        : `No LinkedIn ads found for "${name}".`;
-    saveLookupJob(job);
-
     if (stored.length > 0) {
-      await runLookupOffersReportPhase(job.id, { finalStatus: "completed" });
+      job.status = "completed";
+      job.progress.stage = "done";
+      job.progress.message = `Loaded ${stored.length} LinkedIn ads for "${name}". Use Get offer & page details on an ad to analyze its landing page.`;
     } else {
       job.status = "partial";
       job.progress.stage = "done";
-      saveLookupJob(job);
+      job.progress.message = `No LinkedIn ads found for "${name}".`;
     }
+    saveLookupJob(job);
   } catch (err) {
     job.status = "failed";
     job.error = (err as Error).message;

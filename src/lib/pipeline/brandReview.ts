@@ -5,13 +5,32 @@ import {
   getLinkedInCompany,
   getTwitterProfile,
   getYoutubeChannel,
-  googleSearch,
-  normalizeList,
-  searchCompanies,
 } from "../sociavault/client";
-import { resolveSocialIdentifiers } from "../openai/analyzer";
-import type { BrandReview } from "../types";
+import { firecrawlScrapeBranding, hasFirecrawlKey } from "../firecrawl/client";
+import {
+  detectSocialNetwork,
+  extractBrandAssetsFromHtml,
+} from "./brandAssets";
 import { normalizeWebsiteUrl } from "./linkGuards";
+import {
+  extractInstagramHandle,
+  extractTwitterHandle,
+  extractYouTubeParams,
+  normalizeLinkedInCompanyUrl,
+  parseYouTubeFromUrl,
+  socialLinksToSociavaultParams,
+  type SociavaultSocialParams,
+} from "./socialParams";
+import {
+  getCompetitorsByRun,
+  getJob,
+  isSearchJobSuppressed,
+  saveJob,
+  updateCompetitor,
+} from "../db";
+import type { BrandReview, CompetitorRecord, SearchJob } from "../types";
+
+export { normalizeLinkedInCompanyUrl, parseYouTubeFromUrl };
 
 function safeNum(n: unknown): number | null {
   if (typeof n === "number" && Number.isFinite(n)) return n;
@@ -21,386 +40,74 @@ function safeNum(n: unknown): number | null {
   return null;
 }
 
-/** Normalize any LinkedIn company URL to https://www.linkedin.com/company/{slug} */
-export function normalizeLinkedInCompanyUrl(
-  url: string | null | undefined,
-): string | null {
-  if (!url) return null;
+async function collectSocialHrefsFromWebsite(
+  website: string,
+): Promise<string[]> {
+  const hrefs: string[] = [];
+  if (!hasFirecrawlKey()) return hrefs;
+
   try {
-    const u = new URL(url.startsWith("http") ? url : `https://${url}`);
-    if (!u.hostname.includes("linkedin.com")) return null;
-    const match = u.pathname.match(/\/company\/([^/?#]+)/i);
-    if (!match?.[1]) return null;
-    const slug = decodeURIComponent(match[1]).replace(/\/$/, "");
-    if (!slug || slug === "company") return null;
-    return `https://www.linkedin.com/company/${slug}`;
-  } catch {
-    return null;
-  }
-}
-
-export function parseYouTubeFromUrl(url: string | null | undefined): {
-  handle?: string;
-  channelId?: string;
-  url?: string;
-} | null {
-  if (!url) return null;
-  try {
-    const u = new URL(url.startsWith("http") ? url : `https://${url}`);
-    if (!u.hostname.includes("youtube.com") && !u.hostname.includes("youtu.be")) {
-      return null;
-    }
-    const handleMatch = u.pathname.match(/\/@([^/?#]+)/);
-    if (handleMatch?.[1]) {
-      return {
-        handle: handleMatch[1],
-        url: `https://www.youtube.com/@${handleMatch[1]}`,
-      };
-    }
-    const channelMatch = u.pathname.match(/\/channel\/(UC[^/?#]+)/);
-    if (channelMatch?.[1]) {
-      return {
-        channelId: channelMatch[1],
-        url: `https://www.youtube.com/channel/${channelMatch[1]}`,
-      };
-    }
-    const cMatch = u.pathname.match(/\/c\/([^/?#]+)/);
-    if (cMatch?.[1]) {
-      return {
-        handle: cMatch[1],
-        url: `https://www.youtube.com/c/${cMatch[1]}`,
-      };
-    }
-    return { url: u.toString() };
-  } catch {
-    return null;
-  }
-}
-
-function slugifyCompanyName(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/&/g, " and ")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80);
-}
-
-async function discoverViaGoogle(
-  pageName: string,
-): Promise<{
-  linkedinUrls: string[];
-  youtube: ReturnType<typeof parseYouTubeFromUrl>;
-  twitterHandle: string | null;
-}> {
-  const linkedinUrls: string[] = [];
-  let youtube: ReturnType<typeof parseYouTubeFromUrl> = null;
-  let twitterHandle: string | null = null;
-
-  const queries = [
-    `"${pageName}" site:linkedin.com/company`,
-    `${pageName} linkedin company`,
-    `"${pageName}" (site:twitter.com OR site:x.com)`,
-    `${pageName} twitter OR "x.com"`,
-    `"${pageName}" site:youtube.com`,
-    `${pageName} youtube channel`,
-  ];
-
-  for (const q of queries) {
-    if (linkedinUrls.length >= 3 && youtube && twitterHandle) break;
-    try {
-      const res = await googleSearch(q, "US");
-      const results = normalizeList<{ url?: string; title?: string }>(
-        res.data?.results,
-      );
-      for (const r of results) {
-        const url = r.url || "";
-        const li = normalizeLinkedInCompanyUrl(url);
-        if (li && !linkedinUrls.includes(li)) linkedinUrls.push(li);
-        if (!youtube) {
-          const yt = parseYouTubeFromUrl(url);
-          if (yt && (yt.handle || yt.channelId || yt.url)) youtube = yt;
-        }
-        if (!twitterHandle) {
-          try {
-            const u = new URL(url.startsWith("http") ? url : `https://${url}`);
-            if (
-              u.hostname.includes("twitter.com") ||
-              u.hostname.includes("x.com")
-            ) {
-              const handle = u.pathname
-                .split("/")
-                .filter(Boolean)[0]
-                ?.replace(/^@/, "");
-              if (
-                handle &&
-                !/^(intent|share|i|home|search|explore)$/i.test(handle)
-              ) {
-                twitterHandle = handle;
-              }
-            }
-          } catch {
-            // ignore
-          }
-        }
+    const scraped = await firecrawlScrapeBranding(website);
+    const data = scraped.data;
+    for (const raw of data?.links || []) {
+      if (typeof raw === "string" && detectSocialNetwork(raw)) {
+        hrefs.push(raw);
       }
-    } catch {
-      // continue
     }
+    if (data?.html) {
+      const assets = extractBrandAssetsFromHtml(data.html, website);
+      for (const s of assets.socialLinks || []) {
+        if (s.href) hrefs.push(s.href);
+      }
+    }
+  } catch (err) {
+    console.warn(
+      "[brandReview] Firecrawl branding scrape failed:",
+      (err as Error).message,
+    );
   }
 
-  return { linkedinUrls, youtube, twitterHandle };
+  return Array.from(new Set(hrefs));
 }
 
-async function fetchLinkedInMetrics(
-  urls: Array<string | null | undefined>,
-): Promise<{
-  url: string | null;
-  employees: number | null;
-  followers: number | null;
-  website: string | null;
-}> {
-  const tried = new Set<string>();
-  for (const raw of urls) {
-    const url = normalizeLinkedInCompanyUrl(raw);
-    if (!url || tried.has(url)) continue;
-    tried.add(url);
-    try {
-      const li = await getLinkedInCompany(url);
-      const employees = safeNum(li.data?.employeeCount);
-      const followers = safeNum(li.data?.followers);
-      const website = normalizeWebsiteUrl(
-        typeof li.data?.website === "string" ? li.data.website : null,
-      );
-      if (employees != null || followers != null || li.data?.name) {
-        return {
-          url: li.data?.url ? String(li.data.url) : url,
-          employees,
-          followers,
-          website,
-        };
-      }
-    } catch {
-      // try next
-    }
+function mergeParams(
+  ...parts: SociavaultSocialParams[]
+): SociavaultSocialParams {
+  const out: SociavaultSocialParams = {};
+  for (const p of parts) {
+    if (p.facebook && !out.facebook) out.facebook = p.facebook;
+    if (p.instagram && !out.instagram) out.instagram = p.instagram;
+    if (p.twitter && !out.twitter) out.twitter = p.twitter;
+    if (p.youtube && !out.youtube) out.youtube = p.youtube;
+    if (p.linkedin && !out.linkedin) out.linkedin = p.linkedin;
   }
-  return { url: null, employees: null, followers: null, website: null };
+  return out;
 }
 
-export async function runBrandReview(input: {
-  pageId: string;
-  pageName: string;
-  pageProfileUri?: string | null;
-  /** Seed values from the ad platform when Meta page lookup isn't available */
-  websiteHint?: string | null;
-  linkedinUrlHint?: string | null;
-  youtubeUrlHint?: string | null;
-  youtubeHandleHint?: string | null;
-  instagramHandleHint?: string | null;
-  categoryHint?: string | null;
-  /** When set, avoid inventing cross-platform social links */
-  sourcePlatform?: import("../platforms").AdPlatform | string;
-}): Promise<BrandReview> {
-  const brand: BrandReview = {};
-  const isGoogleFamily =
-    input.sourcePlatform === "google" || input.sourcePlatform === "youtube";
-  const isLinkedInSource = input.sourcePlatform === "linkedin";
-
-  if (input.websiteHint) {
-    brand.website = normalizeWebsiteUrl(input.websiteHint);
-  }
-  if (input.categoryHint) brand.category = input.categoryHint;
-  if (input.instagramHandleHint) {
-    brand.instagramHandle = input.instagramHandleHint.replace(/^@/, "");
-  }
-  if (input.linkedinUrlHint) {
-    brand.linkedinUrl = normalizeLinkedInCompanyUrl(input.linkedinUrlHint);
-  }
-  // Only seed YouTube from a real youtube.com / youtu.be URL
-  if (input.youtubeUrlHint || input.youtubeHandleHint) {
-    const yt = parseYouTubeFromUrl(input.youtubeUrlHint);
-    if (yt?.url || yt?.handle || yt?.channelId) {
-      brand.youtubeUrl = yt.url || input.youtubeUrlHint || null;
-      brand.youtubeHandle =
-        input.youtubeHandleHint?.replace(/^@/, "") || yt.handle || null;
-    } else if (input.youtubeHandleHint) {
-      brand.youtubeHandle = input.youtubeHandleHint.replace(/^@/, "");
-    }
-  }
-
-  let companyMeta: {
-    category?: string | null;
-    likes?: number | null;
-    ig_username?: string | null;
-    ig_followers?: number | null;
-  } = {};
-
-  // Meta company search is unreliable for Google Transparency advertiser names —
-  // skip it for Google/YouTube to avoid attaching the wrong Facebook page.
-  if (!isGoogleFamily) {
+async function fetchMetricsFromParams(
+  params: SociavaultSocialParams,
+  brand: BrandReview,
+): Promise<void> {
+  if (params.facebook?.url) {
+    brand.facebookUrl = params.facebook.url;
     try {
-      const companies = await searchCompanies(input.pageName);
-      const results = normalizeList<{
-        page_id?: string;
-        name?: string;
-        category?: string;
-        likes?: number;
-        ig_username?: string;
-        ig_followers?: number;
-      }>(companies.data?.searchResults);
-      const match =
-        results.find((c) => String(c.page_id) === String(input.pageId)) ??
-        results.find(
-          (c) =>
-            c.name &&
-            c.name.toLowerCase().trim() ===
-              input.pageName.toLowerCase().trim(),
-        ) ??
-        null;
-      if (match) {
-        companyMeta = {
-          category: match.category ?? null,
-          likes: safeNum(match.likes),
-          ig_username: match.ig_username ?? null,
-          ig_followers: safeNum(match.ig_followers),
-        };
-        brand.category = companyMeta.category || brand.category;
-        if (companyMeta.ig_username) {
-          brand.instagramHandle =
-            brand.instagramHandle || companyMeta.ig_username;
-          brand.instagramFollowers = companyMeta.ig_followers;
-        }
-        if (companyMeta.likes != null) brand.facebookLikes = companyMeta.likes;
-      }
-    } catch {
-      // continue without company metadata
-    }
-  }
-
-  let website: string | null = brand.website ?? null;
-  let pageIntro: string | null = null;
-
-  // Only resolve Facebook when we have a real FB profile URI (not Google advertiser IDs)
-  const fbUrl =
-    input.pageProfileUri &&
-    (input.pageProfileUri.includes("facebook.com") ||
-      input.pageProfileUri.includes("fb.com"))
-      ? input.pageProfileUri
-      : !isGoogleFamily && !isLinkedInSource && String(input.pageId).match(/^\d+$/)
-        ? `https://www.facebook.com/${input.pageId}`
-        : null;
-
-  if (fbUrl) {
-    try {
-      const fb = await getFacebookProfile(fbUrl);
-      brand.facebookUrl = fb.data?.url || fbUrl;
+      const fb = await getFacebookProfile(params.facebook.url);
+      brand.facebookUrl = fb.data?.url || params.facebook.url;
       brand.facebookFollowers = safeNum(fb.data?.followerCount);
-      brand.facebookLikes =
-        safeNum(fb.data?.likeCount) ?? brand.facebookLikes ?? null;
+      brand.facebookLikes = safeNum(fb.data?.likeCount);
       brand.category = fb.data?.category || brand.category;
-      website = normalizeWebsiteUrl(fb.data?.website) ?? website;
-      pageIntro = fb.data?.pageIntro ?? null;
-      brand.website = website;
+      if (!brand.website && fb.data?.website) {
+        brand.website = normalizeWebsiteUrl(fb.data.website);
+      }
     } catch {
-      // Don't keep a dead/guessed FB URL
-      brand.facebookUrl = null;
+      // keep url present; metrics stay null → UI shows Unavailable
     }
   }
 
-  // 1) LLM guess — for Google family, only allow website / LinkedIn enrichment
-  let ids: {
-    facebookUrl?: string | null;
-    instagramHandle?: string | null;
-    twitterHandle?: string | null;
-    youtubeHandle?: string | null;
-    youtubeUrl?: string | null;
-    youtubeChannelId?: string | null;
-    linkedinUrl?: string | null;
-    website?: string | null;
-  };
-  try {
-    ids = await resolveSocialIdentifiers({
-      pageName: input.pageName,
-      pageId: input.pageId,
-      pageProfileUri: brand.facebookUrl || input.pageProfileUri,
-      website,
-      category: brand.category,
-      igUsername: brand.instagramHandle || companyMeta.ig_username,
-      pageIntro,
-    });
-  } catch {
-    ids = {
-      facebookUrl: brand.facebookUrl,
-      instagramHandle: brand.instagramHandle,
-      website,
-      linkedinUrl: brand.linkedinUrl,
-      youtubeUrl: brand.youtubeUrl,
-      youtubeHandle: brand.youtubeHandle,
-    };
-  }
-
-  if (!isGoogleFamily) {
-    brand.facebookUrl = ids.facebookUrl || brand.facebookUrl;
-    brand.instagramHandle = ids.instagramHandle || brand.instagramHandle;
-    brand.twitterHandle = ids.twitterHandle || null;
-  } else {
-    // Never adopt LLM-invented Facebook URLs for Transparency advertisers
-    brand.facebookUrl = null;
-    brand.twitterHandle = ids.twitterHandle || null;
-  }
-
-  // YouTube: only keep parseable youtube URLs (not random landing pages)
-  const llmYt = parseYouTubeFromUrl(ids.youtubeUrl);
-  if (llmYt?.url) {
-    brand.youtubeUrl = brand.youtubeUrl || llmYt.url;
-    brand.youtubeHandle = brand.youtubeHandle || llmYt.handle || null;
-  } else if (ids.youtubeHandle && !isGoogleFamily) {
-    brand.youtubeHandle = ids.youtubeHandle || brand.youtubeHandle;
-  }
-
-  brand.linkedinUrl =
-    brand.linkedinUrl ||
-    normalizeLinkedInCompanyUrl(ids.linkedinUrl) ||
-    null;
-  const llmWebsite = normalizeWebsiteUrl(ids.website);
-  brand.website = normalizeWebsiteUrl(brand.website) || llmWebsite;
-
-  // 2) Always Google-discover LinkedIn (+ X / YouTube as needed)
-  const needYt =
-    input.sourcePlatform === "youtube" &&
-    !(brand.youtubeHandle || brand.youtubeUrl || ids.youtubeChannelId);
-  const discovered = await discoverViaGoogle(input.pageName);
-  const linkedinCandidates = [
-    brand.linkedinUrl,
-    ...discovered.linkedinUrls,
-    normalizeLinkedInCompanyUrl(ids.linkedinUrl),
-  ];
-  if (!brand.twitterHandle && discovered.twitterHandle) {
-    brand.twitterHandle = discovered.twitterHandle;
-  }
-  if (needYt && discovered.youtube) {
-    brand.youtubeHandle = discovered.youtube.handle || brand.youtubeHandle;
-    brand.youtubeUrl = discovered.youtube.url || brand.youtubeUrl;
-    if (discovered.youtube.channelId) {
-      ids = { ...ids, youtubeChannelId: discovered.youtube.channelId };
-    }
-  }
-
-  // 3) Slug fallback last — only Meta, and only if discovery failed
-  if (
-    !linkedinCandidates.some(Boolean) &&
-    !isGoogleFamily &&
-    !isLinkedInSource
-  ) {
-    const slug = slugifyCompanyName(input.pageName);
-    if (slug.length >= 3) {
-      linkedinCandidates.push(`https://www.linkedin.com/company/${slug}`);
-    }
-  }
-
-  if (brand.instagramHandle && brand.instagramFollowers == null) {
+  if (params.instagram?.handle) {
+    brand.instagramHandle = params.instagram.handle;
     try {
-      const ig = await getInstagramProfile(brand.instagramHandle);
+      const ig = await getInstagramProfile(params.instagram.handle);
       brand.instagramFollowers = safeNum(
         ig.data?.data?.user?.edge_followed_by?.count,
       );
@@ -408,13 +115,14 @@ export async function runBrandReview(input: {
         brand.website = normalizeWebsiteUrl(ig.data.data.user.external_url);
       }
     } catch {
-      // ignore
+      /* leave null */
     }
   }
 
-  if (brand.twitterHandle) {
+  if (params.twitter?.handle) {
+    brand.twitterHandle = params.twitter.handle;
     try {
-      const tw = await getTwitterProfile(brand.twitterHandle);
+      const tw = await getTwitterProfile(params.twitter.handle);
       brand.twitterFollowers = safeNum(tw.data?.legacy?.followers_count);
       if (tw.data?.core?.screen_name) {
         brand.twitterHandle = String(tw.data.core.screen_name).replace(
@@ -423,72 +131,294 @@ export async function runBrandReview(input: {
         );
       }
     } catch {
-      console.warn(
-        "[brandReview] twitter profile failed for",
-        brand.twitterHandle,
-      );
+      /* leave null */
     }
   }
 
-  // YouTube metrics — only when we have a real YouTube identity
-  const ytHandle = brand.youtubeHandle;
-  const ytUrl = parseYouTubeFromUrl(brand.youtubeUrl)?.url || brand.youtubeUrl;
-  const ytChannelId = ids.youtubeChannelId;
-  const hasYtIdentity = Boolean(
-    ytChannelId || ytHandle || parseYouTubeFromUrl(ytUrl || null),
-  );
   if (
-    hasYtIdentity &&
-    (!isGoogleFamily || input.sourcePlatform === "youtube")
+    params.youtube &&
+    (params.youtube.channelId || params.youtube.handle || params.youtube.url)
   ) {
+    brand.youtubeHandle = params.youtube.handle || brand.youtubeHandle;
+    brand.youtubeUrl = params.youtube.url || brand.youtubeUrl;
     try {
       const yt = await getYoutubeChannel({
-        channelId: ytChannelId || undefined,
-        handle: ytHandle || undefined,
-        url: ytUrl || undefined,
+        channelId: params.youtube.channelId,
+        handle: params.youtube.handle,
+        url: params.youtube.url,
       });
       brand.youtubeSubscribers = safeNum(yt.data?.subscriberCount);
       brand.youtubeUrl =
         (yt.data?.url as string | undefined) ||
         (yt.data?.channel as string | undefined) ||
         brand.youtubeUrl;
-      if (yt.data?.handle)
+      if (yt.data?.handle) {
         brand.youtubeHandle = String(yt.data.handle).replace(/^@/, "");
-    } catch {
-      if (ytHandle && ytUrl) {
-        try {
-          const yt = await getYoutubeChannel({ handle: ytHandle });
-          brand.youtubeSubscribers = safeNum(yt.data?.subscriberCount);
-          if (yt.data?.handle) {
-            brand.youtubeHandle = String(yt.data.handle).replace(/^@/, "");
-          }
-        } catch {
-          // leave null
-        }
       }
+    } catch {
+      /* leave null */
     }
   }
 
-  // LinkedIn employees — try discovered URLs until one returns metrics
-  const li = await fetchLinkedInMetrics(linkedinCandidates);
-  if (li.url) {
-    brand.linkedinUrl = li.url;
-    brand.linkedinEmployees = li.employees;
-    brand.linkedinFollowers = li.followers;
-    if (!brand.website && li.website) brand.website = li.website;
-  } else {
-    brand.linkedinUrl = null;
-    brand.linkedinEmployees = null;
-    brand.linkedinFollowers = null;
-    console.warn("[brandReview] LinkedIn company fetch empty for", input.pageName);
+  if (params.linkedin?.url) {
+    brand.linkedinUrl = params.linkedin.url;
+    try {
+      const li = await getLinkedInCompany(params.linkedin.url);
+      brand.linkedinUrl = li.data?.url ? String(li.data.url) : params.linkedin.url;
+      brand.linkedinEmployees = safeNum(li.data?.employeeCount);
+      brand.linkedinFollowers = safeNum(li.data?.followers);
+      if (!brand.website && li.data?.website) {
+        brand.website = normalizeWebsiteUrl(
+          typeof li.data.website === "string" ? li.data.website : null,
+        );
+      }
+    } catch {
+      /* leave null */
+    }
+  }
+}
+
+/**
+ * Brand review for one competitor:
+ * 1) Firecrawl Branding API → social links from website
+ * 2) Normalize to Sociavault query params
+ * 3) Fetch followers / likes / LinkedIn employees + followers
+ *
+ * Missing socials stay null (UI renders "Not present").
+ */
+export async function runBrandReview(input: {
+  pageId: string;
+  pageName: string;
+  pageProfileUri?: string | null;
+  websiteHint?: string | null;
+  linkedinUrlHint?: string | null;
+  youtubeUrlHint?: string | null;
+  youtubeHandleHint?: string | null;
+  instagramHandleHint?: string | null;
+  facebookUrlHint?: string | null;
+  twitterHandleHint?: string | null;
+  categoryHint?: string | null;
+  sourcePlatform?: import("../platforms").AdPlatform | string;
+}): Promise<BrandReview> {
+  const brand: BrandReview = {
+    website: normalizeWebsiteUrl(input.websiteHint) || null,
+    category: input.categoryHint || null,
+  };
+
+  const hintParams = socialLinksToSociavaultParams([
+    input.facebookUrlHint,
+    input.pageProfileUri,
+    input.linkedinUrlHint,
+    input.youtubeUrlHint,
+  ]);
+  if (input.instagramHandleHint) {
+    const ig = extractInstagramHandle(input.instagramHandleHint);
+    if (ig) hintParams.instagram = { handle: ig };
+  }
+  if (input.twitterHandleHint) {
+    const tw = extractTwitterHandle(input.twitterHandleHint);
+    if (tw) hintParams.twitter = { handle: tw };
+  }
+  if (input.youtubeHandleHint && !hintParams.youtube) {
+    hintParams.youtube = extractYouTubeParams(input.youtubeHandleHint);
   }
 
-  // Final website guard — never keep directories
-  brand.website = normalizeWebsiteUrl(brand.website);
+  // Meta numeric page ids → facebook.com/{id}
+  if (
+    !hintParams.facebook &&
+    input.sourcePlatform !== "google" &&
+    input.sourcePlatform !== "youtube" &&
+    input.sourcePlatform !== "linkedin" &&
+    String(input.pageId).match(/^\d+$/)
+  ) {
+    hintParams.facebook = {
+      url: `https://www.facebook.com/${input.pageId}`,
+    };
+  }
 
+  let firecrawlParams: SociavaultSocialParams = {};
+  if (brand.website) {
+    const hrefs = await collectSocialHrefsFromWebsite(brand.website);
+    firecrawlParams = socialLinksToSociavaultParams(hrefs);
+  }
+
+  // Prefer Firecrawl-discovered links; fill gaps from ad/platform hints
+  const params = mergeParams(firecrawlParams, hintParams);
+
+  // Google/YouTube: only keep Facebook when Firecrawl found it on the website
+  if (
+    input.sourcePlatform === "google" ||
+    input.sourcePlatform === "youtube"
+  ) {
+    params.facebook = firecrawlParams.facebook || null;
+  }
+
+  await fetchMetricsFromParams(params, brand);
+
+  brand.website = normalizeWebsiteUrl(brand.website);
+  return brand;
+}
+
+/** Run brand review for every competitor in a finished search job. */
+export async function runBrandReviewForJob(
+  jobId: string,
+  options?: { force?: boolean },
+): Promise<{ updated: number; skipped: number }> {
+  if (isSearchJobSuppressed(jobId)) {
+    return { updated: 0, skipped: 0 };
+  }
+  const job = getJob(jobId);
+  if (!job) return { updated: 0, skipped: 0 };
+
+  const competitors = getCompetitorsByRun(jobId);
+  let updated = 0;
+  let skipped = 0;
+
+  const total = competitors.length;
+  job.progress.stage = "brand_review";
+  job.progress.brandReviewDone = 0;
+  job.progress.brandReviewTotal = total;
+  job.progress.brandReviewCurrentName = null;
+  job.progress.message = `Brand review starting for ${total} competitors…`;
+  job.updatedAt = new Date().toISOString();
+  if (!saveJob(job)) return { updated: 0, skipped: 0 };
+
+  for (let i = 0; i < competitors.length; i++) {
+    if (isSearchJobSuppressed(jobId)) break;
+    const c = competitors[i];
+    const alreadyDone =
+      !options?.force &&
+      Boolean(
+        c.brand?.facebookUrl ||
+          c.brand?.instagramHandle ||
+          c.brand?.twitterHandle ||
+          c.brand?.youtubeUrl ||
+          c.brand?.linkedinUrl ||
+          c.brand?.facebookFollowers != null ||
+          c.brand?.instagramFollowers != null ||
+          c.brand?.linkedinEmployees != null,
+      );
+    // Still re-run when force; otherwise skip rows that already have social metrics
+    if (alreadyDone && hasAnySocialMetric(c.brand) && !options?.force) {
+      skipped += 1;
+      job.progress.brandReviewDone = i + 1;
+      job.progress.brandReviewCurrentName = c.pageName;
+      job.progress.message = `Brand review ${i + 1}/${total}: ${c.pageName} (skipped — already has metrics)`;
+      job.updatedAt = new Date().toISOString();
+      saveJob(job);
+      continue;
+    }
+
+    job.progress.brandReviewDone = i;
+    job.progress.brandReviewTotal = total;
+    job.progress.brandReviewCurrentName = c.pageName;
+    job.progress.message = `Brand review ${i + 1}/${total}: ${c.pageName}…`;
+    job.updatedAt = new Date().toISOString();
+    saveJob(job);
+
+    try {
+      const brand = await runBrandReview({
+        pageId: c.pageId,
+        pageName: c.pageName,
+        pageProfileUri:
+          c.sampleAd?.advertiserPageUrl || c.brand?.facebookUrl || null,
+        websiteHint: c.brand?.website || c.sampleAd?.landingPageUrl || null,
+        linkedinUrlHint: c.brand?.linkedinUrl || null,
+        youtubeUrlHint: c.brand?.youtubeUrl || c.sampleAd?.youtubeUrl || null,
+        youtubeHandleHint: c.brand?.youtubeHandle || null,
+        instagramHandleHint: c.brand?.instagramHandle || null,
+        facebookUrlHint: c.brand?.facebookUrl || null,
+        twitterHandleHint: c.brand?.twitterHandle || null,
+        categoryHint: c.brand?.category || null,
+        sourcePlatform: c.platform,
+      });
+      updateCompetitor(c.id, { brand });
+      updated += 1;
+    } catch (err) {
+      console.warn(
+        "[brandReview] failed for",
+        c.pageName,
+        (err as Error).message,
+      );
+    }
+
+    job.progress.brandReviewDone = i + 1;
+    job.progress.brandReviewCurrentName = c.pageName;
+    job.progress.message = `Brand review ${i + 1}/${total}: ${c.pageName} done`;
+    job.updatedAt = new Date().toISOString();
+    saveJob(job);
+  }
+
+  const fresh = getJob(jobId);
+  if (fresh && !isSearchJobSuppressed(jobId)) {
+    fresh.progress.stage = "done";
+    fresh.progress.brandReviewDone = total;
+    fresh.progress.brandReviewTotal = total;
+    fresh.progress.brandReviewCurrentName = null;
+    fresh.progress.message =
+      fresh.status === "failed"
+        ? fresh.progress.message
+        : `Found ${competitors.length} competitors · brand review ${updated} updated` +
+          (skipped ? ` · ${skipped} skipped` : "");
+    fresh.updatedAt = new Date().toISOString();
+    saveJob(fresh);
+  }
+
+  return { updated, skipped };
+}
+
+function hasAnySocialMetric(brand: BrandReview | undefined): boolean {
+  if (!brand) return false;
+  return (
+    brand.facebookFollowers != null ||
+    brand.facebookLikes != null ||
+    brand.instagramFollowers != null ||
+    brand.twitterFollowers != null ||
+    brand.youtubeSubscribers != null ||
+    brand.linkedinEmployees != null ||
+    brand.linkedinFollowers != null
+  );
+}
+
+/** Enrich a single competitor (history redo). */
+export async function runBrandReviewForCompetitor(
+  competitor: CompetitorRecord,
+): Promise<BrandReview> {
+  const brand = await runBrandReview({
+    pageId: competitor.pageId,
+    pageName: competitor.pageName,
+    pageProfileUri:
+      competitor.sampleAd?.advertiserPageUrl ||
+      competitor.brand?.facebookUrl ||
+      null,
+    websiteHint:
+      competitor.brand?.website ||
+      competitor.sampleAd?.landingPageUrl ||
+      null,
+    linkedinUrlHint: competitor.brand?.linkedinUrl || null,
+    youtubeUrlHint:
+      competitor.brand?.youtubeUrl ||
+      competitor.sampleAd?.youtubeUrl ||
+      null,
+    youtubeHandleHint: competitor.brand?.youtubeHandle || null,
+    instagramHandleHint: competitor.brand?.instagramHandle || null,
+    facebookUrlHint: competitor.brand?.facebookUrl || null,
+    twitterHandleHint: competitor.brand?.twitterHandle || null,
+    categoryHint: competitor.brand?.category || null,
+    sourcePlatform: competitor.platform,
+  });
+  updateCompetitor(competitor.id, { brand });
   return brand;
 }
 
 export function newId() {
   return uuidv4();
+}
+
+/** Patch job progress while batch brand-reviewing (exported for pipelines). */
+export function markJobBrandReviewing(job: SearchJob, message: string) {
+  job.progress.stage = "brand_review";
+  job.progress.message = message;
+  job.updatedAt = new Date().toISOString();
+  saveJob(job);
 }

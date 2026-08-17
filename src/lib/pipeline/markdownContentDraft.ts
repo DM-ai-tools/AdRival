@@ -368,12 +368,12 @@ Return ONLY JSON:
 }
 
 Document rules (critical):
-1) Analyze the markdown into coherent PAGE SECTIONS (hero, features, social proof, FAQ, CTA, footer/links, logos, etc.).
-2) Write brand copy as UNIFIED section prose in "body" — not micro-fragments. FAQs must be full Q&A pairs. Links/logos are structured lists.
+1) Analyze the markdown into a FULL PAGE content plan (hero → body → proof → FAQ → CTA → footer/links/logos). Output must read as one continuous landing page, not isolated slot fragments.
+2) Write brand copy as UNIFIED section prose in "body" with correct relevant messaging for that section. Prefer short paragraphs and natural headings. FAQs must be full Q&A pairs. Links/logos are structured lists.
 3) Never mention competitor "${input.competitorName}". Strong paraphrase; no 3+ consecutive content words from competitor copy (locked keywords are the only exception).
 4) Include a links section (nav/footer/social/service) and a logos section when markdown shows partner/press/brand logos.
 5) FAQ section required when the page has FAQ/accordion content.
-6) COMPLETE sentences only — never truncate mid-thought.
+6) COMPLETE sentences only — never truncate mid-thought. Every section body must contain the actual brand-ready copy that belongs there (not placeholders or notes).
 
 CID / blocks rules:
 7) Fill EVERY cid inventory id exactly once in "blocks".

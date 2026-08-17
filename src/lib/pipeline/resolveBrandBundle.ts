@@ -14,10 +14,16 @@ import {
   getAnthropicModel,
 } from "../anthropic/client";
 import {
+  getOpenAICompatClient,
+  hasOpenAICompatKey,
+  resolveOpenAICompatModel,
+} from "../openrouter/openaiCompat";
+import {
   extractColorsViaFirecrawl,
   fetchBrandfetchColors,
   isChallengeOrEmptyHtml,
   reconcilePaletteWithHtmlEvidence,
+  sanitizeFirecrawlPaletteRoles,
 } from "./brandColorSources";
 import {
   harmonizeBrandPalette,
@@ -106,7 +112,7 @@ async function extractColorsViaLlm(
   businessName?: string | null,
   pageEvidence?: string | null,
 ): Promise<BrandColors | null> {
-  if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) {
+  if (!process.env.ANTHROPIC_API_KEY && !hasOpenAICompatKey()) {
     return null;
   }
   if (!pageEvidence || pageEvidence.trim().length < 80) {
@@ -134,6 +140,23 @@ Rules:
 - background white/light and text dark when that matches the page.
 - If evidence is insufficient, return { "primary": null }.`;
 
+  const parsePalette = (raw: string): BrandColors | null => {
+    const m = raw.match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    const parsed = JSON.parse(m[0]) as Record<string, string | null>;
+    const primary = normalizeHex(parsed.primary || "");
+    if (!primary) return null;
+    return {
+      primary,
+      secondary: normalizeHex(parsed.secondary || "") || primary,
+      accent: normalizeHex(parsed.accent || "") || primary,
+      background: normalizeHex(parsed.background || "") || "#FFFFFF",
+      text: normalizeHex(parsed.text || "") || "#0F172A",
+      muted: normalizeHex(parsed.muted || "") || "#64748B",
+      source: `llm-grounded:${businessUrl}`,
+    };
+  };
+
   try {
     if (process.env.ANTHROPIC_API_KEY) {
       const client = getAnthropicClient();
@@ -146,20 +169,19 @@ Rules:
       const content = completion.content
         .map((b) => (b.type === "text" ? b.text : ""))
         .join("\n");
-      const m = content.match(/\{[\s\S]*\}/);
-      if (!m) return null;
-      const parsed = JSON.parse(m[0]) as Record<string, string | null>;
-      const primary = normalizeHex(parsed.primary || "");
-      if (!primary) return null;
-      return {
-        primary,
-        secondary: normalizeHex(parsed.secondary || "") || primary,
-        accent: normalizeHex(parsed.accent || "") || primary,
-        background: normalizeHex(parsed.background || "") || "#FFFFFF",
-        text: normalizeHex(parsed.text || "") || "#0F172A",
-        muted: normalizeHex(parsed.muted || "") || "#64748B",
-        source: `llm-grounded:${businessUrl}`,
-      };
+      return parsePalette(content);
+    }
+
+    if (hasOpenAICompatKey()) {
+      const client = getOpenAICompatClient();
+      const completion = await client.chat.completions.create({
+        model: resolveOpenAICompatModel("gpt-4o-mini"),
+        temperature: 0,
+        max_tokens: 400,
+        response_format: { type: "json_object" },
+        messages: [{ role: "user", content: prompt }],
+      });
+      return parsePalette(completion.choices[0]?.message?.content || "");
     }
   } catch (err) {
     console.warn("[brand] LLM color fallback failed", err);
@@ -326,9 +348,10 @@ export async function resolveBrandBundle(input: {
     );
   }
 
-  // Trust Firecrawl branding as returned; light harmonize only for non-Firecrawl sources
+  // Firecrawl: sanitize roles (muted chrome vs vivid CTA / readable text).
+  // Other sources: HTML reconcile or harmonize.
   if (/^firecrawl-branding:/i.test(colors.source || "")) {
-    // keep Firecrawl roles intact
+    colors = sanitizeFirecrawlPaletteRoles(colors);
   } else {
     colors = html
       ? reconcilePaletteWithHtmlEvidence(colors, html, businessUrl)

@@ -91,10 +91,10 @@ export function getPlatformAdThresholds(p: AdPlatform): PlatformAdThresholds {
   if (p === "facebook") {
     return {
       minDaysExclusive: 7,
-      minActiveAds: 5,
+      minActiveAds: 10,
       requireDaysGreaterThan: false,
       skipDuration: false,
-      activeAdsInclusive: false,
+      activeAdsInclusive: true,
     };
   }
   // LinkedIn: ≥2 ads, no duration rule
@@ -120,7 +120,7 @@ export function getPlatformAdThresholds(p: AdPlatform): PlatformAdThresholds {
   // Instagram: aligned closer to Facebook relaxed tiers
   return {
     minDaysExclusive: 10,
-    minActiveAds: 5,
+    minActiveAds: 10,
     requireDaysGreaterThan: true,
     skipDuration: false,
     activeAdsInclusive: true,

@@ -21,14 +21,20 @@ import {
   serviceKeywordOverlapScore,
 } from "../openai/analyzer";
 import {
+  getJob,
   isSearchJobSuppressed,
+  isLookupJobSuppressed,
   saveCompetitor,
   saveJob,
   saveLookupAd,
   saveLookupJob,
 } from "../db";
-import { runLookupOffersReportPhase } from "./lookupOffersReport";
 import {
+  buildGuardrailContext,
+  guardCompetitorHeuristic,
+} from "../guardrails";
+import {
+  MAX_SEARCH_QUERIES_GOOGLE,
   TARGET_COMPETITORS,
   type AdCandidate,
   type BrandReview,
@@ -47,7 +53,7 @@ import {
   meetsDurationThreshold,
   parseKeywords,
 } from "../platforms";
-import { newId, runBrandReview } from "./brandReview";
+import { newId } from "./brandReview";
 import {
   mapGoogleCreativeToCandidate,
   sampleAdFromGoogleCandidate,
@@ -55,17 +61,16 @@ import {
 import {
   isYouTubeUrl,
   normalizeWebsiteUrl,
-  sanitizeBrandForPlatform,
 } from "./linkGuards";
 import { enrichLookupPageMetrics } from "./lookupEnrichment";
 
-const MAX_DOMAIN_AD_PAGES = 10;
-const MAX_ADS_PAGES = 15;
-const MAX_DOMAINS_PER_QUERY = 12;
+const MAX_DOMAIN_AD_PAGES = 4;
+const MAX_ADS_PAGES = 6;
+const MAX_DOMAINS_PER_QUERY = 6;
 /** Transparency region that returns creatives across countries (US alone under-counts). */
 const GOOGLE_ADS_REGION = "all";
 /** Cap hard-verify calls per query — each is a SociaVault credit. */
-const MAX_DOMAIN_VERIFY = 8;
+const MAX_DOMAIN_VERIFY = 4;
 
 function normalizeDomainQuery(query: string): string | null {
   const q = query
@@ -431,6 +436,8 @@ export async function runGoogleFamilySearch(
     keywordLocation: options?.keywordLocation || null,
     businessUrl,
     businessProfile,
+    skipGuardrails: Boolean(options?.skipGuardrails),
+    guardrailOverride: options?.guardrailOverride || null,
     status: "running",
     progress: {
       stage: "expanding_queries",
@@ -479,7 +486,7 @@ export async function runGoogleFamilySearch(
       }
     }
 
-    outer: for (const query of Array.from(queries).slice(0, 18)) {
+    outer: for (const query of Array.from(queries).slice(0, MAX_SEARCH_QUERIES_GOOGLE)) {
       if (accepted.length >= TARGET_COMPETITORS) break;
       if (isSearchJobSuppressed(jobId)) break outer;
 
@@ -508,7 +515,7 @@ export async function runGoogleFamilySearch(
       }
 
       // 1) Transparency advertiser IDs first — already keyword-matched, cheap vs domain verify
-      const advertiserBatch = advertisersRaw.slice(0, 14);
+      const advertiserBatch = advertisersRaw.slice(0, 8);
       if (advertiserBatch.length > 0) {
         job.progress.stage = "fetching_ads";
         job.progress.message = `Fetching ads for ${advertiserBatch.length} Transparency advertisers…`;
@@ -684,13 +691,20 @@ export async function runGoogleFamilySearch(
         : accepted.length > 0
           ? "partial"
           : "failed";
-    job.progress.stage = "done";
-    job.progress.message =
-      accepted.length > 0
-        ? `Found ${accepted.length} competitors on ${platform} via domain discovery.`
-        : `No qualifying competitors found on ${platform}.`;
     job.updatedAt = new Date().toISOString();
     saveJob(job);
+
+    if (!isSearchJobSuppressed(jobId)) {
+      const final = getJob(jobId) || job;
+      final.status = job.status;
+      final.progress.stage = "done";
+      final.progress.message =
+        accepted.length > 0
+          ? `Found ${accepted.length} competitors on ${platform}. Brand review & deep location run on demand / during offer analysis.`
+          : `No qualifying competitors found on ${platform}.`;
+      final.updatedAt = new Date().toISOString();
+      saveJob(final);
+    }
   } catch (err) {
     job.status = "failed";
     job.error = (err as Error).message;
@@ -753,7 +767,7 @@ async function tryAcceptFromAds(args: {
     durationQualified.length > 0 ? durationQualified : pool;
 
   const enriched: AdCandidate[] = [];
-  for (const ad of sampleSource.slice(0, 8)) {
+  for (const ad of sampleSource.slice(0, 3)) {
     const details = await enrichGoogleAd(ad);
     if (platform === "youtube" && !isYouTubeCreative(ad, details)) continue;
     enriched.push(mapGoogleCreativeToCandidate(ad, details));
@@ -834,6 +848,29 @@ async function tryAcceptFromAds(args: {
     return;
   }
 
+  const guard = guardCompetitorHeuristic(
+    buildGuardrailContext({
+      businessProfile: job.businessProfile,
+      selectedCategoryLabel: job.selectedCategory?.label || null,
+      searchKeywords: keywords,
+      override: job.guardrailOverride || null,
+      skipGuardrails: Boolean(job.skipGuardrails),
+    }),
+    {
+      pageName,
+      adText: primary.fullText || primary.body,
+      landingPageUrl: primary.landingPageUrl,
+      services: filter.services,
+      llmReason: filter.reason,
+    },
+  );
+  if (!guard.ok) {
+    job.progress.rejected += 1;
+    job.progress.message = `Guardrail blocked ${pageName}: ${guard.reason}`;
+    saveJob(job);
+    return;
+  }
+
   const activeCount = durationQualified.length > 0
     ? durationQualified.length
     : pool.length;
@@ -863,11 +900,7 @@ async function tryAcceptFromAds(args: {
     youtubeUrl: creativeYt,
   };
 
-  const {
-    cheapLocationFromText,
-    resolveAndMatchCompetitorLocation,
-  } = await import("./competitorLocation");
-  const { updateCompetitor } = await import("../db");
+  const { cheapLocationFromText } = await import("./competitorLocation");
 
   const provisional = cheapLocationFromText({
     pageName,
@@ -904,85 +937,11 @@ async function tryAcceptFromAds(args: {
   accepted.push(competitor);
   job.competitorIds.push(competitor.id);
   job.progress.accepted = accepted.length;
-  job.progress.message = `Accepted ${pageName} (${accepted.length}/${TARGET_COMPETITORS}) via ${domain} — location pending…`;
-  saveJob(job);
-
-  // Enrich brand + location after accept
-  job.progress.stage = "brand_review";
-  job.progress.message = `Enriching brand for ${pageName}…`;
-  saveJob(job);
-  try {
-    brand = await runBrandReview({
-      pageId,
-      pageName,
-      websiteHint: website,
-      youtubeUrlHint: creativeYt,
-      youtubeHandleHint: null,
-      categoryHint:
-        platform === "youtube" ? "YouTube advertiser" : "Google advertiser",
-      sourcePlatform: platform,
-    });
-    brand = sanitizeBrandForPlatform(brand, platform, {
-      websiteHint: website,
-      creativeYoutubeUrl: creativeYt,
-    });
-  } catch (err) {
-    job.progress.message = `Partial brand review for ${pageName}: ${(err as Error).message}`;
-    saveJob(job);
-  }
-
-  job.progress.stage = "location_check";
-  job.progress.message = `Resolving location for ${pageName}…`;
-  saveJob(job);
-  let loc = provisional;
-  try {
-    const locResult = await resolveAndMatchCompetitorLocation({
-      pageName,
-      website: brand.website || website,
-      facebookUrl: brand.facebookUrl,
-      linkedinUrl: brand.linkedinUrl,
-      geoMode: job.geoMode || "countrywide",
-      targetLocations: job.targetLocations || [],
-      provisional,
-      skipPerplexityIfResolved: provisional.locationStatus === "matched",
-    });
-    loc = locResult.location;
-  } catch {
-    // keep provisional
-  }
-
-  updateCompetitor(competitor.id, {
-    brand,
-    locationLabel: loc.locationLabel,
-    locationCity: loc.locationCity,
-    locationSuburb: loc.locationSuburb,
-    locationCountry: loc.locationCountry,
-    locationStatus: loc.locationStatus,
-    locationSource: loc.locationSource,
-  });
-  const idx = accepted.findIndex((c) => c.id === competitor.id);
-  if (idx >= 0) {
-    accepted[idx] = {
-      ...accepted[idx],
-      brand,
-      locationLabel: loc.locationLabel,
-      locationCity: loc.locationCity,
-      locationSuburb: loc.locationSuburb,
-      locationCountry: loc.locationCountry,
-      locationStatus: loc.locationStatus,
-      locationSource: loc.locationSource,
-    };
-  }
-
+  // Deep location enrich deferred to offer / page analysis
+  const locNote = provisional.locationLabel
+    ? ` · ${provisional.locationLabel}`
+    : "";
   job.progress.stage = "searching_ads";
-  const locNote =
-    loc.locationStatus === "unknown"
-      ? " · location unknown"
-      : loc.locationStatus === "mismatch"
-        ? ` · location mismatch${loc.locationLabel ? ` (${loc.locationLabel})` : ""}`
-        : loc.locationLabel
-          ? ` · ${loc.locationLabel}`
-          : "";
   job.progress.message = `Accepted ${pageName} (${accepted.length}/${TARGET_COMPETITORS}) via ${domain}${locNote}`;
   saveJob(job);
 }
@@ -992,8 +951,13 @@ export async function runGoogleFamilyLookup(
   queryName: string,
   platform: Extract<AdPlatform, "google" | "youtube">,
   forcedCandidate?: LookupPageCandidate | null,
+  options?: {
+    businessUrl?: string | null;
+    businessProfile?: import("../types").BusinessProfile | null;
+  },
 ) {
   const now = new Date().toISOString();
+  const businessUrl = (options?.businessUrl || "").trim() || null;
   const job: LookupJob = {
     id: lookupId,
     queryName,
@@ -1009,10 +973,18 @@ export async function runGoogleFamilyLookup(
     selectedPage: null,
     candidates: [],
     adIds: [],
+    businessUrl: businessUrl
+      ? /^https?:\/\//i.test(businessUrl)
+        ? businessUrl
+        : `https://${businessUrl}`
+      : null,
+    businessProfile: options?.businessProfile || null,
     createdAt: now,
     updatedAt: now,
   };
   saveLookupJob(job);
+
+  if (isLookupJobSuppressed(lookupId)) return;
 
   try {
     const res = await searchGoogleAdvertisers(queryName);
@@ -1118,6 +1090,7 @@ export async function runGoogleFamilyLookup(
     job.progress.stage = "fetching_ads";
     job.progress.message = `Fetching ads for ${selected.name}…`;
     saveLookupJob(job);
+    if (isLookupJobSuppressed(lookupId)) return;
 
     const isDomain = selected.pageId.startsWith("domain:");
     const domain = isDomain
@@ -1287,24 +1260,18 @@ export async function runGoogleFamilyLookup(
       saveLookupJob(job);
     }
 
-    job.status = "running";
-    job.progress.stage = "analyzing_offers";
     job.progress.adsFetched = stored.length;
-    job.progress.message =
-      stored.length > 0
-        ? `Loaded ${stored.length} ads — analyzing unique creatives & landing pages…`
-        : `Matched "${selected.name}" but found no public ${platform} ads.`;
-    job.updatedAt = new Date().toISOString();
-    saveLookupJob(job);
-
     if (stored.length > 0) {
-      await runLookupOffersReportPhase(job.id, { finalStatus: "completed" });
+      job.status = "completed";
+      job.progress.stage = "done";
+      job.progress.message = `Loaded ${stored.length} ${platform} ads for "${selected.name}". Use Get offer & page details on an ad to analyze its landing page.`;
     } else {
       job.status = "partial";
       job.progress.stage = "done";
-      job.updatedAt = new Date().toISOString();
-      saveLookupJob(job);
+      job.progress.message = `Matched "${selected.name}" but found no public ${platform} ads.`;
     }
+    job.updatedAt = new Date().toISOString();
+    saveLookupJob(job);
   } catch (err) {
     job.status = "failed";
     job.error = (err as Error).message;

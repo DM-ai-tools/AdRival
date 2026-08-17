@@ -328,6 +328,16 @@ export function extractCursor(
   return typeof cursor === "string" && cursor.length > 0 ? cursor : null;
 }
 
+/** Total ACTIVE (or filtered) creatives reported by company-ads / search. */
+export function extractSearchResultsCount(
+  response: AdLibrarySearchResponse,
+): number | null {
+  const raw = response.data?.searchResultsCount;
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.floor(n);
+}
+
 export function extractAdBody(
   snapshot?: AdLibrarySearchResult["snapshot"],
 ): string {

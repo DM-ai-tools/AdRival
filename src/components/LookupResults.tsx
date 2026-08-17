@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useRouter } from "next/navigation";
+import { useEffect, useState, type ReactNode } from "react";
 import type {
   LookupAdRecord,
   LookupJob,
@@ -12,6 +13,7 @@ import {
   LookupOffersDashboard,
   LookupOffersTeaser,
 } from "@/components/LookupOffersReportPanel";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 interface LookupResultsProps {
   job: LookupJob;
@@ -22,6 +24,7 @@ interface LookupResultsProps {
   onJobUpdated?: (job: LookupJob, ads?: LookupAdRecord[]) => void;
   /** Reload lookup job + ads after leaving the offers dashboard */
   onReload?: () => void | Promise<void>;
+  onStop?: () => void;
 }
 
 function fmt(n?: number | null) {
@@ -58,38 +61,160 @@ function hasAnalyzableUrl(ad: LookupAdRecord): boolean {
 function AdCard({
   ad,
   platform,
+  job,
   onAdUpdated,
+  onJobUpdated,
 }: {
   ad: LookupAdRecord;
   platform: AdPlatform;
+  job: LookupJob;
   onAdUpdated?: (ad: LookupAdRecord) => void;
+  onJobUpdated?: (job: LookupJob) => void;
 }) {
+  const router = useRouter();
   const [openRaw, setOpenRaw] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [bridging, setBridging] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmExisting, setConfirmExisting] = useState<{
+    competitorId: string;
+    status: string;
+    sourceAnalyzedUrl: string;
+    pageName: string;
+  } | null>(null);
   const snap = (ad.raw.snapshot ?? ad.raw) as Record<string, unknown>;
   const isMeta = platform === "facebook" || platform === "instagram";
   const isLinkedIn = platform === "linkedin";
   const isGoogle = platform === "google" || platform === "youtube";
   const canAnalyze = hasAnalyzableUrl(ad);
   const analysis = ad.pageAnalysis;
+  const canRecreate = analysis?.status === "completed";
+  const hasBrandUrl = Boolean(
+    (job.businessUrl || job.businessProfile?.url || "").trim(),
+  );
 
   async function runAnalysis(force = false) {
     setError(null);
     setAnalyzing(true);
+    // Optimistic pending so the panel shows progress immediately
+    const pendingUrl =
+      ad.pageAnalysis?.analyzedUrl ||
+      ad.landingPageUrl ||
+      ad.youtubeUrl ||
+      ad.advertiserPageUrl ||
+      "";
+    onAdUpdated?.({
+      ...ad,
+      pageAnalysis: {
+        ...(ad.pageAnalysis || {}),
+        status: "pending",
+        analyzedUrl: pendingUrl,
+        analyzedAt: new Date().toISOString(),
+        error: null,
+      },
+    });
+
+    const ac = new AbortController();
+    // Long-running scrape + LLM; keep above server maxDuration
+    const timeout = window.setTimeout(() => ac.abort(), 170_000);
+
+    // Poll this ad while the POST is in flight so UI unsticks if the
+    // response is dropped but the store already has a terminal status.
+    const pollTimer = window.setInterval(async () => {
+      try {
+        const res = await fetch(
+          `/api/lookup/status?lookupId=${encodeURIComponent(ad.lookupId)}`,
+        );
+        if (!res.ok) return;
+        const data = await res.json();
+        const fresh = (data.ads as LookupAdRecord[] | undefined)?.find(
+          (a) => a.id === ad.id,
+        );
+        if (!fresh?.pageAnalysis) return;
+        if (
+          fresh.pageAnalysis.status === "completed" ||
+          fresh.pageAnalysis.status === "failed"
+        ) {
+          onAdUpdated?.(fresh);
+          if (fresh.pageAnalysis.status === "failed") {
+            setError(fresh.pageAnalysis.error || "Analysis failed");
+          }
+          setAnalyzing(false);
+          ac.abort();
+        } else if (fresh.pageAnalysis.status === "pending") {
+          onAdUpdated?.(fresh);
+        }
+      } catch {
+        /* ignore poll errors */
+      }
+    }, 2500);
+
     try {
       const res = await fetch("/api/lookup/analyze-page", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ adId: ad.id, force }),
+        signal: ac.signal,
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Analysis failed");
       if (data.ad) onAdUpdated?.(data.ad as LookupAdRecord);
     } catch (err) {
+      if ((err as Error).name !== "AbortError") {
+        setError((err as Error).message);
+      }
+      // AbortError: poll may already have applied completed/failed — no extra noise
+    } finally {
+      window.clearTimeout(timeout);
+      window.clearInterval(pollTimer);
+      setAnalyzing(false);
+    }
+  }
+
+  async function startRecreation(confirmRedesign = false) {
+    setError(null);
+    if (!hasBrandUrl) {
+      setError(
+        "Add your brand website above (Your brand website) before Content / Design.",
+      );
+      return;
+    }
+    setBridging(true);
+    try {
+      const res = await fetch("/api/lookup/recreate-bridge", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          adId: ad.id,
+          businessUrl: job.businessUrl || job.businessProfile?.url,
+          confirmRedesign,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not open recreation");
+
+      if (data.lookupJob) onJobUpdated?.(data.lookupJob as LookupJob);
+      if (data.ad) onAdUpdated?.(data.ad as LookupAdRecord);
+
+      if (data.needsConfirm && data.existing) {
+        setConfirmExisting({
+          competitorId: String(data.existing.competitorId),
+          status: String(data.existing.status),
+          sourceAnalyzedUrl: String(data.existing.sourceAnalyzedUrl || ""),
+          pageName: String(data.existing.pageName || "this page"),
+        });
+        setConfirmOpen(true);
+        return;
+      }
+
+      if (data.recreatePath) {
+        router.push(String(data.recreatePath));
+      }
+    } catch (err) {
       setError((err as Error).message);
     } finally {
-      setAnalyzing(false);
+      setBridging(false);
     }
   }
 
@@ -218,7 +343,7 @@ function AdCard({
         <button
           type="button"
           className="search-btn lookup-analyze-btn"
-          disabled={!canAnalyze || analyzing}
+          disabled={!canAnalyze || analyzing || bridging}
           title={
             canAnalyze
               ? "Fetch landing page and extract offer + page architecture"
@@ -232,6 +357,27 @@ function AdCard({
               ? "Refresh offer & page details"
               : "Get offer & page details"}
         </button>
+        {canRecreate ? (
+          <>
+            <button
+              type="button"
+              className="search-btn lp-recreate-link"
+              disabled={bridging}
+              title={
+                hasBrandUrl
+                  ? "Generate brand content draft for this landing page"
+                  : "Set your brand website first"
+              }
+              onClick={() => void startRecreation(false)}
+            >
+              {bridging
+                ? "Opening…"
+                : ad.recreationCompetitorId
+                  ? "Content & design again"
+                  : "Content & design"}
+            </button>
+          </>
+        ) : null}
         <button
           type="button"
           className="ghost-btn raw-toggle"
@@ -247,11 +393,65 @@ function AdCard({
         </p>
       )}
 
+      {bridging ? (
+        <div
+          className="recreate-status panel recreate-progress-panel"
+          aria-live="polite"
+        >
+          <div className="offers-analysis-progress-head">
+            <span className="offers-analysis-progress-label">
+              Content creation
+            </span>
+            <span className="offers-analysis-progress-count">…</span>
+          </div>
+          <div className="progress-bar-track offers-analysis-bar">
+            <div
+              className="progress-bar-fill progress-bar-offers"
+              style={{ width: "18%" }}
+            />
+          </div>
+          <p className="muted recreate-progress-msg">
+            Opening content &amp; design for this landing page…
+          </p>
+        </div>
+      ) : null}
+
       {analysis && <PageAnalysisPanel analysis={analysis} />}
 
       {openRaw && (
         <pre className="lookup-raw-json">{JSON.stringify(ad.raw, null, 2)}</pre>
       )}
+
+      <ConfirmDialog
+        open={confirmOpen}
+        title="Landing page already recreated"
+        description={
+          confirmExisting
+            ? `A ${confirmExisting.status.replace(/_/g, " ")} recreation already exists for this landing page${
+                confirmExisting.sourceAnalyzedUrl
+                  ? ` (${confirmExisting.sourceAnalyzedUrl})`
+                  : ""
+              }. Confirm only if you want to redesign it again for your brand.`
+            : "This landing page was already recreated. Confirm to redesign."
+        }
+        confirmLabel="Redesign anyway"
+        cancelLabel="Open existing"
+        busy={bridging}
+        tone="danger"
+        onDismiss={() => setConfirmOpen(false)}
+        onCancel={() => {
+          setConfirmOpen(false);
+          if (confirmExisting?.competitorId) {
+            router.push(
+              `/recreate/${encodeURIComponent(confirmExisting.competitorId)}`,
+            );
+          }
+        }}
+        onConfirm={() => {
+          setConfirmOpen(false);
+          void startRecreation(true);
+        }}
+      />
     </article>
   );
 }
@@ -264,6 +464,7 @@ export function LookupResults({
   onAdUpdated,
   onJobUpdated,
   onReload,
+  onStop,
 }: LookupResultsProps) {
   const page = job.selectedPage;
   const running = job.status === "running";
@@ -271,7 +472,17 @@ export function LookupResults({
   const platform = (job.platform || "facebook") as AdPlatform;
   const [regeneratingReport, setRegeneratingReport] = useState(false);
   const [reportError, setReportError] = useState<string | null>(null);
+  const [stopping, setStopping] = useState(false);
   const [showOffersDash, setShowOffersDash] = useState(false);
+  const [brandUrlDraft, setBrandUrlDraft] = useState(
+    job.businessUrl || job.businessProfile?.url || "",
+  );
+  const [savingBrandUrl, setSavingBrandUrl] = useState(false);
+  const [brandUrlError, setBrandUrlError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setBrandUrlDraft(job.businessUrl || job.businessProfile?.url || "");
+  }, [job.businessUrl, job.businessProfile?.url]);
   const isLinkedIn = platform === "linkedin";
   const liFollowers =
     page?.raw?.linkedinFollowers != null
@@ -287,6 +498,20 @@ export function LookupResults({
       : null;
 
   const others = job.candidates.filter((c) => c.pageId !== page?.pageId);
+
+  async function stopLookup() {
+    setStopping(true);
+    try {
+      await fetch("/api/stop", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ lookupId: job.id }),
+      });
+      onStop?.();
+    } finally {
+      setStopping(false);
+    }
+  }
 
   async function regenerateOffersReport(force = true) {
     setReportError(null);
@@ -315,6 +540,33 @@ export function LookupResults({
   async function handleBackFromOffers() {
     setShowOffersDash(false);
     await onReload?.();
+  }
+
+  async function saveBrandWebsite() {
+    const url = brandUrlDraft.trim();
+    if (!url) {
+      setBrandUrlError("Enter your brand website URL");
+      return;
+    }
+    setBrandUrlError(null);
+    setSavingBrandUrl(true);
+    try {
+      const res = await fetch("/api/lookup/brand", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ lookupId: job.id, businessUrl: url }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to save brand website");
+      if (data.job) onJobUpdated?.(data.job as LookupJob);
+      setBrandUrlDraft(
+        data.job?.businessUrl || data.job?.businessProfile?.url || url,
+      );
+    } catch (err) {
+      setBrandUrlError((err as Error).message);
+    } finally {
+      setSavingBrandUrl(false);
+    }
   }
 
   const showOffersTeaser =
@@ -352,8 +604,84 @@ export function LookupResults({
             Lookup: {job.queryName}{" "}
             <span className="muted-inline">({platform})</span>
           </h2>
-          <span className={`status-pill status-${job.status}`}>{job.status}</span>
+          <div className="progress-head-actions">
+            {running || analyzingOffers ? (
+              <button
+                type="button"
+                className="danger-btn"
+                disabled={stopping}
+                onClick={() => void stopLookup()}
+              >
+                {stopping ? "Stopping…" : "Stop"}
+              </button>
+            ) : null}
+            <span className={`status-pill status-${job.status}`}>{job.status}</span>
+          </div>
         </div>
+        <div className="lookup-brand-bar">
+          <label htmlFor="lookup-results-brand-url" className="search-label">
+            Your brand website{" "}
+            <span className="muted">(required for Content &amp; Design)</span>
+          </label>
+          <div className="search-row">
+            <input
+              id="lookup-results-brand-url"
+              type="url"
+              className="search-input"
+              value={brandUrlDraft}
+              onChange={(e) => setBrandUrlDraft(e.target.value)}
+              placeholder="https://yourbrand.com"
+              disabled={savingBrandUrl || running}
+            />
+            <button
+              type="button"
+              className="ghost-btn"
+              disabled={savingBrandUrl || running || !brandUrlDraft.trim()}
+              onClick={() => void saveBrandWebsite()}
+            >
+              {savingBrandUrl ? "Saving…" : "Save brand"}
+            </button>
+          </div>
+          {brandUrlError ? (
+            <p className="error-text" role="alert">
+              {brandUrlError}
+            </p>
+          ) : (
+            <p className="muted form-hint">
+              After analyzing a competitor landing page, use{" "}
+              <strong>Content &amp; design</strong> on an ad. If that URL was
+              already recreated, you&apos;ll be asked to confirm a redesign.
+            </p>
+          )}
+        </div>
+        {analyzingOffers || regeneratingReport ? (
+          <div className="offers-analysis-progress" aria-live="polite">
+            <div className="offers-analysis-progress-head">
+              <span className="offers-analysis-progress-label">
+                Offers analysis
+                {job.progress.offersCurrentName
+                  ? ` · ${job.progress.offersCurrentName}`
+                  : ""}
+              </span>
+              <span className="offers-analysis-progress-count">
+                {job.progress.offersTotal
+                  ? `${job.progress.offersDone ?? 0}/${job.progress.offersTotal}`
+                  : `${Math.max(job.progress.offersPct ?? 8, 4)}%`}
+              </span>
+            </div>
+            <div className="progress-bar-track offers-analysis-bar">
+              <div
+                className="progress-bar-fill progress-bar-offers"
+                style={{
+                  width: `${Math.min(
+                    100,
+                    Math.max(job.progress.offersPct ?? 8, 4),
+                  )}%`,
+                }}
+              />
+            </div>
+          </div>
+        ) : null}
         <p className="progress-message">{job.progress.message}</p>
         <dl className="progress-stats">
           <div>
@@ -477,6 +805,7 @@ export function LookupResults({
             report={job.offersReport}
             running={analyzingOffers || regeneratingReport}
             generating={regeneratingReport}
+            progress={job.progress}
             onOpen={() => {
               setShowOffersDash(true);
               if (typeof window !== "undefined") {
@@ -527,7 +856,9 @@ export function LookupResults({
                 key={ad.id}
                 ad={ad}
                 platform={platform}
+                job={job}
                 onAdUpdated={onAdUpdated}
+                onJobUpdated={(next) => onJobUpdated?.(next)}
               />
             ))}
           </div>

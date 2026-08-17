@@ -1,4 +1,3 @@
-import OpenAI from "openai";
 import { z } from "zod";
 import type {
   BusinessProfile,
@@ -7,16 +6,32 @@ import type {
   LandingPageOfferAnalysis,
   StoredPageArchive,
 } from "../types";
+import { synthesizeDocumentFromBlocks } from "./synthesizeDocumentFromBlocks";
+
+export { synthesizeDocumentFromBlocks } from "./synthesizeDocumentFromBlocks";
 import type { BrandLink, BrandSiteAssets } from "./brandAssets";
 import {
   extractCompetitorPageTextSlots,
   type PageTextSlot,
 } from "./extractPageTextSlots";
 import { clipToCompletePhrase, lengthBudgetForRole } from "./slotTextBudget";
+import { hasOpenRouterKey } from "../openrouter/client";
+import {
+  getOpenAICompatClient,
+  hasOpenAICompatKey,
+  OPENROUTER_OPENAI_CONTENT_MODEL,
+} from "../openrouter/openaiCompat";
 
 const DEFAULT_CONTENT_MODEL = "gpt-4.1";
 
+/** Content/design model — OpenRouter `openai/gpt-4.1` when OPENROUTER_API_KEY is set. */
 export function getOpenAiContentModel(): string {
+  if (hasOpenRouterKey()) {
+    return (
+      process.env.OPENROUTER_OPENAI_CONTENT_MODEL?.trim() ||
+      OPENROUTER_OPENAI_CONTENT_MODEL
+    );
+  }
   return (
     process.env.OPENAI_CONTENT_MODEL?.trim() ||
     process.env.OPENAI_MODEL?.trim() ||
@@ -24,10 +39,15 @@ export function getOpenAiContentModel(): string {
   );
 }
 
+export function hasContentLlmKey(): boolean {
+  return hasOpenAICompatKey();
+}
+
 function getClient() {
-  const key = process.env.OPENAI_API_KEY;
-  if (!key) throw new Error("OPENAI_API_KEY is not set");
-  return new OpenAI({ apiKey: key });
+  if (!hasOpenAICompatKey()) {
+    throw new Error("OPENROUTER_API_KEY or OPENAI_API_KEY is not set");
+  }
+  return getOpenAICompatClient();
 }
 
 const draftSchema = z.object({
@@ -520,6 +540,25 @@ export function buildContentScaffold(
 /**
  * Merge approved nav/footer/social labels + hrefs into BrandSiteAssets for design fit.
  */
+function isUsableBrandPageHref(href: string, businessUrl: string): boolean {
+  try {
+    const u = new URL(href);
+    const b = new URL(
+      businessUrl.startsWith("http") ? businessUrl : `https://${businessUrl}`,
+    );
+    if (
+      u.hostname.replace(/^www\./i, "").toLowerCase() !==
+      b.hostname.replace(/^www\./i, "").toLowerCase()
+    ) {
+      return false;
+    }
+    const path = u.pathname.replace(/\/$/, "") || "/";
+    return path !== "/" && path !== "";
+  } catch {
+    return false;
+  }
+}
+
 export function brandAssetsFromContentDraft(
   draft: LandingContentDraft,
   base: BrandSiteAssets | null,
@@ -533,12 +572,21 @@ export function brandAssetsFromContentDraft(
         label: (b.text || b.label || "").trim() || b.href!,
         href: b.href!,
       }))
-      .filter((l) => l.href && l.label);
+      .filter(
+        (l) =>
+          l.href &&
+          l.label &&
+          isUsableBrandPageHref(l.href, businessUrl),
+      );
 
   const navLinks = pick("nav");
   const footerLinks = pick("footer_link");
   const internalLinks = pick("internal_link");
   const socialLinks = pick("social");
+
+  // Prefer Firecrawl/base brand pages when the draft collapsed every href to home
+  const draftFooterOk = footerLinks.length >= 2;
+  const draftNavOk = navLinks.length >= 2;
 
   return {
     finalUrl: base?.finalUrl || businessUrl,
@@ -546,10 +594,19 @@ export function brandAssetsFromContentDraft(
     logoUrl: base?.logoUrl || null,
     faviconUrl: base?.faviconUrl || null,
     ogImageUrl: base?.ogImageUrl || null,
-    navLinks: navLinks.length ? navLinks : base?.navLinks || [],
-    footerLinks: footerLinks.length
+    navLinks: draftNavOk ? navLinks : base?.navLinks || navLinks,
+    footerLinks: draftFooterOk
       ? footerLinks
-      : uniqLinks([...(base?.footerLinks || []), ...internalLinks], 14),
+      : uniqLinks(
+          [
+            ...(base?.footerLinks || []).filter((l) =>
+              isUsableBrandPageHref(l.href, businessUrl),
+            ),
+            ...internalLinks,
+            ...footerLinks,
+          ],
+          14,
+        ),
     socialLinks: socialLinks.length ? socialLinks : base?.socialLinks || [],
     servicePages: base?.servicePages || [],
     ctaLinks: base?.ctaLinks || [],
@@ -796,19 +853,27 @@ ${feedback ? `12) HIGHEST PRIORITY user feedback:\n"""${feedback.slice(0, 2500)}
     };
   });
 
+  const pageTypeFinal =
+    pageType || input.analysis.pageArchitecture?.pageType || null;
+  const document = synthesizeDocumentFromBlocks(blocks, {
+    pageType: pageTypeFinal,
+    tone,
+    competitorUrl: input.competitorUrl || input.analysis.analyzedUrl || null,
+  });
+
   return {
     draft: {
       status: "ready",
       createdAt: now,
       updatedAt: now,
       model,
-      pageType:
-        pageType || input.analysis.pageArchitecture?.pageType || null,
+      pageType: pageTypeFinal,
       tone,
       differentiationSummary:
         differentiationSummary ||
-        `${slotNotes}. Copy written to match real placement lengths.`,
+        `${slotNotes}. Copy written as a full page document for review.`,
       blocks,
+      document,
       slotSource,
       slotCount: blocks.filter((b) => b.originalText).length,
       userFeedback: feedback || null,

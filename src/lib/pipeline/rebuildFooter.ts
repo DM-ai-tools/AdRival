@@ -20,6 +20,36 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
+function sameHost(href: string, businessUrl: string): boolean {
+  try {
+    const u = new URL(href);
+    const b = new URL(businessUrl);
+    return (
+      u.hostname.replace(/^www\./i, "").toLowerCase() ===
+      b.hostname.replace(/^www\./i, "").toLowerCase()
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isHomepageHref(href: string, businessUrl: string): boolean {
+  try {
+    const u = new URL(href);
+    const b = new URL(businessUrl);
+    if (
+      u.hostname.replace(/^www\./i, "").toLowerCase() !==
+      b.hostname.replace(/^www\./i, "").toLowerCase()
+    ) {
+      return false;
+    }
+    const path = u.pathname.replace(/\/$/, "") || "/";
+    return path === "/" || path === "";
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Find a footer node that is safe to empty/replace.
  * Never return a page-level wrapper that contains the main landing content.
@@ -74,51 +104,35 @@ export function findSafeFooterRoot($: any): any {
   return best || $();
 }
 
+/** Brand-site pages only — never invent competitor destinations. */
 function filterFooterLinks(
   assets: BrandSiteAssets,
   businessUrl: string,
 ): Array<{ label: string; href: string }> {
-  const footerLinks = assets.footerLinks
+  const pool = [
+    ...(assets.footerLinks || []),
+    ...(assets.navLinks || []),
+    ...(assets.servicePages || []),
+    ...(assets.ctaLinks || []),
+  ];
+
+  const footerLinks = pool
     .filter((l) => {
       if (!l.href || !l.label) return false;
       if (detectSocialNetwork(l.href, l.label)) return false;
-      try {
-        const u = new URL(l.href);
-        const b = new URL(businessUrl);
-        if (
-          u.hostname.replace(/^www\./, "") ===
-            b.hostname.replace(/^www\./, "") &&
-          (u.pathname === "/" || u.pathname === "")
-        ) {
-          return false;
-        }
-      } catch {
-        // keep
-      }
+      if (!sameHost(l.href, businessUrl)) return false;
+      if (isHomepageHref(l.href, businessUrl)) return false;
       return l.label.length >= 2 && l.label.length <= 60;
     })
-    .slice(0, 14);
+    .slice(0, 16);
 
   const seenHref = new Set<string>();
-  const uniqueLinks = footerLinks.filter((l) => {
+  return footerLinks.filter((l) => {
     const key = l.href.replace(/\/$/, "").toLowerCase();
     if (seenHref.has(key)) return false;
     seenHref.add(key);
     return true;
   });
-
-  if (uniqueLinks.length < 4) {
-    for (const l of assets.navLinks) {
-      if (uniqueLinks.length >= 10) break;
-      if (!l.href || !l.label) continue;
-      if (detectSocialNetwork(l.href, l.label)) continue;
-      const key = l.href.replace(/\/$/, "").toLowerCase();
-      if (seenHref.has(key)) continue;
-      seenHref.add(key);
-      uniqueLinks.push(l);
-    }
-  }
-  return uniqueLinks;
 }
 
 function setAnchorLabel($: any, $el: any, text: string): void {
@@ -152,9 +166,19 @@ function setAnchorLabel($: any, $el: any, text: string): void {
   if (!replaced) $el.prepend(text);
 }
 
+function removeFooterAnchor($: any, $el: any): void {
+  const $li = $el.closest("li");
+  if ($li.length && $li.find("a[href]").length <= 1) {
+    $li.remove();
+    return;
+  }
+  $el.replaceWith(`<span style="display:none" data-adrival-removed-footer-link="1"></span>`);
+}
+
 /**
  * Patch footer in place: keep competitor layout/columns; remap logo, links, socials.
- * Falls back to a generic injected footer only when no safe footer root exists.
+ * Only brand-website destinations are kept — unmatched competitor links are removed
+ * (never collapsed to the same homepage URL).
  */
 export function rebuildBrandFooter(
   html: string,
@@ -172,6 +196,7 @@ export function rebuildBrandFooter(
   const $ = cheerio.load(html);
   const $footer = findSafeFooterRoot($);
   const uniqueLinks = filterFooterLinks(assets, businessUrl);
+  const routable = collectRoutableBrandLinks(assets, businessUrl);
   const socials = (assets.socialLinks || []).filter(
     (s) => s.href && detectSocialNetwork(s.href, s.label),
   );
@@ -182,19 +207,41 @@ export function rebuildBrandFooter(
     let linkCount = 0;
     let socialCount = 0;
 
-    // Logo in footer
+    // Logo in footer (brand mark — not partner strips)
     if (assets.logoUrl) {
       $footer.find("img").each((_: number, el: any) => {
         const $el = $(el);
         const hay = `${$el.attr("src") || ""} ${$el.attr("alt") || ""} ${$el.attr("class") || ""}`;
-        if (!/logo|brand|wordmark/i.test(hay) && !$el.closest("a").is(".logo, [class*='logo']")) {
+        if (
+          $el.closest(
+            "[class*='partner'], [class*='Partner'], [class*='client'], [class*='press'], [class*='award'], [class*='certif']",
+          ).length
+        ) {
           return;
         }
+        const looksLogo =
+          /logo|brand|wordmark/i.test(hay) ||
+          $el.closest("a.logo, [class*='logo'], .navbar-brand").length > 0 ||
+          (Number($el.attr("height") || 0) > 0 &&
+            Number($el.attr("height") || 0) <= 80);
+        if (!looksLogo) return;
         $el.attr("src", assets.logoUrl!);
         $el.removeAttr("srcset");
         $el.attr("alt", brandName);
         $el.attr("data-adrival-footer-logo", "1");
+        $el.attr("data-adrival-logo", "1");
       });
+
+      if (!$footer.find("img[data-adrival-footer-logo]").length) {
+        const $col = $footer
+          .find(
+            "[class*='logo'], [class*='brand'], .footer-logo, .widget:first-child",
+          )
+          .first();
+        const inject = `<a href="${escapeHtml(businessUrl)}" data-adrival-footer-logo="1" data-adrival-logo="1" style="display:inline-block;margin-bottom:12px;"><img src="${escapeHtml(assets.logoUrl)}" alt="${escapeHtml(brandName)}" style="max-height:48px;width:auto;object-fit:contain;" data-adrival-logo="1" data-adrival-footer-logo="1" /></a>`;
+        if ($col.length) $col.prepend(inject);
+        else $footer.prepend(inject);
+      }
     }
 
     // Social anchors inside footer
@@ -216,21 +263,23 @@ export function rebuildBrandFooter(
           $el.attr("data-adrival-footer-social", net);
           socialCount += 1;
         } else {
-          $el.remove();
+          removeFooterAnchor($, $el);
         }
         return;
       }
     });
 
-    // Non-social footer links by label / order
+    // Non-social footer links — ONLY keep when we can map to a real brand page
     const usedLink = new Set<number>();
     const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
-    $footer.find("a[href]").each((_: number, el: any) => {
+    const anchors = $footer.find("a[href]").toArray();
+    for (const el of anchors) {
       const $el = $(el);
-      if ($el.attr("data-adrival-footer-social")) return;
+      if ($el.attr("data-adrival-footer-social")) continue;
+      if ($el.attr("data-adrival-footer-logo")) continue;
       const href = ($el.attr("href") || "").trim();
-      if (!href || /^mailto:|^tel:|^#|^javascript:/i.test(href)) return;
-      if (detectSocialNetwork(href, normalizeText($el.text()))) return;
+      if (!href || /^mailto:|^tel:|^#|^javascript:/i.test(href)) continue;
+      if (detectSocialNetwork(href, normalizeText($el.text()))) continue;
 
       const label = normalizeText($el.text());
       let idx = uniqueLinks.findIndex(
@@ -244,13 +293,15 @@ export function rebuildBrandFooter(
           return a.length >= 3 && b.length >= 3 && (a.includes(b) || b.includes(a));
         });
       }
-      if (idx < 0) {
-        idx = uniqueLinks.findIndex((_, i) => !usedLink.has(i));
-      }
-      if (idx < 0) {
-        // Prefer a semantic brand page over collapsing every leftover to homepage
-        const routable = collectRoutableBrandLinks(assets, businessUrl);
-        const resolved = resolveBrandPageHref({
+
+      let resolved: string | null = null;
+      let resolvedLabel: string | null = null;
+      if (idx >= 0) {
+        usedLink.add(idx);
+        resolved = uniqueLinks[idx].href;
+        resolvedLabel = uniqueLinks[idx].label;
+      } else {
+        resolved = resolveBrandPageHref({
           label,
           competitorPath: (() => {
             try {
@@ -262,18 +313,65 @@ export function rebuildBrandFooter(
           links: routable,
           businessUrl,
         });
-        $el.attr("href", resolved || businessUrl);
-        return;
+        if (resolved) {
+          const match = uniqueLinks.find(
+            (l) =>
+              l.href.replace(/\/$/, "").toLowerCase() ===
+              resolved!.replace(/\/$/, "").toLowerCase(),
+          );
+          resolvedLabel = match?.label || label;
+          const usedIdx = uniqueLinks.findIndex(
+            (l) =>
+              l.href.replace(/\/$/, "").toLowerCase() ===
+              resolved!.replace(/\/$/, "").toLowerCase(),
+          );
+          if (usedIdx >= 0) usedLink.add(usedIdx);
+        }
       }
-      usedLink.add(idx);
-      const link = uniqueLinks[idx];
-      $el.attr("href", link.href);
-      if (link.label) setAnchorLabel($, $el, link.label);
+
+      if (!resolved || isHomepageHref(resolved, businessUrl)) {
+        // Do NOT collapse every leftover to the homepage — remove instead
+        removeFooterAnchor($, $el);
+        continue;
+      }
+
+      $el.attr("href", resolved);
+      if (resolvedLabel) setAnchorLabel($, $el, resolvedLabel);
       $el.attr("data-adrival-footer-link", "1");
       linkCount += 1;
-    });
+    }
 
-    // Disclaimer / copyright blurb — update obvious copyright lines if provided
+    // Append unused brand pages into an existing quick-links / menu list
+    const unused = uniqueLinks.filter((_, i) => !usedLink.has(i));
+    if (unused.length) {
+      const $list = $footer
+        .find("ul, ol, [class*='menu'], [class*='links']")
+        .filter((_: number, el: any) => {
+          const $el = $(el);
+          const t = normalizeText($el.closest("div, section, aside").find("h2, h3, h4, .title, [class*='title']").first().text()).toLowerCase();
+          return (
+            /quick|link|menu|explore|navigat|service|page/i.test(t) ||
+            $el.find("a[data-adrival-footer-link]").length > 0
+          );
+        })
+        .first();
+      if ($list.length) {
+        for (const link of unused.slice(0, 8)) {
+          if ($list.is("ul, ol")) {
+            $list.append(
+              `<li><a href="${escapeHtml(link.href)}" data-adrival-footer-link="1">${escapeHtml(link.label)}</a></li>`,
+            );
+          } else {
+            $list.append(
+              `<a href="${escapeHtml(link.href)}" data-adrival-footer-link="1" style="display:block;margin:4px 0;">${escapeHtml(link.label)}</a>`,
+            );
+          }
+          linkCount += 1;
+        }
+      }
+    }
+
+    // Disclaimer / copyright blurb
     if (options?.disclaimer) {
       $footer
         .find("p, small, span, div")
@@ -344,7 +442,7 @@ export function rebuildBrandFooter(
     <div data-adrival-brand-footer="1" style="padding:28px 20px;font-family:system-ui,sans-serif;font-size:14px;line-height:1.5;border-top:1px solid rgba(0,0,0,.08);">
       ${
         assets.logoUrl
-          ? `<div style="margin-bottom:14px;"><img src="${escapeHtml(assets.logoUrl)}" alt="${escapeHtml(brandName)}" style="max-height:40px;width:auto;" /></div>`
+          ? `<div style="margin-bottom:14px;"><img src="${escapeHtml(assets.logoUrl)}" alt="${escapeHtml(brandName)}" style="max-height:40px;width:auto;" data-adrival-logo="1" /></div>`
           : `<div style="font-weight:700;margin-bottom:12px;">${escapeHtml(brandName)}</div>`
       }
       <div style="display:flex;flex-wrap:wrap;gap:4px 0;margin-bottom:12px;">${linkHtml}</div>

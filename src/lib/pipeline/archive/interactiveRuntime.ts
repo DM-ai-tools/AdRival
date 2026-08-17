@@ -1,3 +1,152 @@
+import * as cheerio from "cheerio";
+
+/**
+ * Pre-stamp FAQ / accordion pairs so the injected runtime can toggle them
+ * even when competitor markup uses non-Bootstrap class names.
+ */
+export function stampFaqInteractivity(html: string): string {
+  const $ = cheerio.load(html);
+  let stamped = 0;
+
+  const faqRoots = $(
+    [
+      "[class*='faq']",
+      "[class*='Faq']",
+      "[class*='FAQ']",
+      "[id*='faq']",
+      "[id*='Faq']",
+      ".accordion",
+      "[class*='accordion']",
+      "[class*='Accordion']",
+      "[data-accordion]",
+      ".elementor-toggle",
+      ".elementor-accordion",
+      ".e-n-accordion",
+      "[class*='toggle']",
+    ].join(", "),
+  );
+
+  faqRoots.each((_, root) => {
+    const $root = $(root);
+    // Avoid nested double-stamping of the same items
+    if ($root.parents("[class*='faq'], .accordion, [class*='accordion']").length) {
+      return;
+    }
+
+    const items = $root
+      .find(
+        [
+          ".accordion-item",
+          ".faq-item",
+          "[class*='faq-item']",
+          "[class*='FaqItem']",
+          "[class*='accordion-item']",
+          ".elementor-toggle-item",
+          ".e-n-accordion-item",
+          "details",
+          "li",
+          "article",
+          "> div",
+        ].join(", "),
+      )
+      .toArray()
+      .filter((el) => {
+        const $el = $(el);
+        // Prefer direct-ish children that look like Q/A pairs
+        const text = ($el.text() || "").replace(/\s+/g, " ").trim();
+        if (text.length < 12 || text.length > 1200) return false;
+        return (
+          $el.find("h2, h3, h4, h5, button, summary, [class*='question'], [class*='title'], [class*='header']")
+            .length > 0
+        );
+      });
+
+    for (const item of items.slice(0, 40)) {
+      const $item = $(item);
+      if ($item.attr("data-adrival-faq-item")) continue;
+
+      const $trigger = $item
+        .find(
+          "button, summary, [aria-expanded], .accordion-button, .accordion-header, [class*='question'], [class*='Question'], [class*='toggle-title'], [class*='accordion-title'], [class*='e-n-accordion-item-title'], h2, h3, h4, h5",
+        )
+        .first();
+      if (!$trigger.length) continue;
+
+      let $panel = $();
+      const controls = $trigger.attr("aria-controls");
+      if (controls) {
+        $panel = $(`[id="${controls.replace(/"/g, "")}"]`).first();
+      }
+      if (!$panel.length) {
+        const href =
+          $trigger.attr("href") ||
+          $trigger.attr("data-bs-target") ||
+          $trigger.attr("data-target") ||
+          "";
+        if (href.startsWith("#") && href.length > 1) {
+          $panel = $(href).first();
+        }
+      }
+      if (!$panel.length) {
+        $panel = $item
+          .find(
+            ".accordion-collapse, .accordion-body, .collapse, .faq-answer, [class*='faq-answer'], [class*='FaqAnswer'], [class*='accordion-panel'], [class*='toggle-content'], [role='region'], .elementor-tab-content, .e-n-accordion-item-content",
+          )
+          .filter((__: number, el: any) => {
+            const $el = $(el);
+            return !$trigger.is($el) && !$trigger.find($el).length;
+          })
+          .first();
+      }
+      if (!$panel.length) {
+        // Next sibling block after the trigger
+        let sib = $trigger.next();
+        while (sib.length) {
+          if (
+            !sib.is("script, style, br") &&
+            !sib.is($trigger) &&
+            (sib.text() || "").trim().length > 0
+          ) {
+            $panel = sib;
+            break;
+          }
+          sib = sib.next();
+        }
+      }
+      if (!$panel.length) continue;
+
+      const id = `adrival-faq-${stamped}`;
+      $item.attr("data-adrival-faq-item", "1");
+      $trigger.attr("data-adrival-faq-trigger", id);
+      $trigger.attr("role", $trigger.attr("role") || "button");
+      $trigger.attr("tabindex", $trigger.attr("tabindex") || "0");
+      if (!$trigger.attr("aria-expanded")) {
+        $trigger.attr("aria-expanded", "false");
+      }
+      $panel.attr("data-adrival-faq-panel", id);
+      $panel.attr("aria-hidden", "true");
+      // Start collapsed for click-to-expand UX
+      const style = $panel.attr("style") || "";
+      if (!/max-height/i.test(style)) {
+        const sep = style && !/;\s*$/.test(style) ? ";" : "";
+        $panel.attr(
+          "style",
+          `${style}${sep}max-height:0;overflow:hidden;opacity:0;`,
+        );
+      }
+      stamped += 1;
+    }
+  });
+
+  // Standalone details/summary already work — ensure cursor
+  $("details > summary").attr("style", function (_: number, s: string) {
+    const prev = s || "";
+    return /cursor/i.test(prev) ? prev : `${prev};cursor:pointer;`.replace(/^;/, "");
+  });
+
+  return stamped ? $.html() : html;
+}
+
 /**
  * Lightweight interactivity runtime injected into archived recreations.
  * Restores FAQ / accordion / tabs plus common on-scroll reveal patterns
@@ -11,9 +160,10 @@ export const INTERACTIVE_RUNTIME_SCRIPT = `
   function looksLikeFaqPanel(el) {
     if (!el || el === document.body || el === document.documentElement) return false;
     if (el.hasAttribute("data-adrival-dup-removed")) return false;
+    if (el.hasAttribute("data-adrival-faq-panel")) return true;
     var cls = el.className && String(el.className) || "";
     var id = el.id || "";
-    if (/accordion-collapse|accordion-body|faq-answer|faq-content|faq__answer|collapse/i.test(cls + " " + id)) return true;
+    if (/accordion-collapse|accordion-body|faq-answer|faq-content|faq__answer|collapse|toggle-content|accordion-panel/i.test(cls + " " + id)) return true;
     if (el.getAttribute("role") === "region") return true;
     if (el.tagName === "DETAILS") return false;
     return false;
@@ -23,6 +173,7 @@ export const INTERACTIVE_RUNTIME_SCRIPT = `
     if (!el) return false;
     if (el.hasAttribute("hidden")) return false;
     if (el.getAttribute("aria-hidden") === "true") return false;
+    if (el.style && el.style.maxHeight === "0px") return false;
     return (
       el.classList.contains("show") ||
       el.classList.contains("open") ||
@@ -30,7 +181,7 @@ export const INTERACTIVE_RUNTIME_SCRIPT = `
       el.classList.contains("active") ||
       el.getAttribute("aria-expanded") === "true" ||
       el.getAttribute("aria-hidden") === "false" ||
-      (el.style && el.style.maxHeight && el.style.maxHeight !== "0px")
+      (el.style && el.style.maxHeight && el.style.maxHeight !== "0px" && el.style.maxHeight !== "0")
     );
   }
 
@@ -50,7 +201,6 @@ export const INTERACTIVE_RUNTIME_SCRIPT = `
       panel.style.height = "auto";
       panel.style.maxHeight = Math.max(panel.scrollHeight, 48) + "px";
       panel.style.overflow = "hidden";
-      // Allow natural height after transition
       setTimeout(function () {
         if (isOpen(panel)) {
           panel.style.maxHeight = "none";
@@ -59,15 +209,21 @@ export const INTERACTIVE_RUNTIME_SCRIPT = `
       }, 280);
     } else {
       panel.style.maxHeight = panel.scrollHeight + "px";
-      panel.offsetHeight; // reflow
+      panel.offsetHeight;
       panel.style.maxHeight = "0px";
       panel.style.overflow = "hidden";
+      panel.style.opacity = "0";
       panel.setAttribute("aria-hidden", "true");
       panel.classList.add("collapsed");
     }
   }
 
   function findPanel(trigger) {
+    var stamped = trigger.getAttribute("data-adrival-faq-trigger");
+    if (stamped) {
+      var byStamp = document.querySelector('[data-adrival-faq-panel="' + stamped + '"]');
+      if (byStamp) return byStamp;
+    }
     var controls = trigger.getAttribute("aria-controls");
     if (controls) {
       var byId = document.getElementById(controls);
@@ -81,9 +237,11 @@ export const INTERACTIVE_RUNTIME_SCRIPT = `
       } catch (err) {}
     }
     var item = trigger.closest(
-      ".accordion-item, .faq-item, .accordion-section, [class*='accordion-item'], [class*='faq-item'], [class*='FaqItem'], li, article"
+      "[data-adrival-faq-item], .accordion-item, .faq-item, .accordion-section, [class*='accordion-item'], [class*='faq-item'], [class*='FaqItem'], .elementor-toggle-item, .e-n-accordion-item, li, article"
     );
     if (item) {
+      var stampedPanel = item.querySelector("[data-adrival-faq-panel]");
+      if (stampedPanel) return stampedPanel;
       var selectors = [
         ".accordion-collapse",
         ".accordion-body",
@@ -93,6 +251,9 @@ export const INTERACTIVE_RUNTIME_SCRIPT = `
         "[class*='faq-answer']",
         "[class*='FaqAnswer']",
         "[class*='accordion-collapse']",
+        "[class*='toggle-content']",
+        ".elementor-tab-content",
+        ".e-n-accordion-item-content",
         "[role='region']"
       ];
       for (var i = 0; i < selectors.length; i++) {
@@ -101,7 +262,6 @@ export const INTERACTIVE_RUNTIME_SCRIPT = `
           return body;
         }
       }
-      // Fallback: first non-trigger block sibling inside item
       var kids = item.children;
       for (var k = 0; k < kids.length; k++) {
         if (kids[k] !== trigger && !trigger.contains(kids[k]) && !kids[k].contains(trigger) && looksLikeFaqPanel(kids[k])) {
@@ -111,7 +271,7 @@ export const INTERACTIVE_RUNTIME_SCRIPT = `
     }
     var sib = trigger.nextElementSibling;
     while (sib) {
-      if (looksLikeFaqPanel(sib) || /accordion|collapse|faq-answer|faq__answer|panel/i.test(sib.className || "")) {
+      if (looksLikeFaqPanel(sib) || /accordion|collapse|faq-answer|faq__answer|panel|toggle-content/i.test(sib.className || "")) {
         return sib;
       }
       sib = sib.nextElementSibling;
@@ -120,16 +280,18 @@ export const INTERACTIVE_RUNTIME_SCRIPT = `
   }
 
   function closeSiblings(trigger, panel) {
-    var root = trigger.closest(".accordion, .faq, [data-accordion], [class*='Accordion'], [class*='faq'], [class*='Faq']") || document;
-    var openPanels = root.querySelectorAll(".accordion-collapse.show, .collapse.show, .faq-answer.show, .is-open, .open, [aria-hidden='false']");
-    openPanels.forEach(function (p) {
+    var root = trigger.closest("[data-adrival-faq-item], .accordion, .faq, [data-accordion], [class*='Accordion'], [class*='faq'], [class*='Faq']") || document;
+    var parent = trigger.closest("[data-adrival-faq-item]") && trigger.closest("[data-adrival-faq-item]").parentElement;
+    var scope = parent || root;
+    scope.querySelectorAll("[data-adrival-faq-panel], .accordion-collapse.show, .collapse.show, .faq-answer.show, .is-open, .open").forEach(function (p) {
       if (p === panel || !looksLikeFaqPanel(p)) return;
       setOpen(p, false);
-      var id = p.id;
-      if (id) {
-        root.querySelectorAll('[aria-controls="' + id + '"], [href="#' + id + '"], [data-bs-target="#' + id + '"]').forEach(function (t) {
+      var stamp = p.getAttribute("data-adrival-faq-panel");
+      if (stamp) {
+        scope.querySelectorAll('[data-adrival-faq-trigger="' + stamp + '"]').forEach(function (t) {
           t.setAttribute("aria-expanded", "false");
           t.classList.add("collapsed");
+          t.classList.remove("active", "open");
         });
       }
     });
@@ -138,9 +300,32 @@ export const INTERACTIVE_RUNTIME_SCRIPT = `
   function isFaqTrigger(el) {
     if (!el || !el.closest) return null;
     if (el.closest("summary")) return null;
+    var stamped = el.closest("[data-adrival-faq-trigger]");
+    if (stamped) return stamped;
     return el.closest(
-      '[aria-expanded], [data-bs-toggle="collapse"], [data-toggle="collapse"], [data-toggle="accordion"], .accordion-button, .accordion-header, .accordion-header button, .faq-question, .faq-header, .faq-title, [class*="faq-question"], [class*="faq-title"], [class*="FaqQuestion"], [class*="accordion-button"], [class*="accordion-header"]'
+      '[aria-expanded], [data-bs-toggle="collapse"], [data-toggle="collapse"], [data-toggle="accordion"], .accordion-button, .accordion-header, .accordion-header button, .faq-question, .faq-header, .faq-title, [class*="faq-question"], [class*="faq-title"], [class*="FaqQuestion"], [class*="accordion-button"], [class*="accordion-header"], [class*="toggle-title"], [class*="e-n-accordion-item-title"], .elementor-tab-title'
     );
+  }
+
+  function toggleFromTrigger(trigger, e) {
+    if (!trigger) return;
+    if (trigger.tagName === "A" && trigger.getAttribute("href") && trigger.getAttribute("href").charAt(0) !== "#") {
+      return;
+    }
+    var panel = findPanel(trigger);
+    if (!panel) return;
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    var expanded = trigger.getAttribute("aria-expanded");
+    var willOpen = expanded == null ? !isOpen(panel) : expanded !== "true";
+    if (willOpen) closeSiblings(trigger, panel);
+    trigger.setAttribute("aria-expanded", willOpen ? "true" : "false");
+    trigger.classList.toggle("collapsed", !willOpen);
+    trigger.classList.toggle("active", willOpen);
+    trigger.classList.toggle("open", willOpen);
+    setOpen(panel, willOpen);
   }
 
   document.addEventListener(
@@ -148,45 +333,34 @@ export const INTERACTIVE_RUNTIME_SCRIPT = `
     function (e) {
       var t = e.target;
       if (!t || !t.closest) return;
-      // Native <details>/<summary> already interactive
       if (t.closest("summary")) return;
-
-      var trigger = isFaqTrigger(t);
-      if (!trigger) return;
-      if (trigger.tagName === "A" && trigger.getAttribute("href") && trigger.getAttribute("href").charAt(0) !== "#") {
-        return;
-      }
-
-      var panel = findPanel(trigger);
-      if (!panel) return;
-
-      e.preventDefault();
-      e.stopPropagation();
-      var expanded = trigger.getAttribute("aria-expanded");
-      var willOpen = expanded == null ? !isOpen(panel) : expanded !== "true";
-      if (willOpen) closeSiblings(trigger, panel);
-      trigger.setAttribute("aria-expanded", willOpen ? "true" : "false");
-      trigger.classList.toggle("collapsed", !willOpen);
-      trigger.classList.toggle("active", willOpen);
-      trigger.classList.toggle("open", willOpen);
-      setOpen(panel, willOpen);
+      toggleFromTrigger(isFaqTrigger(t), e);
     },
     true
   );
 
-  // Only collapse clear FAQ answer panels — never blanket .collapse (too broad)
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    var t = e.target;
+    if (!t || !t.closest) return;
+    var trigger = isFaqTrigger(t);
+    if (!trigger) return;
+    toggleFromTrigger(trigger, e);
+  });
+
+  // Collapse stamped / clear FAQ panels on load
   document.querySelectorAll(
-    ".accordion-collapse:not(.show), .faq-answer:not(.show), [class*='faq-answer']:not(.show), [class*='FaqAnswer']:not(.show)"
+    "[data-adrival-faq-panel], .accordion-collapse:not(.show), .faq-answer:not(.show), [class*='faq-answer']:not(.show), [class*='FaqAnswer']:not(.show)"
   ).forEach(function (panel) {
     if (!looksLikeFaqPanel(panel)) return;
-    if (isOpen(panel)) return;
-    if (panel.getAttribute("aria-hidden") === "false") return;
+    if (isOpen(panel) && !panel.hasAttribute("data-adrival-faq-panel")) return;
+    if (panel.getAttribute("aria-hidden") === "false" && !panel.hasAttribute("data-adrival-faq-panel")) return;
     panel.style.maxHeight = "0px";
     panel.style.overflow = "hidden";
+    panel.style.opacity = "0";
     panel.setAttribute("aria-hidden", "true");
   });
 
-  // Ensure details/summary work even if page CSS hid them
   document.querySelectorAll("details > summary").forEach(function (sum) {
     sum.style.cursor = "pointer";
   });
@@ -212,7 +386,7 @@ export const INTERACTIVE_RUNTIME_SCRIPT = `
     });
   });
 
-  /* —— On-scroll / reveal sections (AOS, WOW, fade/slide utilities) —— */
+  /* —— On-scroll / reveal sections —— */
   function revealEl(el) {
     if (!el || el.getAttribute("data-adrival-revealed") === "1") return;
     el.setAttribute("data-adrival-revealed", "1");
@@ -228,17 +402,12 @@ export const INTERACTIVE_RUNTIME_SCRIPT = `
       "visible"
     );
     if (/wow/i.test(el.className || "")) el.classList.add("animated");
-    if (/animate__/i.test(el.className || "")) {
-      /* keep animate.css classes; ensure visible */
-    }
     var style = el.style;
     style.opacity = "1";
     style.visibility = "visible";
     style.transform = "none";
     style.translate = "none";
-    if (getComputedStyle(el).display === "none") {
-      /* don't force-display intentionally hidden UI */
-    }
+    style.filter = "none";
     el.removeAttribute("data-aos-delay");
   }
 
@@ -262,21 +431,28 @@ export const INTERACTIVE_RUNTIME_SCRIPT = `
       "[class*='animate__']",
       "[class*='ScrollReveal']",
       "[class*='scroll-reveal']",
+      "[class*='motion']",
+      "[data-framer-appear-id]",
       "section[style*='opacity: 0']",
       "section[style*='opacity:0']",
       "div[style*='opacity: 0']",
       "div[style*='opacity:0']",
+      "section[style*='translate']",
+      "div[style*='translateY']",
       "[class*='hero'] ~ section",
       "main > section",
       "main > div > section"
     ].join(",");
     var nodes = Array.prototype.slice.call(document.querySelectorAll(sel));
-    // Also pick sections that are visually hidden via computed style
-    document.querySelectorAll("main section, main .section, [class*='Section'], [data-section]").forEach(function (el) {
+    document.querySelectorAll("main section, main .section, [class*='Section'], [data-section], .elementor-section, .elementor-element").forEach(function (el) {
       try {
         var cs = getComputedStyle(el);
         var op = parseFloat(cs.opacity);
-        if ((op === 0 || cs.visibility === "hidden") && el.offsetParent !== null) {
+        var tr = cs.transform || "";
+        if (
+          ((op === 0 || cs.visibility === "hidden") || /matrix|translate/i.test(tr)) &&
+          el.offsetParent !== null
+        ) {
           nodes.push(el);
         }
       } catch (e) {}
@@ -284,7 +460,7 @@ export const INTERACTIVE_RUNTIME_SCRIPT = `
     var seen = new Set();
     return nodes.filter(function (el) {
       if (!el || seen.has(el)) return false;
-      if (el.closest("header, nav, footer, script, style, noscript")) return false;
+      if (el.closest("header, nav, footer, script, style, noscript, [data-adrival-faq-panel]")) return false;
       seen.add(el);
       return true;
     });
@@ -329,7 +505,6 @@ export const INTERACTIVE_RUNTIME_SCRIPT = `
       window.addEventListener("resize", tick);
     }
 
-    // Above-the-fold + safety: never leave page permanently blank
     tick();
     setTimeout(tick, 400);
     setTimeout(function () {
@@ -338,13 +513,14 @@ export const INTERACTIVE_RUNTIME_SCRIPT = `
         if (inView(el)) revealEl(el);
       });
     }, 1600);
-    // Last resort after 4s for anything still invisible in viewport
     setTimeout(function () {
       candidates.forEach(function (el) {
         if (el.getAttribute("data-adrival-revealed") === "1") return;
         try {
           var cs = getComputedStyle(el);
-          if (parseFloat(cs.opacity) === 0 && inView(el)) revealEl(el);
+          if ((parseFloat(cs.opacity) === 0 || /matrix|translate/i.test(cs.transform || "")) && inView(el)) {
+            revealEl(el);
+          }
         } catch (e) {}
       });
     }, 4000);
@@ -371,8 +547,8 @@ const INTERACTIVE_RUNTIME_STYLE = `
     visibility: visible !important;
     transform: none !important;
     translate: none !important;
+    filter: none !important;
   }
-  /* Soft transition when our runtime reveals nodes */
   [data-aos],
   .aos-init,
   .wow,
@@ -382,12 +558,18 @@ const INTERACTIVE_RUNTIME_STYLE = `
   [class*="reveal"] {
     transition: opacity 0.55s ease, transform 0.55s ease;
   }
-  /* FAQ / accordion panels controlled by AdRival runtime */
+  [data-adrival-faq-panel],
   .accordion-collapse,
   .faq-answer,
   [class*="faq-answer"],
   [class*="FaqAnswer"] {
     transition: max-height 0.28s ease, opacity 0.2s ease;
+  }
+  [data-adrival-faq-trigger],
+  .accordion-button,
+  .faq-question,
+  [class*="faq-question"] {
+    cursor: pointer;
   }
   .accordion-collapse.show,
   .faq-answer.show,
@@ -395,7 +577,10 @@ const INTERACTIVE_RUNTIME_STYLE = `
   .faq-answer.is-open,
   [class*="faq-answer"].show,
   [class*="faq-answer"].open,
-  [class*="faq-answer"].is-open {
+  [class*="faq-answer"].is-open,
+  [data-adrival-faq-panel].show,
+  [data-adrival-faq-panel].open,
+  [data-adrival-faq-panel].is-open {
     display: block !important;
     visibility: visible !important;
     opacity: 1 !important;

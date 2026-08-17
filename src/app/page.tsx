@@ -8,7 +8,12 @@ import { BrandReviewPanel } from "@/components/BrandReviewPanel";
 import { ExportButton } from "@/components/ExportButton";
 import { LookupForm } from "@/components/LookupForm";
 import { LookupResults } from "@/components/LookupResults";
+import {
+  SearchOffersDashboard,
+  SearchOffersTeaser,
+} from "@/components/SearchOffersReportPanel";
 import { UnifiedHistoryPanel } from "@/components/UnifiedHistoryPanel";
+import { KillWorkButton } from "@/components/KillWorkButton";
 import { PlatformPicker } from "@/components/PlatformPicker";
 import { PLATFORM_META, type AdPlatform } from "@/lib/platforms";
 import type { UnifiedHistoryItem } from "@/lib/historyUnified";
@@ -21,7 +26,7 @@ import type {
 } from "@/lib/types";
 
 type Mode = "search" | "lookup" | "history";
-type ResultsView = "preview" | "brand";
+type ResultsView = "preview" | "brand" | "offers";
 
 export default function HomePage() {
   const [platform, setPlatform] = useState<AdPlatform>("facebook");
@@ -34,6 +39,8 @@ export default function HomePage() {
   const [keywords, setKeywords] = useState<string[]>([]);
   const [job, setJob] = useState<SearchJob | null>(null);
   const [competitors, setCompetitors] = useState<CompetitorRecord[]>([]);
+  const [generatingSearchOffers, setGeneratingSearchOffers] = useState(false);
+  const [searchOffersError, setSearchOffersError] = useState<string | null>(null);
 
   const [lookupId, setLookupId] = useState<string | null>(null);
   const [lookupQuery, setLookupQuery] = useState("");
@@ -58,6 +65,10 @@ export default function HomePage() {
     [],
   );
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [generatingHistoryOffers, setGeneratingHistoryOffers] = useState(false);
+  const [historyOffersError, setHistoryOffersError] = useState<string | null>(
+    null,
+  );
   const [fetchingCandidateId, setFetchingCandidateId] = useState<string | null>(
     null,
   );
@@ -79,6 +90,20 @@ export default function HomePage() {
     const data = await res.json();
     setJob(data.job);
     setCompetitors(data.competitors ?? []);
+    // Surface brand-review stage on the Brand review tab
+    if (data.job?.progress?.stage === "brand_review") {
+      setResultsView("brand");
+    }
+  }, []);
+
+  const pollHistorySearch = useCallback(async (id: string) => {
+    const res = await fetch(`/api/search/status?jobId=${id}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.job) setHistoryJob(data.job as SearchJob);
+    if (Array.isArray(data.competitors)) {
+      setHistoryCompetitors(data.competitors as CompetitorRecord[]);
+    }
   }, []);
 
   const pollLookup = useCallback(async (id: string) => {
@@ -86,7 +111,33 @@ export default function HomePage() {
     if (!res.ok) return;
     const data = await res.json();
     setLookupJob(data.job);
-    setLookupAds(data.ads ?? []);
+    const incoming = (data.ads ?? []) as LookupAdRecord[];
+    setLookupAds((prev) => {
+      if (!prev.length) return incoming;
+      const prevById = new Map(prev.map((a) => [a.id, a]));
+      return incoming.map((next) => {
+        const old = prevById.get(next.id);
+        if (!old?.pageAnalysis) return next;
+        const oldStatus = old.pageAnalysis.status;
+        const nextStatus = next.pageAnalysis?.status;
+        // Don't let a slow poll regress completed/failed → pending
+        if (
+          (oldStatus === "completed" || oldStatus === "failed") &&
+          nextStatus === "pending"
+        ) {
+          return { ...next, pageAnalysis: old.pageAnalysis };
+        }
+        if (
+          oldStatus === "completed" &&
+          nextStatus === "completed" &&
+          (old.pageAnalysis.analyzedAt || "") >
+            (next.pageAnalysis?.analyzedAt || "")
+        ) {
+          return { ...next, pageAnalysis: old.pageAnalysis };
+        }
+        return next;
+      });
+    });
   }, []);
 
   const loadHistory = useCallback(async () => {
@@ -108,6 +159,9 @@ export default function HomePage() {
       setHistoryCompetitors([]);
       setHistoryLookupJob(null);
       setHistoryLookupAds([]);
+      setHistoryResultsView("preview");
+      setHistoryOffersError(null);
+      setGeneratingHistoryOffers(false);
       // Immediate scroll so the user sees the report region loading
       scrollToHistoryReport();
 
@@ -208,6 +262,24 @@ export default function HomePage() {
   }, [jobId, pollSearch]);
 
   useEffect(() => {
+    if (mode !== "history" || selectedHistory?.kind !== "search") return;
+    const running =
+      historyJob?.progress?.stage === "analyzing_offers" ||
+      generatingHistoryOffers;
+    if (!running) return;
+    const id = selectedHistory.id;
+    void pollHistorySearch(id);
+    const t = setInterval(() => void pollHistorySearch(id), 2500);
+    return () => clearInterval(t);
+  }, [
+    mode,
+    selectedHistory,
+    historyJob?.progress?.stage,
+    generatingHistoryOffers,
+    pollHistorySearch,
+  ]);
+
+  useEffect(() => {
     if (!lookupId) return;
     void pollLookup(lookupId);
     const t = setInterval(() => void pollLookup(lookupId), 2500);
@@ -227,8 +299,49 @@ export default function HomePage() {
   }, [lookupJob?.status, loadHistory, lookupJob]);
 
   const searchRunning = job?.status === "running";
+  const searchOffersRunning = job?.progress?.stage === "analyzing_offers";
+  const historyOffersRunning =
+    historyJob?.progress?.stage === "analyzing_offers";
   const lookupRunning = lookupJob?.status === "running";
+  const lookupOffersRunning =
+    lookupJob?.progress?.stage === "analyzing_offers";
+  const historyLookupRunning =
+    historyLookupJob?.status === "running" ||
+    historyLookupJob?.progress?.stage === "analyzing_offers";
+  const workActive = Boolean(
+    searchRunning ||
+      searchOffersRunning ||
+      lookupRunning ||
+      lookupOffersRunning ||
+      historyOffersRunning ||
+      historyLookupRunning ||
+      job?.progress?.stage === "brand_review" ||
+      historyJob?.progress?.stage === "brand_review" ||
+      generatingSearchOffers ||
+      generatingHistoryOffers,
+  );
   const meta = PLATFORM_META[platform];
+
+  const refreshAfterStop = useCallback(() => {
+    if (jobId) void pollSearch(jobId);
+    if (lookupId) void pollLookup(lookupId);
+    if (selectedHistory?.kind === "search") {
+      void pollHistorySearch(selectedHistory.id);
+    }
+    if (selectedHistory?.kind === "lookup") {
+      void loadHistoryItem(selectedHistory);
+    }
+    setGeneratingSearchOffers(false);
+    setGeneratingHistoryOffers(false);
+  }, [
+    jobId,
+    lookupId,
+    selectedHistory,
+    pollSearch,
+    pollLookup,
+    pollHistorySearch,
+    loadHistoryItem,
+  ]);
 
   return (
     <main className="page product-shell">
@@ -244,6 +357,12 @@ export default function HomePage() {
             search and lookup in one place.
           </p>
         </div>
+        <KillWorkButton
+          active={workActive}
+          jobId={jobId || historyJob?.id}
+          lookupId={lookupId || historyLookupJob?.id}
+          onStopped={refreshAfterStop}
+        />
       </header>
 
       <div className="tab-bar tab-bar-wide mode-bar" role="tablist">
@@ -310,6 +429,14 @@ export default function HomePage() {
               keyword={keywords.join(", ") || job.keyword}
               status={job.status}
               progress={job.progress}
+              onStop={
+                searchRunning ||
+                searchOffersRunning ||
+                job.progress.stage === "brand_review"
+                  ? refreshAfterStop
+                  : undefined
+              }
+              stopJobId={jobId}
             />
           )}
 
@@ -344,6 +471,20 @@ export default function HomePage() {
                 onClick={() => setResultsView("brand")}
               >
                 Brand review
+                {job?.progress?.stage === "brand_review" && (
+                  <span className="tab-live-dot" aria-label="In progress" />
+                )}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                className={`tab-btn ${resultsView === "offers" ? "active" : ""}`}
+                onClick={() => setResultsView("offers")}
+              >
+                Offers dashboard
+                {searchOffersRunning && (
+                  <span className="tab-live-dot" aria-label="In progress" />
+                )}
               </button>
             </div>
 
@@ -356,9 +497,56 @@ export default function HomePage() {
                   );
                 }}
               />
-            ) : (
-              <BrandReviewPanel competitors={competitors} />
-            )}
+            ) : resultsView === "brand" ? (
+              <BrandReviewPanel
+                competitors={competitors}
+                runId={jobId}
+                liveProgress={job?.progress ?? null}
+                onCompetitorsUpdated={setCompetitors}
+              />
+            ) : job ? (
+              <>
+                {searchOffersError ? (
+                  <p className="error-text panel" role="alert">
+                    {searchOffersError}
+                  </p>
+                ) : null}
+                <SearchOffersTeaser
+                  job={job}
+                  competitors={competitors}
+                  selectCompetitors
+                  generating={generatingSearchOffers}
+                  onStop={refreshAfterStop}
+                  onGenerate={(opts) => {
+                    if (!jobId) return;
+                    setSearchOffersError(null);
+                    setGeneratingSearchOffers(true);
+                    fetch("/api/search/offers-report", {
+                      method: "POST",
+                      headers: { "content-type": "application/json" },
+                      body: JSON.stringify({
+                        jobId,
+                        force: true,
+                        refetchAds: false,
+                        competitorIds: opts?.competitorIds,
+                      }),
+                    })
+                      .then(async (r) => {
+                        const data = await r.json();
+                        if (!r.ok) throw new Error(data.error || "Offers report failed");
+                        if (data.job) setJob(data.job as SearchJob);
+                        if (Array.isArray(data.competitors)) {
+                          setCompetitors(data.competitors as CompetitorRecord[]);
+                        }
+                      })
+                      .catch((err) => setSearchOffersError((err as Error).message))
+                      .finally(() => setGeneratingSearchOffers(false));
+                  }}
+                />
+                <SearchOffersDashboard job={job} />
+              </>
+            ) : null}
+            
           </section>
         </>
       )}
@@ -402,6 +590,7 @@ export default function HomePage() {
               onReload={async () => {
                 if (lookupId) await pollLookup(lookupId);
               }}
+              onStop={refreshAfterStop}
             />
           )}
           {!lookupJob && lookupQuery && (
@@ -485,6 +674,7 @@ export default function HomePage() {
                 onReload={async () => {
                   if (selectedHistory) await loadHistoryItem(selectedHistory);
                 }}
+                onStop={refreshAfterStop}
               />
             ) : historyJob ? (
               <>
@@ -517,6 +707,20 @@ export default function HomePage() {
                     onClick={() => setHistoryResultsView("brand")}
                   >
                     Brand review
+                    {historyJob?.progress?.stage === "brand_review" && (
+                      <span className="tab-live-dot" aria-label="In progress" />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    className={`tab-btn ${historyResultsView === "offers" ? "active" : ""}`}
+                    onClick={() => setHistoryResultsView("offers")}
+                  >
+                    Offers dashboard
+                    {historyOffersRunning && (
+                      <span className="tab-live-dot" aria-label="In progress" />
+                    )}
                   </button>
                 </div>
                 {historyResultsView === "preview" ? (
@@ -528,8 +732,72 @@ export default function HomePage() {
                       );
                     }}
                   />
+                ) : historyResultsView === "brand" ? (
+                  <BrandReviewPanel
+                    competitors={historyCompetitors}
+                    runId={selectedHistory?.id}
+                    liveProgress={historyJob?.progress ?? null}
+                    onCompetitorsUpdated={(next) => {
+                      setHistoryCompetitors(next);
+                      // Keep history job progress in sync while redo polls
+                      if (selectedHistory?.kind === "search") {
+                        void fetch(
+                          `/api/search/status?jobId=${encodeURIComponent(selectedHistory.id)}`,
+                        )
+                          .then((r) => r.json())
+                          .then((data) => {
+                            if (data.job) setHistoryJob(data.job);
+                          })
+                          .catch(() => undefined);
+                      }
+                    }}
+                  />
                 ) : (
-                  <BrandReviewPanel competitors={historyCompetitors} />
+                  <>
+                    {historyOffersError ? (
+                      <p className="error-text panel" role="alert">
+                        {historyOffersError}
+                      </p>
+                    ) : null}
+                    <SearchOffersTeaser
+                      job={historyJob}
+                      generating={generatingHistoryOffers}
+                      onStop={refreshAfterStop}
+                      onGenerate={() => {
+                        if (!selectedHistory?.id) return;
+                        setHistoryOffersError(null);
+                        setGeneratingHistoryOffers(true);
+                        fetch("/api/search/offers-report", {
+                          method: "POST",
+                          headers: { "content-type": "application/json" },
+                          body: JSON.stringify({
+                            jobId: selectedHistory.id,
+                            force: true,
+                            refetchAds: false,
+                          }),
+                        })
+                          .then(async (r) => {
+                            const data = await r.json();
+                            if (!r.ok) {
+                              throw new Error(
+                                data.error || "Offers report failed",
+                              );
+                            }
+                            if (data.job) setHistoryJob(data.job as SearchJob);
+                            if (Array.isArray(data.competitors)) {
+                              setHistoryCompetitors(
+                                data.competitors as CompetitorRecord[],
+                              );
+                            }
+                          })
+                          .catch((err) =>
+                            setHistoryOffersError((err as Error).message),
+                          )
+                          .finally(() => setGeneratingHistoryOffers(false));
+                      }}
+                    />
+                    <SearchOffersDashboard job={historyJob} />
+                  </>
                 )}
               </>
             ) : (

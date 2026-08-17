@@ -63,6 +63,8 @@ Recreation is intentionally human-in-the-loop:
 1. **Content phase** — generate brand-differentiated copy as a coherent page document (sections, FAQs, links, logos notes). User reviews/edits and approves.
 2. **Design phase** — paste approved copy into a Playwright-captured HTML archive of the competitor page, apply brand identity, generate AI photos, restore interactivity (e.g. FAQs), and preview the result.
 
+**Brand SSOT (`design.md`):** Before (and during) design build, AdRival analyzes the **user brand website** and writes an ephemeral `design.md` for that run (`data/recreate/{competitorId}/design.md`, also stored on the recreation record). It captures colors, fonts, logos, buttons, radii, shadows, spacing, imagery rules, and implementor do-nots. The competitor archive supplies **layout only** (section order, grids, cards, placement, interactions). Every branding decision is taken from `design.md` / the matching `BrandDesignSpec`. The file is deleted after a successful design build; the markdown string remains on the record for audit until the next run.
+
 Output is downloadable HTML (draft banner can be stripped for publish). Publish readiness is tracked with coverage/blocker notes.
 
 ---

@@ -21,6 +21,10 @@ import { captureArchivedPage, type ArchivedPage } from "./capturePage";
 import { extractBrandTokens } from "./brandTokens";
 import { applyBrandDeterministic, applyBrandLogoToHtml } from "./applyBrandDeterministic";
 import {
+  applyBrandContactInfo,
+  scrubEmptyChromePills,
+} from "../applyBrandContacts";
+import {
   applyCidReplacements,
   collapseDoubledElementText,
   collectStampedCidNodes,
@@ -29,6 +33,57 @@ import {
 } from "./rewriteTextByCid";
 import { runVisualGate } from "./visualGate";
 import { injectInteractiveRuntime } from "./interactiveRuntime";
+import {
+  buildBrandDesignSpec,
+  brandTokensFromDesignSpec,
+  serializeDesignMd,
+  writeDesignMd,
+  deleteDesignMd,
+} from "../designMd";
+import {
+  extractBrandLinksWithFirecrawl,
+  mergeFirecrawlIntoBrandAssets,
+} from "../firecrawlBrandLinks";
+import { stampFaqInteractivity } from "./interactiveRuntime";
+
+function logoCdnFallbacks(businessUrl: string): string[] {
+  try {
+    const host = new URL(
+      businessUrl.startsWith("http") ? businessUrl : `https://${businessUrl}`,
+    ).hostname.replace(/^www\./i, "");
+    return [
+      `https://logo.clearbit.com/${host}`,
+      `https://www.google.com/s2/favicons?domain=${host}&sz=256`,
+      `https://icons.duckduckgo.com/ip3/${host}.ico`,
+    ];
+  } catch {
+    return [];
+  }
+}
+
+async function firstReachableImage(urls: string[]): Promise<string | null> {
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, {
+        method: "GET",
+        redirect: "follow",
+        signal: AbortSignal.timeout(8000),
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+          Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        },
+      });
+      if (!res.ok) continue;
+      const ct = res.headers.get("content-type") || "";
+      if (ct && !/^image\//i.test(ct) && !/octet-stream/i.test(ct)) continue;
+      return res.url || url;
+    } catch {
+      // try next
+    }
+  }
+  return null;
+}
 
 function brandAssetsForFooter(
   brand: Awaited<ReturnType<typeof extractBrandTokens>>,
@@ -83,6 +138,8 @@ export type ArchiveRecreateResult = {
   differentiationNotes: string;
   textsRewritten: number;
   brandColors: BrandColors;
+  /** design.md markdown generated for this run (brand SSOT) */
+  designMd: string;
   cidCoverage: number;
   unmatchedCidCount: number;
   publishReady: boolean;
@@ -133,13 +190,49 @@ export async function recreateFromArchive(input: {
     archive = await captureArchivedPage(input.sourceUrl);
   }
 
-  const brand = await extractBrandTokens({
+  const brandRaw = await extractBrandTokens({
     businessUrl: input.businessUrl,
     archivedCompetitor: archive,
     profileName: input.brandName,
     profile: input.profile,
     preferredColors: input.preferredColors || input.profile?.brandColors || null,
   });
+
+  // Brand SSOT: structured spec → design.md → apply path uses same tokens
+  const designSpec = buildBrandDesignSpec({
+    tokens: brandRaw,
+    brandName: input.brandName,
+    businessUrl: input.businessUrl,
+    competitorName: input.competitorName,
+  });
+  const designMd = serializeDesignMd(designSpec);
+  if (input.competitorId) {
+    writeDesignMd(input.competitorId, designMd);
+  }
+  let brand = brandTokensFromDesignSpec(designSpec, brandRaw);
+
+  // Ensure footer/nav inventory comes from the brand website (Firecrawl), not competitor
+  try {
+    const linkPack = await extractBrandLinksWithFirecrawl(input.businessUrl);
+    brand.siteAssets = mergeFirecrawlIntoBrandAssets(
+      brand.siteAssets,
+      linkPack,
+      input.businessUrl,
+    );
+    if (linkPack.socialLinks.length) {
+      brand.socialLinks = linkPack.socialLinks;
+    }
+  } catch (err) {
+    console.warn("[archive] brand link refresh failed", err);
+  }
+
+  if (!brand.logoUrl && !brand.siteAssets?.logoUrl) {
+    const cdn = await firstReachableImage(logoCdnFallbacks(input.businessUrl));
+    if (cdn) {
+      brand.logoUrl = cdn;
+      if (brand.siteAssets) brand.siteAssets.logoUrl = cdn;
+    }
+  }
 
   const approvedEarly =
     input.approvedContent &&
@@ -192,6 +285,7 @@ export async function recreateFromArchive(input: {
     brand,
     businessUrl: input.businessUrl,
     brandName: input.brandName,
+    designSpec,
   });
   html = brandApplied.html;
 
@@ -206,18 +300,29 @@ export async function recreateFromArchive(input: {
         businessUrl: input.businessUrl,
         keyword: input.keyword,
         competitorName: input.competitorName,
+        competitorUrl: input.sourceUrl,
         industry: input.profile?.industry || null,
         brandColors: brand.colors,
         logoUrl: logoUrlEarly,
         slots: reserved.slots,
+        designMd,
       });
       html = gen.html;
       generatedImages = gen.images;
-      imageGenNote = gen.images.length
-        ? `Runway GPT Image 2×${gen.images.length} (${gen.embedded} placed)`
-        : gen.warnings[0] || "image generation skipped";
-      if (gen.warnings.length && gen.images.length) {
-        imageGenNote += ` · ${gen.warnings.length} slot warning(s)`;
+      if (gen.images.length) {
+        imageGenNote = `Runway GPT Image 2×${gen.images.length} (${gen.embedded} placed)`;
+        if (gen.warnings.length) {
+          imageGenNote += ` · ${gen.warnings.length} slot warning(s)`;
+        }
+      } else {
+        const fails = gen.warnings.filter((w) =>
+          /failed|Error|Internal server|\b500\b|timeout/i.test(w),
+        );
+        imageGenNote = fails.length
+          ? `AI image generation failed for ${fails.length} slot(s): ${fails[0].slice(0, 140)}`
+          : gen.warnings.find((w) => !/Skipped \d+ logo/i.test(w)) ||
+            gen.warnings[0] ||
+            "image generation produced no images";
       }
     } catch (err) {
       console.warn("[archive] image generation failed", err);
@@ -257,6 +362,7 @@ export async function recreateFromArchive(input: {
         brandName: input.brandName,
         keyword: input.keyword,
         competitorName: input.competitorName,
+        designMd,
       });
     }
 
@@ -276,6 +382,7 @@ export async function recreateFromArchive(input: {
         competitorName: input.competitorName,
         industry: input.profile?.industry || null,
         userFeedback: input.userFeedback,
+        designMd,
       });
       const eligible = stamped.nodes.filter((n) => !n.inFooter).length || 1;
       cidCoverage = replacements.size / eligible;
@@ -294,6 +401,7 @@ export async function recreateFromArchive(input: {
       competitorName: input.competitorName,
       userFeedback: input.userFeedback,
       industry: input.profile?.industry || null,
+      designMd,
     });
     copySource = `Claude CID rewrite×${replacements.size}`;
     const eligible = stamped.nodes.filter((n) => !n.inFooter).length || 1;
@@ -313,6 +421,20 @@ export async function recreateFromArchive(input: {
   const collapsed = collapseDoubledElementText(html);
   html = collapsed.html;
 
+  // Contact swap AFTER CID paste — unmatched nodes often keep competitor "Call 1300…"
+  const contactAssets = approved
+    ? brandAssetsFromContentDraft(
+        approved,
+        brand.siteAssets,
+        input.businessUrl,
+        input.brandName,
+      )
+    : brand.siteAssets;
+  const contacts = applyBrandContactInfo(html, contactAssets);
+  html = contacts.html;
+  const scrub = scrubEmptyChromePills(html);
+  html = scrub.html;
+
   const footerAssets = approved
     ? brandAssetsFromContentDraft(
         approved,
@@ -331,6 +453,10 @@ export async function recreateFromArchive(input: {
     },
   );
   html = footer.html;
+
+  // Footer rebuild can reintroduce chrome — contact pass once more on footer/header
+  const contactsFinal = applyBrandContactInfo(html, footerAssets);
+  html = contactsFinal.html;
 
   // Re-embed after copy/footer passes so later transforms cannot drop Runway srcs
   if (generatedImages.length > 0) {
@@ -379,6 +505,7 @@ export async function recreateFromArchive(input: {
     html = banner + html;
   }
 
+  html = stampFaqInteractivity(html);
   html = injectInteractiveRuntime(html);
 
   let gate = {
@@ -429,17 +556,23 @@ export async function recreateFromArchive(input: {
       : null,
     imageGenNote,
     usedStored ? "CID archive locked" : "archive recaptured",
+    "brand SSOT design.md",
     publishReady ? "publish-ready" : `publish blocked: ${publishBlockers.join("; ")}`,
     gate.ok ? null : `visual gate warn (${(gate.maxDiffRatio * 100).toFixed(1)}%)`,
   ]
     .filter(Boolean)
     .join(" · ");
 
+  if (input.competitorId) {
+    deleteDesignMd(input.competitorId);
+  }
+
   return {
     html,
     differentiationNotes,
     textsRewritten: replacements.size,
     brandColors: brand.colors,
+    designMd,
     cidCoverage,
     unmatchedCidCount,
     publishReady,

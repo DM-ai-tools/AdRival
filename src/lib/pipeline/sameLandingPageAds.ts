@@ -9,6 +9,11 @@ import {
   getCompanyAds,
   isLandingPageUrl,
 } from "../sociavault/client";
+import {
+  getOpenRouterClient,
+  hasOpenRouterKey,
+} from "../openrouter/client";
+import { OPENROUTER_OPENAI_MINI_MODEL } from "../openrouter/openaiCompat";
 import { normalizeLandingUrl } from "./htmlFetch";
 import {
   SEARCH_COUNTRIES,
@@ -44,10 +49,46 @@ export function landingPageMatchKey(url: string | null | undefined): string | nu
     const u = new URL(normalized);
     const host = u.hostname.replace(/^www\./i, "").toLowerCase();
     const path = u.pathname.replace(/\/+$/, "") || "";
-    return `${host}${path}`.toLowerCase();
+
+    // YouTube / Vimeo: keep video id so different videos don't collapse
+    if (/^(youtube\.com|youtu\.be|m\.youtube\.com)$/i.test(host)) {
+      const v =
+        u.searchParams.get("v") ||
+        (host === "youtu.be" ? path.replace(/^\//, "") : "");
+      if (v) return `youtube.com/watch?v=${v}`.toLowerCase();
+    }
+
+    // Keep meaningful query ids for watch/share destinations
+    const idParam =
+      u.searchParams.get("id") ||
+      u.searchParams.get("offer") ||
+      u.searchParams.get("page");
+    const q = idParam ? `?${[...u.searchParams.entries()]
+      .filter(([k]) => /^(id|offer|page|v)$/i.test(k))
+      .map(([k, val]) => `${k}=${val}`)
+      .sort()
+      .join("&")}` : "";
+
+    return `${host}${path}${q}`.toLowerCase();
   } catch {
     return null;
   }
+}
+
+/** Prefer the original ad destination over a redirected/analyzed homepage URL. */
+export function preferDestinationUrl(
+  destinationUrl: string | null | undefined,
+  analyzedUrl?: string | null,
+): string {
+  const dest = (destinationUrl || "").trim();
+  const analyzed = (analyzedUrl || "").trim();
+  if (!analyzed) return dest;
+  if (!dest) return analyzed;
+  const destKey = landingPageMatchKey(dest);
+  const analyzedKey = landingPageMatchKey(analyzed);
+  // Analysis often follows redirects to the homepage — keep the ad's destination
+  if (destKey && analyzedKey && destKey !== analyzedKey) return dest;
+  return analyzed || dest;
 }
 
 function daysSince(iso?: string | null): number {
@@ -116,18 +157,29 @@ async function enrichHooksAndOffers(
     });
   }
 
-  if (!process.env.OPENAI_API_KEY || ads.length === 0) return map;
+  if (ads.length === 0) return map;
+  const llm = hasOpenRouterKey()
+    ? {
+        client: getOpenRouterClient(),
+        model: OPENROUTER_OPENAI_MINI_MODEL,
+      }
+    : process.env.OPENAI_API_KEY
+      ? {
+          client: new OpenAI({ apiKey: process.env.OPENAI_API_KEY }),
+          model: "gpt-4o-mini",
+        }
+      : null;
+  if (!llm) return map;
 
   try {
-    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const payload = ads.slice(0, MAX_ADS_IN_UI).map((a) => ({
       adArchiveId: a.adArchiveId,
       title: a.title,
       body: (a.body || a.fullText || "").slice(0, 500),
       cta: a.ctaText,
     }));
-    const completion = await client.chat.completions.create({
-      model: "gpt-4o-mini",
+    const completion = await llm.client.chat.completions.create({
+      model: llm.model,
       temperature: 0.2,
       response_format: { type: "json_object" },
       messages: [

@@ -1,5 +1,6 @@
-import OpenAI from "openai";
-import { getOpenAiContentModel } from "./contentDraft";
+import { getOpenAiContentModel, hasContentLlmKey } from "./contentDraft";
+import { getOpenAICompatClient } from "../openrouter/openaiCompat";
+import { designMdPromptExcerpt } from "./designMd";
 
 /**
  * Optional design-feedback pass: tweak already-pasted approved strings.
@@ -11,19 +12,23 @@ export async function applyDesignFeedbackToReplacements(input: {
   brandName: string;
   keyword: string;
   competitorName: string;
+  designMd?: string | null;
 }): Promise<Map<string, string>> {
   const feedback = input.userFeedback.trim().slice(0, 4000);
   if (!feedback) return input.replacements;
-  if (!process.env.OPENAI_API_KEY) return input.replacements;
+  if (!hasContentLlmKey()) return input.replacements;
 
   const entries = [...input.replacements.entries()].filter(
     ([, text]) => text.trim().length >= 2,
   );
   if (!entries.length) return input.replacements;
 
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const client = getOpenAICompatClient();
   const model = getOpenAiContentModel();
   const out = new Map(input.replacements);
+  const designExcerpt = input.designMd
+    ? designMdPromptExcerpt(input.designMd, 3500)
+    : null;
 
   // Batch so we don't blow context; feedback applies across batches
   for (let i = 0; i < entries.length; i += 40) {
@@ -46,7 +51,8 @@ Hard rules:
 3) Do not invent new offers, prices, guarantees, or licence numbers.
 4) Never mention competitor "${input.competitorName}".
 5) Keep brand "${input.brandName}" and keyword "${input.keyword}" where they already appear.
-6) Keep similar length (±30%). Prefer minimal edits.`,
+6) Keep similar length (±30%). Prefer minimal edits.
+7) When design.md is provided, respect brand voice/personality notes; never pull competitor brand styling into copy decisions.`,
           },
           {
             role: "user",
@@ -55,6 +61,7 @@ Hard rules:
                 designFeedback: feedback,
                 brand: input.brandName,
                 keyword: input.keyword,
+                designMd: designExcerpt,
                 strings: batch,
               },
               null,

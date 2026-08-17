@@ -13,6 +13,9 @@ import type {
   SearchGeoMode,
 } from "@/lib/types";
 import { buildKeywordsForCategory } from "@/lib/pipeline/keywordSuggestions";
+import { resolveIndustrySop } from "@/lib/guardrails/industrySops";
+
+type GuardrailChoice = "enforce" | "override" | "skip";
 
 interface SearchFormProps {
   platform: AdPlatform;
@@ -34,6 +37,10 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
   );
   const [geoMode, setGeoMode] = useState<SearchGeoMode>("company_locations");
   const [geo, setGeo] = useState(defaultGeoForPlatform(platform));
+  const [guardrailChoice, setGuardrailChoice] =
+    useState<GuardrailChoice>("enforce");
+  const [seekCompetitors, setSeekCompetitors] = useState("");
+  const [guardrailNotes, setGuardrailNotes] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -51,6 +58,17 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
   const selectedCategory =
     categories.find((c) => c.id === selectedCategoryId) || null;
 
+  const matchedSop = useMemo(() => {
+    if (!profile) return null;
+    return resolveIndustrySop({
+      industry: profile.industry,
+      subIndustry: profile.subIndustry,
+      offerings: profile.offerings,
+      description: profile.description,
+      selectedCategory: selectedCategory?.label || null,
+    });
+  }, [profile, selectedCategory?.label]);
+
   useEffect(() => {
     const opts = geosForPlatform(platform);
     setGeo((prev) =>
@@ -59,6 +77,15 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
         : defaultGeoForPlatform(platform),
     );
   }, [platform]);
+
+  useEffect(() => {
+    // Reset override fields when a new URL profile is loaded
+    if (profile) {
+      setGuardrailChoice("enforce");
+      setSeekCompetitors("");
+      setGuardrailNotes("");
+    }
+  }, [profile?.url, profile?.businessName]);
 
   function applyCategoryKeywords(
     nextProfile: BusinessProfile,
@@ -132,8 +159,27 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
+    if (
+      guardrailChoice === "override" &&
+      !seekCompetitors.trim() &&
+      !guardrailNotes.trim()
+    ) {
+      setError(
+        "Describe the competitor types you want, or switch back to industry SOP enforcement.",
+      );
+      return;
+    }
     setLoading(true);
     try {
+      const skipGuardrails = guardrailChoice === "skip";
+      const guardrailOverride =
+        guardrailChoice === "override"
+          ? {
+              enabled: true,
+              seekCompetitors: seekCompetitors.trim() || null,
+              notes: guardrailNotes.trim() || null,
+            }
+          : null;
       const res = await fetch("/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -145,6 +191,8 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
           selectedCategory,
           businessUrl: businessUrl.trim() || null,
           businessProfile: profile,
+          skipGuardrails,
+          guardrailOverride,
         }),
       });
       const data = await res.json();
@@ -200,13 +248,34 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
 
       {profile && (
         <div className="business-profile-card">
+          <div className="industry-banner" aria-label="Detected industry">
+            <span className="industry-banner-kicker">Industry</span>
+            <strong className="industry-banner-title">
+              {profile.industry || "Unknown"}
+              {profile.subIndustry ? (
+                <span className="industry-banner-sub">
+                  {" "}
+                  · {profile.subIndustry}
+                </span>
+              ) : null}
+            </strong>
+            {profile.businessModel ? (
+              <span className="industry-banner-model">
+                {profile.businessModel}
+              </span>
+            ) : null}
+          </div>
           <h3>{profile.businessName}</h3>
-          <p className="muted">
-            {profile.industry}
-            {profile.subIndustry ? ` · ${profile.subIndustry}` : ""}
-            {profile.businessModel ? ` · ${profile.businessModel}` : ""}
-          </p>
           <p>{profile.description}</p>
+          {matchedSop && (
+            <div className="sop-chip-row">
+              <span className="sop-chip">SOP: {matchedSop.label}</span>
+              <span className="form-hint" style={{ margin: 0 }}>
+                Blocks {matchedSop.excludeCompetitorTypes.slice(0, 3).join(", ")}
+                {matchedSop.excludeCompetitorTypes.length > 3 ? "…" : ""}
+              </span>
+            </div>
+          )}
           {deliveryLabel && <p className="form-hint">{deliveryLabel}</p>}
           {profile.locations && profile.locations.length > 0 && (
             <div className="tags" aria-label="Business locations">
@@ -265,6 +334,92 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
             </div>
           )}
         </div>
+      )}
+
+      {profile && (
+        <fieldset className="geo-fieldset guardrail-fieldset">
+          <legend className="search-label">
+            Competitor guardrails (before keyword research)
+          </legend>
+          <p className="form-hint">
+            Industry SOPs filter tools, white-label platforms, courses, and
+            podcasts that are not real competitors for{" "}
+            <strong>{profile.industry}</strong>
+            {matchedSop ? ` (${matchedSop.label})` : ""}. Override only if you
+            need a specific competitor type.
+          </p>
+          <div className="geo-radio-grid" role="radiogroup">
+            <label className="geo-radio">
+              <input
+                type="radio"
+                name={`guardrail-${platform}`}
+                checked={guardrailChoice === "enforce"}
+                onChange={() => setGuardrailChoice("enforce")}
+                disabled={disabled || loading}
+              />
+              <span>Enforce industry SOP</span>
+            </label>
+            <label className="geo-radio">
+              <input
+                type="radio"
+                name={`guardrail-${platform}`}
+                checked={guardrailChoice === "override"}
+                onChange={() => setGuardrailChoice("override")}
+                disabled={disabled || loading}
+              />
+              <span>Override — seek specific types</span>
+            </label>
+            <label className="geo-radio">
+              <input
+                type="radio"
+                name={`guardrail-${platform}`}
+                checked={guardrailChoice === "skip"}
+                onChange={() => setGuardrailChoice("skip")}
+                disabled={disabled || loading}
+              />
+              <span>Skip all guardrails</span>
+            </label>
+          </div>
+          {guardrailChoice === "override" && (
+            <div className="guardrail-override-fields">
+              <label
+                htmlFor={`seek-competitors-${platform}`}
+                className="search-label"
+              >
+                Look for these competitor types
+              </label>
+              <input
+                id={`seek-competitors-${platform}`}
+                type="text"
+                className="search-input"
+                value={seekCompetitors}
+                onChange={(e) => setSeekCompetitors(e.target.value)}
+                placeholder="e.g. white-label agencies, SaaS ad tools, course creators"
+                disabled={disabled || loading}
+              />
+              <label
+                htmlFor={`guardrail-notes-${platform}`}
+                className="search-label"
+              >
+                Extra notes (optional)
+              </label>
+              <textarea
+                id={`guardrail-notes-${platform}`}
+                className="search-textarea"
+                rows={2}
+                value={guardrailNotes}
+                onChange={(e) => setGuardrailNotes(e.target.value)}
+                placeholder="Anything the search should prefer or ignore…"
+                disabled={disabled || loading}
+              />
+            </div>
+          )}
+          {guardrailChoice === "skip" && (
+            <p className="form-hint">
+              Offers ladders will also skip SOP filters for this run.
+            </p>
+          )}
+        </fieldset>
       )}
 
       <fieldset className="geo-fieldset">

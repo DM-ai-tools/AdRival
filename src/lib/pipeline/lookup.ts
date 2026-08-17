@@ -13,16 +13,17 @@ import { pickCompanyPageMatch } from "../openai/analyzer";
 import {
   saveLookupAd,
   saveLookupJob,
+  isLookupJobSuppressed,
 } from "../db";
 import {
   SEARCH_COUNTRIES,
+  type BusinessProfile,
   type LookupAdRecord,
   type LookupJob,
   type LookupJobProgress,
   type LookupPageCandidate,
 } from "../types";
 import { enrichLookupPageMetrics } from "./lookupEnrichment";
-import { runLookupOffersReportPhase } from "./lookupOffersReport";
 
 const MAX_AD_PAGES_PER_COUNTRY = 25;
 
@@ -71,8 +72,13 @@ export async function runCompetitorLookup(
   queryName: string,
   platform: import("../platforms").AdPlatform = "facebook",
   forcedCandidate?: LookupPageCandidate | null,
+  options?: {
+    businessUrl?: string | null;
+    businessProfile?: BusinessProfile | null;
+  },
 ) {
   const now = new Date().toISOString();
+  const businessUrl = (options?.businessUrl || "").trim() || null;
   const job: LookupJob = {
     id: lookupId,
     queryName,
@@ -90,10 +96,18 @@ export async function runCompetitorLookup(
     llmReason: null,
     llmConfidence: null,
     adIds: [],
+    businessUrl: businessUrl
+      ? /^https?:\/\//i.test(businessUrl)
+        ? businessUrl
+        : `https://${businessUrl}`
+      : null,
+    businessProfile: options?.businessProfile || null,
     createdAt: now,
     updatedAt: now,
   };
   saveLookupJob(job);
+
+  if (isLookupJobSuppressed(lookupId)) return;
 
   try {
     const companyRes = await searchCompanies(queryName);
@@ -133,6 +147,8 @@ export async function runCompetitorLookup(
       });
       return;
     }
+
+    if (isLookupJobSuppressed(job.id)) return;
 
     let selected: LookupPageCandidate | null = null;
     let pickReason = "";
@@ -204,6 +220,7 @@ export async function runCompetitorLookup(
       let pages = 0;
 
       do {
+        if (isLookupJobSuppressed(job.id)) return;
         setProgress(job, {
           message: `Fetching ads for ${selected.name} (${country}) — page ${pages + 1}…`,
         });
@@ -286,22 +303,15 @@ export async function runCompetitorLookup(
       } while (cursor && pages < MAX_AD_PAGES_PER_COUNTRY);
     }
 
-    updateLookup(job, {
-      status: "running",
-      progress: {
-        ...job.progress,
-        stage: "analyzing_offers",
-        adsFetched: stored.length,
-        message:
-          stored.length > 0
-            ? `Loaded ${stored.length} ads — analyzing unique creatives & landing pages…`
-            : `Matched "${selected.name}" but found no ads in US/AU.`,
-      },
-    });
-
     if (stored.length > 0) {
-      await runLookupOffersReportPhase(job.id, {
-        finalStatus: "completed",
+      updateLookup(job, {
+        status: "completed",
+        progress: {
+          ...job.progress,
+          stage: "done",
+          adsFetched: stored.length,
+          message: `Loaded ${stored.length} ads for "${selected.name}". Use Get offer & page details on an ad to analyze its landing page.`,
+        },
       });
     } else {
       updateLookup(job, {

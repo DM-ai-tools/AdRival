@@ -1,4 +1,3 @@
-import OpenAI from "openai";
 import { z } from "zod";
 import {
   RELAXED_RELEVANCE_THRESHOLD,
@@ -11,6 +10,10 @@ import {
   type SearchGeoMode,
   type ServiceLabel,
 } from "../types";
+import {
+  getOpenAICompatClient,
+  resolveOpenAICompatModel,
+} from "../openrouter/openaiCompat";
 
 const KEYWORD_STOPWORDS = new Set([
   "a",
@@ -113,9 +116,7 @@ export function serviceKeywordOverlapScore(
 }
 
 function getClient() {
-  const key = process.env.OPENAI_API_KEY;
-  if (!key) throw new Error("OPENAI_API_KEY is not set");
-  return new OpenAI({ apiKey: key });
+  return getOpenAICompatClient();
 }
 
 async function jsonCompletion<T>(
@@ -125,7 +126,7 @@ async function jsonCompletion<T>(
 ): Promise<T> {
   const client = getClient();
   const completion = await client.chat.completions.create({
-    model: "gpt-4o",
+    model: resolveOpenAICompatModel("gpt-4o"),
     temperature: 0.2,
     response_format: { type: "json_object" },
     messages: [
@@ -181,29 +182,28 @@ Return queries that surface rivals in the SAME industry advertising similar prod
 Prefer precise service phrases from the seed keyword and offerings — avoid generic words like "business" or "online".`,
       `Seed keyword: "${keyword}"
 Also consider these suggested competitor keywords: ${businessProfile.competitorKeywords.join(", ")}
-Return 8-12 high-yield search queries.${wantLocal && locLabels.length ? ` Include several with city/suburb: ${locLabels.join(", ")}.` : ""}`,
+Return 4-6 high-yield search queries that tightly match the seed keyword / offerings.${wantLocal && locLabels.length ? ` Include 1-2 with city/suburb: ${locLabels.join(", ")}.` : ""}`,
       `{ "queries": string[] }`,
     );
     const parsed = queryExpansionSchema.safeParse(raw);
     const queries = parsed.success ? parsed.data.queries : [keyword];
     const geoSeeded =
       wantLocal && locLabels.length
-        ? locLabels.flatMap((loc) => [
+        ? locLabels.slice(0, 2).flatMap((loc) => [
             `${keyword} ${loc}`,
             categoryLabel ? `${categoryLabel} ${loc}` : "",
-            `${businessProfile.industry} ${loc}`,
           ])
         : [];
     const seeded = [
       keyword,
       categoryLabel,
-      ...businessProfile.competitorKeywords,
+      ...businessProfile.competitorKeywords.slice(0, 3),
       ...geoSeeded,
       ...queries,
     ];
     return Array.from(
       new Set(seeded.map((q) => q.trim()).filter(Boolean)),
-    ).slice(0, 20);
+    ).slice(0, 8);
   }
 
   const raw = await jsonCompletion<{ queries: string[] }>(
@@ -213,7 +213,7 @@ Focus on agencies selling: Google Ads, SEO, AEO/GEO, and SMM.
 Prefer queries with "agency", "marketing agency", "PPC agency", "SEO agency".
 Avoid queries that surface random local businesses or product brands.`,
     `User keyword: "${keyword}"
-Return 5-8 high-yield Ad Library search queries for agencies. Always include "${keyword} agency" and "${keyword} marketing agency".`,
+Return 4-6 high-yield Ad Library search queries for agencies. Always include "${keyword} agency" and "${keyword} marketing agency".`,
     `{ "queries": string[] }`,
   );
 
@@ -224,18 +224,15 @@ Return 5-8 high-yield Ad Library search queries for agencies. Always include "${
     `${keyword} agency`,
     `${keyword} marketing agency`,
     "Google Ads agency",
-    "Google Ads audit agency",
     "PPC agency",
-    "PPC audit agency",
     "SEO agency",
-    "social media marketing agency",
     "Facebook ads agency",
     ...queries,
   ];
   const unique = Array.from(
     new Set(seeded.map((q) => q.trim()).filter(Boolean)),
   );
-  return unique.slice(0, 14);
+  return unique.slice(0, 8);
 }
 
 const adFilterSchema = z.object({
@@ -437,7 +434,7 @@ CRITICAL READING RULES:
 - relevanceScore must reflect keyword/service overlap with: ${keywordList}
 
 Qualification for relevant=true:
-1) Ad copy clearly relates to "${keyword}" / selected category and seed offerings (score 0–1).
+1) Ad copy clearly relates to "${keyword}" / selected category and seed offerings (score 0–1). Keyword match is mandatory — reject ads whose body does not mention or clearly imply the searched service/product.
 2) Same or tightly adjacent competitor — not a distant cousin in a huge industry.
 3) services: short tags for what they sell (free-form OK), e.g. ["Dental implants","Invisalign"].
 
@@ -445,10 +442,11 @@ Reject (relevant=false) when:
 - Body is generic branding with no service/product match to the keywords
 - They are a different specialty (e.g. orthodontics vs general dentistry when keywords are specific)
 - They are a marketing agency advertising agency services (unless seed is an agency)
+- The creative only shares geography/brand vibes without keyword-relevant offer
 
 OUTPUT:
 - isMarketingAgency=true only if they are primarily a marketing agency.
-- relevant=true only for credible same-service competitors.`
+- relevant=true only for credible same-service competitors whose ads are keyword-relevant.`
     : `You qualify Facebook Ad Library advertisers for a MARKETING-AGENCY competitor finder.
 
 GOAL: Keep ONLY true marketing agencies / marketing consultancies. Reject ordinary businesses that merely run ads to promote themselves.
@@ -541,9 +539,10 @@ OUTPUT:
 
   let relevant: boolean;
   if (profile) {
-    // Require some keyword/service overlap unless score is clearly high
+    // Hard keyword gate: ad copy must overlap search terms / offerings
     const keywordOk =
-      keywordOverlap > 0 || score >= Math.max(scoreFloor + 0.15, 0.55);
+      keywordOverlap >= (options?.relaxed ? 0.08 : 0.12) ||
+      score >= Math.max(scoreFloor + 0.2, 0.65);
     relevant =
       relevantFlag &&
       services.length > 0 &&

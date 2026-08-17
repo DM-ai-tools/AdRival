@@ -10,6 +10,8 @@ import type {
   RecreatedLandingPage,
 } from "@/lib/types";
 import { stripDraftBanner } from "@/lib/pipeline/stripDraftBanner";
+import { synthesizeDocumentFromBlocks } from "@/lib/pipeline/synthesizeDocumentFromBlocks";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 export function RecreatePageClient({ competitorId }: { competitorId: string }) {
   const [competitor, setCompetitor] = useState<CompetitorRecord | null>(null);
@@ -28,6 +30,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
   const [designFeedback, setDesignFeedback] = useState("");
   const [view, setView] = useState<"content" | "design">("content");
   const [refreshingColors, setRefreshingColors] = useState(false);
+  const [showDesignMd, setShowDesignMd] = useState(false);
   const [colorRefreshNote, setColorRefreshNote] = useState<string | null>(null);
   const [regeneratingImageId, setRegeneratingImageId] = useState<string | null>(
     null,
@@ -35,11 +38,21 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
   const [imageFeedback, setImageFeedback] = useState<Record<string, string>>(
     {},
   );
+  const [confirmRedesignOpen, setConfirmRedesignOpen] = useState(false);
 
   const syncFromPage = useCallback((nextPage: RecreatedLandingPage | null) => {
     setPage(nextPage);
-    setBlocks(nextPage?.contentDraft?.blocks || []);
-    setContentDoc(nextPage?.contentDraft?.document || null);
+    const nextBlocks = nextPage?.contentDraft?.blocks || [];
+    setBlocks(nextBlocks);
+    let doc = nextPage?.contentDraft?.document || null;
+    if ((!doc?.sections?.length) && nextBlocks.length > 0) {
+      doc = synthesizeDocumentFromBlocks(nextBlocks, {
+        pageType: nextPage?.contentDraft?.pageType,
+        tone: nextPage?.contentDraft?.tone,
+        competitorUrl: nextPage?.sourceAnalyzedUrl || null,
+      });
+    }
+    setContentDoc(doc);
     if (nextPage?.contentDraft?.userFeedback) {
       setContentFeedback(nextPage.contentDraft.userFeedback);
     }
@@ -158,6 +171,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     setBuilding(true);
     setView("design");
     setColorRefreshNote(null);
+    setConfirmRedesignOpen(false);
     try {
       const res = await fetch("/api/competitors/recreate-page", {
         method: "POST",
@@ -182,6 +196,22 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
       setBuilding(false);
     }
   }, [blocks, competitorId, designFeedback, syncFromPage]);
+
+  const requestRegenerateDesign = useCallback(() => {
+    if (page?.status === "completed" && page.html) {
+      setConfirmRedesignOpen(true);
+      return;
+    }
+    void regenerateDesign();
+  }, [page?.html, page?.status, regenerateDesign]);
+
+  const requestApproveAndBuild = useCallback(() => {
+    if (page?.status === "completed" && page.html) {
+      setConfirmRedesignOpen(true);
+      return;
+    }
+    void approveAndBuild();
+  }, [approveAndBuild, page?.html, page?.status]);
 
   const refreshBrandColors = useCallback(async () => {
     setError(null);
@@ -308,31 +338,38 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- initial load only
   }, [load]);
 
+  // Poll live progress while content/design work is running
+  useEffect(() => {
+    if (!generating && !building) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const res = await fetch(
+          `/api/competitors/recreate-page?competitorId=${encodeURIComponent(competitorId)}`,
+        );
+        const data = await res.json();
+        if (cancelled || !res.ok) return;
+        const next = data.recreatedPage as RecreatedLandingPage | null;
+        if (next?.progress) {
+          setPage((prev) =>
+            prev
+              ? { ...prev, progress: next.progress, status: next.status }
+              : next,
+          );
+        }
+      } catch {
+        // ignore poll errors
+      }
+    };
+    void tick();
+    const id = window.setInterval(() => void tick(), 1200);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [building, competitorId, generating]);
+
   const srcDoc = useMemo(() => page?.html || "", [page?.html]);
-
-  const sections = useMemo(() => {
-    const map = new Map<
-      string,
-      { name: string; index: number; items: LandingContentBlock[] }
-    >();
-    for (const b of blocks) {
-      const key = `${b.sectionIndex}::${b.sectionName}`;
-      const row = map.get(key) || {
-        name: b.sectionName,
-        index: b.sectionIndex,
-        items: [],
-      };
-      row.items.push(b);
-      map.set(key, row);
-    }
-    return [...map.values()].sort((a, b) => a.index - b.index);
-  }, [blocks]);
-
-  function updateBlock(id: string, text: string) {
-    setBlocks((prev) =>
-      prev.map((b) => (b.id === id ? { ...b, text } : b)),
-    );
-  }
 
   function updateDocMeta(field: "title" | "description", value: string) {
     setContentDoc((prev) => {
@@ -384,16 +421,23 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     });
   }
 
-  function isLinkRole(role: string) {
-    return (
-      role === "nav" ||
-      role === "footer_link" ||
-      role === "social" ||
-      role === "internal_link"
-    );
-  }
-
   const hasDocument = Boolean(contentDoc?.sections?.length);
+  const progressPct = Math.min(
+    100,
+    Math.max(
+      generating || building || loading ? 4 : 0,
+      page?.progress?.pct ?? (generating || building ? 8 : 0),
+    ),
+  );
+  const progressMessage =
+    page?.progress?.message ||
+    (building
+      ? "Fitting approved content into the page design…"
+      : generating
+        ? "Drafting full-page content for your brand…"
+        : loading
+          ? "Loading…"
+          : null);
 
   async function copyHtml() {
     if (!page?.html) return;
@@ -515,7 +559,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
               type="button"
               className="search-btn"
               disabled={busy}
-              onClick={() => void regenerateDesign()}
+              onClick={() => requestRegenerateDesign()}
             >
               {building
                 ? "Building design + images…"
@@ -643,7 +687,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
                 type="button"
                 className="search-btn"
                 disabled={busy}
-                onClick={() => void regenerateDesign()}
+                onClick={() => requestRegenerateDesign()}
               >
                 Apply colors to design
               </button>
@@ -654,6 +698,25 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
           ) : null}
         </div>
       )}
+
+      {page?.designMd ? (
+        <details
+          className="panel recreate-design-md"
+          open={showDesignMd}
+          onToggle={(e) =>
+            setShowDesignMd((e.target as HTMLDetailsElement).open)
+          }
+        >
+          <summary className="recreate-design-md-summary">
+            Brand design.md (SSOT for this run)
+          </summary>
+          <p className="muted recreate-feedback-hint">
+            Generated from your brand website. Competitor pages supply layout
+            only — colors, fonts, logos, and button styles come from this file.
+          </p>
+          <pre className="recreate-design-md-body">{page.designMd}</pre>
+        </details>
+      ) : null}
 
       {page?.contentDraft?.differentiationSummary && view === "content" && (
         <p className="recreate-notes">{page.contentDraft.differentiationSummary}</p>
@@ -699,22 +762,33 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
         </p>
       ) : null}
 
-      {(loading || generating) && !showContentReview && !srcDoc && (
-        <div className="recreate-status panel">
-          <p>
-            {generating
-              ? "Scraping the competitor page (Firecrawl markdown) and drafting a unified content plan with Claude…"
-              : "Loading…"}
-          </p>
-        </div>
-      )}
-
-      {building && (
-        <div className="recreate-status panel">
-          <p>
-            Fitting your approved content into the captured page design
-            (Playwright archive + brand tokens)…
-          </p>
+      {(loading || generating || building) && (
+        <div
+          className="recreate-status panel recreate-progress-panel"
+          aria-live="polite"
+        >
+          <div className="offers-analysis-progress-head">
+            <span className="offers-analysis-progress-label">
+              {building
+                ? "Design"
+                : generating || page?.status === "pending"
+                  ? "Content creation"
+                  : "Working"}
+              {page?.progress?.phase ? ` · ${page.progress.phase}` : ""}
+            </span>
+            <span className="offers-analysis-progress-count">
+              {Math.round(progressPct)}%
+            </span>
+          </div>
+          <div className="progress-bar-track offers-analysis-bar">
+            <div
+              className="progress-bar-fill progress-bar-offers"
+              style={{ width: `${progressPct}%` }}
+            />
+          </div>
+          {progressMessage ? (
+            <p className="muted recreate-progress-msg">{progressMessage}</p>
+          ) : null}
         </div>
       )}
 
@@ -738,17 +812,11 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
             <div>
               <h2>Review content</h2>
               <p className="muted">
-                {hasDocument
-                  ? "Page content is presented as one coherent document (sections, FAQs, links, logos). Edit, then approve to fit into the design."
-                  : "Copy is written for each real text placement on the competitor page. Edit below, then approve to paste into the design."}
+                Full page content for your brand — edit in place, then approve to
+                fit into the design.
                 {page?.contentDraft?.model
                   ? ` · model ${page.contentDraft.model}`
                   : null}
-                {page?.contentDraft?.slotSource === "firecrawl_markdown"
-                  ? " · Firecrawl markdown"
-                  : page?.contentDraft?.slotCount
-                    ? ` · ${page.contentDraft.slotCount} page slots`
-                    : null}
               </p>
             </div>
             <div className="recreate-content-actions">
@@ -764,7 +832,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
                 type="button"
                 className="search-btn"
                 disabled={busy}
-                onClick={() => void approveAndBuild()}
+                onClick={() => requestApproveAndBuild()}
               >
                 {building
                   ? "Building design + images…"
@@ -778,100 +846,100 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
           </div>
 
           {hasDocument && contentDoc ? (
-            <div className="recreate-document">
-              {contentDoc.summary ? (
-                <p className="recreate-doc-summary muted">{contentDoc.summary}</p>
-              ) : null}
+            <article className="recreate-full-doc panel">
               {contentDoc.meta ? (
-                <div className="recreate-section panel">
-                  <h3 className="recreate-section-title">Meta</h3>
-                  <div className="recreate-block-list">
-                    <label className="recreate-block">
-                      <span className="recreate-block-label">Title</span>
-                      <textarea
-                        className="recreate-block-input"
-                        rows={2}
-                        disabled={busy}
-                        value={contentDoc.meta.title}
-                        onChange={(e) => updateDocMeta("title", e.target.value)}
-                      />
-                    </label>
-                    <label className="recreate-block">
-                      <span className="recreate-block-label">Description</span>
-                      <textarea
-                        className="recreate-block-input"
-                        rows={3}
-                        disabled={busy}
-                        value={contentDoc.meta.description}
-                        onChange={(e) =>
-                          updateDocMeta("description", e.target.value)
-                        }
-                      />
-                    </label>
-                  </div>
-                </div>
+                <header className="recreate-full-doc-meta">
+                  <textarea
+                    className="recreate-full-doc-title"
+                    rows={2}
+                    disabled={busy}
+                    aria-label="Page title"
+                    placeholder="Page title"
+                    value={contentDoc.meta.title}
+                    onChange={(e) => updateDocMeta("title", e.target.value)}
+                  />
+                  <textarea
+                    className="recreate-full-doc-desc"
+                    rows={2}
+                    disabled={busy}
+                    aria-label="Meta description"
+                    placeholder="Meta description"
+                    value={contentDoc.meta.description}
+                    onChange={(e) =>
+                      updateDocMeta("description", e.target.value)
+                    }
+                  />
+                </header>
               ) : null}
 
               {contentDoc.sections.map((section) => (
-                <div key={section.id} className="recreate-section panel">
-                  <h3 className="recreate-section-title">
-                    {section.title}
-                    <em className="recreate-section-kind">{section.kind}</em>
-                  </h3>
+                <section
+                  key={section.id}
+                  className={`recreate-full-doc-section kind-${section.kind}`}
+                >
+                  {section.kind !== "meta" ? (
+                    <textarea
+                      className="recreate-full-doc-heading"
+                      rows={1}
+                      disabled={busy}
+                      aria-label="Section heading"
+                      value={section.title}
+                      onChange={(e) =>
+                        updateDocSection(section.id, { title: e.target.value })
+                      }
+                    />
+                  ) : null}
 
-                  {section.kind === "faq" || (section.faqs && section.faqs.length > 0) ? (
-                    <div className="recreate-faq-list">
+                  {section.kind === "faq" ||
+                  (section.faqs && section.faqs.length > 0) ? (
+                    <div className="recreate-full-doc-faqs">
                       {(section.faqs || []).map((faq, i) => (
-                        <div key={`${section.id}-faq-${i}`} className="recreate-faq-item">
-                          <label className="recreate-block">
-                            <span className="recreate-block-label">
-                              Question {i + 1}
-                            </span>
-                            <textarea
-                              className="recreate-block-input"
-                              rows={2}
-                              disabled={busy}
-                              value={faq.question}
-                              onChange={(e) =>
-                                updateDocFaq(
-                                  section.id,
-                                  i,
-                                  "question",
-                                  e.target.value,
-                                )
-                              }
-                            />
-                          </label>
-                          <label className="recreate-block">
-                            <span className="recreate-block-label">Answer</span>
-                            <textarea
-                              className="recreate-block-input"
-                              rows={4}
-                              disabled={busy}
-                              value={faq.answer}
-                              onChange={(e) =>
-                                updateDocFaq(
-                                  section.id,
-                                  i,
-                                  "answer",
-                                  e.target.value,
-                                )
-                              }
-                            />
-                          </label>
+                        <div
+                          key={`${section.id}-faq-${i}`}
+                          className="recreate-full-doc-faq"
+                        >
+                          <textarea
+                            className="recreate-full-doc-faq-q"
+                            rows={2}
+                            disabled={busy}
+                            aria-label={`FAQ question ${i + 1}`}
+                            value={faq.question}
+                            onChange={(e) =>
+                              updateDocFaq(
+                                section.id,
+                                i,
+                                "question",
+                                e.target.value,
+                              )
+                            }
+                          />
+                          <textarea
+                            className="recreate-full-doc-faq-a"
+                            rows={3}
+                            disabled={busy}
+                            aria-label={`FAQ answer ${i + 1}`}
+                            value={faq.answer}
+                            onChange={(e) =>
+                              updateDocFaq(
+                                section.id,
+                                i,
+                                "answer",
+                                e.target.value,
+                              )
+                            }
+                          />
                         </div>
                       ))}
                     </div>
                   ) : null}
 
                   {section.links && section.links.length > 0 ? (
-                    <ul className="recreate-doc-links">
+                    <ul className="recreate-full-doc-links">
                       {section.links.map((link, i) => (
                         <li key={`${section.id}-link-${i}`}>
-                          <strong>{link.label}</strong>
-                          <span className="muted"> · {link.href}</span>
-                          {link.role ? (
-                            <em className="muted"> ({link.role})</em>
+                          <span>{link.label}</span>
+                          {link.href ? (
+                            <span className="muted"> — {link.href}</span>
                           ) : null}
                         </li>
                       ))}
@@ -879,10 +947,10 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
                   ) : null}
 
                   {section.logos && section.logos.length > 0 ? (
-                    <ul className="recreate-doc-logos">
+                    <ul className="recreate-full-doc-links">
                       {section.logos.map((logo, i) => (
                         <li key={`${section.id}-logo-${i}`}>
-                          <strong>{logo.label}</strong>
+                          <span>{logo.label}</span>
                           {logo.note ? (
                             <span className="muted"> — {logo.note}</span>
                           ) : null}
@@ -894,113 +962,41 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
                   {section.kind !== "faq" &&
                   section.kind !== "links" &&
                   section.kind !== "logos" ? (
-                    <label className="recreate-block">
-                      <span className="recreate-block-label">Section copy</span>
-                      <textarea
-                        className="recreate-block-input recreate-doc-body"
-                        rows={Math.min(
-                          12,
-                          Math.max(4, (section.body || "").split("\n").length + 2),
-                        )}
-                        disabled={busy}
-                        value={section.body}
-                        onChange={(e) =>
-                          updateDocSection(section.id, { body: e.target.value })
-                        }
-                      />
-                    </label>
+                    <textarea
+                      className="recreate-full-doc-body"
+                      rows={Math.min(
+                        16,
+                        Math.max(3, (section.body || "").split("\n").length + 2),
+                      )}
+                      disabled={busy}
+                      aria-label={`${section.title} copy`}
+                      value={section.body}
+                      onChange={(e) =>
+                        updateDocSection(section.id, { body: e.target.value })
+                      }
+                    />
                   ) : section.body &&
-                    section.kind !== "faq" &&
+                    !(section.faqs && section.faqs.length) &&
                     !(section.links && section.links.length) &&
                     !(section.logos && section.logos.length) ? (
-                    <label className="recreate-block">
-                      <span className="recreate-block-label">Notes</span>
-                      <textarea
-                        className="recreate-block-input"
-                        rows={3}
-                        disabled={busy}
-                        value={section.body}
-                        onChange={(e) =>
-                          updateDocSection(section.id, { body: e.target.value })
-                        }
-                      />
-                    </label>
+                    <textarea
+                      className="recreate-full-doc-body"
+                      rows={3}
+                      disabled={busy}
+                      value={section.body}
+                      onChange={(e) =>
+                        updateDocSection(section.id, { body: e.target.value })
+                      }
+                    />
                   ) : null}
-                </div>
+                </section>
               ))}
-            </div>
+            </article>
           ) : (
-            sections.map((section) => (
-              <div
-                key={`${section.index}-${section.name}`}
-                className="recreate-section panel"
-              >
-                <h3 className="recreate-section-title">{section.name}</h3>
-                <div className="recreate-block-list">
-                  {section.items.map((block) => (
-                    <label key={block.id} className="recreate-block">
-                      <span className="recreate-block-label">
-                        {block.label}
-                        <em>{block.role}</em>
-                        {block.minLen != null && block.maxLen != null ? (
-                          <span
-                            className={
-                              block.text.length < (block.minLen || 0) ||
-                              block.text.length > (block.maxLen || 0)
-                                ? "recreate-len-warn"
-                                : "muted"
-                            }
-                          >
-                            {" "}
-                            · {block.text.length}/{block.minLen}–{block.maxLen}{" "}
-                            chars
-                            {block.targetLen ? ` (was ${block.targetLen})` : ""}
-                          </span>
-                        ) : block.targetLen ? (
-                          <span className="muted">
-                            {" "}
-                            · {block.text.length}/{block.targetLen} chars
-                          </span>
-                        ) : null}
-                      </span>
-                      {block.originalText ? (
-                        <span
-                          className="recreate-block-original muted"
-                          title={block.originalText}
-                        >
-                          Competitor: {block.originalText.slice(0, 120)}
-                          {block.originalText.length > 120 ? "…" : ""}
-                        </span>
-                      ) : null}
-                      {block.href ? (
-                        <span
-                          className="recreate-block-href muted"
-                          title={block.href}
-                        >
-                          {block.href}
-                        </span>
-                      ) : null}
-                      <textarea
-                        className="recreate-block-input"
-                        rows={
-                          isLinkRole(block.role)
-                            ? 1
-                            : block.role === "body" ||
-                                block.role === "testimonial" ||
-                                block.role === "meta_description" ||
-                                block.role === "faq_answer"
-                              ? 4
-                              : 2
-                        }
-                        disabled={busy}
-                        value={block.text}
-                        onChange={(e) => updateBlock(block.id, e.target.value)}
-                      />
-                    </label>
-                  ))}
-                </div>
-              </div>
-            ))
+            <p className="empty-hint panel">
+              Content document is still assembling. If this persists, click
+              Regenerate content.
+            </p>
           )}
         </section>
       )}
@@ -1089,6 +1085,25 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
           </div>
         </section>
       ) : null}
+
+      <ConfirmDialog
+        open={confirmRedesignOpen}
+        title="Design already completed"
+        description={
+          page?.sourceAnalyzedUrl
+            ? `A design already exists for this landing page (${page.sourceAnalyzedUrl}). Confirm to redesign — the current HTML preview will be replaced.`
+            : "A design already exists for this landing page. Confirm to redesign — the current HTML preview will be replaced."
+        }
+        confirmLabel="Redesign anyway"
+        cancelLabel="Cancel"
+        busy={building}
+        tone="danger"
+        onCancel={() => setConfirmRedesignOpen(false)}
+        onConfirm={() => {
+          // Prefer regenerate when a design already exists (keeps content edits).
+          void regenerateDesign();
+        }}
+      />
     </main>
   );
 }

@@ -5,6 +5,7 @@ import type {
   DatabaseShape,
   HistoryRunSummary,
   LookupAdRecord,
+  SearchCompetitorAdRecord,
   LookupHistorySummary,
   LookupJob,
   SearchJob,
@@ -12,6 +13,10 @@ import type {
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const DB_PATH = path.join(DATA_DIR, "store.json");
+const DB_LOCK_PATH = path.join(DATA_DIR, "store.json.lock");
+
+/** In-process cache so status polls don't re-parse a multi-MB store on every request. */
+let memoryDb: DatabaseShape | null = null;
 
 /**
  * Tombstones for runs deleted while a pipeline is still in-flight.
@@ -20,12 +25,258 @@ const DB_PATH = path.join(DATA_DIR, "store.json");
 const suppressedSearchJobIds = new Set<string>();
 const suppressedLookupJobIds = new Set<string>();
 
+/** Cross-request / multi-process lock for read-modify-write of store.json */
+function withDbLock<T>(fn: () => T): T {
+  const started = Date.now();
+  while (true) {
+    try {
+      if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+      }
+      const fd = fs.openSync(DB_LOCK_PATH, "wx");
+      fs.writeFileSync(fd, `${process.pid}\n${new Date().toISOString()}`);
+      fs.closeSync(fd);
+      break;
+    } catch {
+      if (Date.now() - started > 15_000) {
+        // Stale lock recovery
+        try {
+          fs.unlinkSync(DB_LOCK_PATH);
+        } catch {
+          /* ignore */
+        }
+        if (Date.now() - started > 20_000) {
+          throw new Error("Timed out waiting for data store lock");
+        }
+      }
+      const waitUntil = Date.now() + 25;
+      while (Date.now() < waitUntil) {
+        /* spin */
+      }
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    try {
+      fs.unlinkSync(DB_LOCK_PATH);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 export function isSearchJobSuppressed(jobId: string): boolean {
   return suppressedSearchJobIds.has(jobId);
 }
 
+/** Stop an in-flight keyword search (pipeline checks suppression each page). */
+export function stopSearchJob(
+  jobId: string,
+  reason = "Stopped by user",
+): SearchJob | null {
+  suppressedSearchJobIds.add(jobId);
+  return withDbLock(() => {
+    const db = ensureDb();
+    const now = new Date().toISOString();
+    for (const lj of db.lookupJobs ?? []) {
+      if (!lj.id.startsWith(`search-offers:${jobId}`)) continue;
+      suppressedLookupJobIds.add(lj.id);
+      if (
+        lj.status === "running" ||
+        lj.progress?.stage === "analyzing_offers"
+      ) {
+        lj.status = lj.adIds?.length ? "partial" : "failed";
+        lj.error = reason;
+        lj.progress = {
+          ...lj.progress,
+          stage: "done",
+          message: reason,
+          offersPhase: "failed",
+          offersCurrentName: null,
+        };
+        lj.updatedAt = now;
+      }
+    }
+    const idx = db.jobs.findIndex((j) => j.id === jobId);
+    if (idx < 0) {
+      writeDb(db);
+      return null;
+    }
+    const prev = db.jobs[idx];
+    const hasRoster = (prev.competitorIds?.length || 0) > 0;
+    const inOffers = prev.progress?.stage === "analyzing_offers";
+    db.jobs[idx] = {
+      ...prev,
+      status: hasRoster
+        ? prev.status === "running"
+          ? "partial"
+          : prev.status
+        : "failed",
+      error: hasRoster ? prev.error : reason,
+      offersReport: inOffers
+        ? {
+            status: "failed",
+            createdAt:
+              prev.offersReport?.createdAt || now,
+            updatedAt: now,
+            error: reason,
+            adsAnalyzed: prev.offersReport?.adsAnalyzed || 0,
+            adCopy: prev.offersReport?.adCopy || {
+              uniqueCreatives: 0,
+              creatives: [],
+              uniqueOffers: [],
+            },
+            landingPages: prev.offersReport?.landingPages || {
+              uniqueUrls: 0,
+              analyzed: 0,
+              failed: 0,
+              pages: [],
+              uniqueOffers: [],
+            },
+          }
+        : prev.offersReport,
+      progress: {
+        ...prev.progress,
+        stage: hasRoster ? "done" : "failed",
+        message: reason,
+        offersPhase: inOffers ? "failed" : prev.progress.offersPhase,
+        offersCurrentName: null,
+      },
+      updatedAt: now,
+    };
+    writeDb(db);
+    return db.jobs[idx];
+  });
+}
+
 export function isLookupJobSuppressed(lookupId: string): boolean {
   return suppressedLookupJobIds.has(lookupId);
+}
+
+export function listLookupJobs(limit = 200): LookupJob[] {
+  return (ensureDb().lookupJobs ?? []).slice(0, limit);
+}
+
+/** Stop an in-flight competitor lookup (including offers analysis). */
+export function stopLookupJob(
+  lookupId: string,
+  reason = "Stopped by user",
+): LookupJob | null {
+  suppressedLookupJobIds.add(lookupId);
+  return withDbLock(() => {
+    const db = ensureDb();
+    if (!db.lookupJobs) db.lookupJobs = [];
+    const idx = db.lookupJobs.findIndex((j) => j.id === lookupId);
+    if (idx < 0) {
+      writeDb(db);
+      return null;
+    }
+    const prev = db.lookupJobs[idx];
+    const hasAds = (prev.adIds?.length || 0) > 0;
+    const inOffers = prev.progress?.stage === "analyzing_offers";
+    const now = new Date().toISOString();
+    db.lookupJobs[idx] = {
+      ...prev,
+      status: hasAds
+        ? prev.status === "running"
+          ? "partial"
+          : prev.status
+        : "failed",
+      error: hasAds ? prev.error : reason,
+      offersReport: inOffers
+        ? {
+            status: "failed",
+            createdAt: prev.offersReport?.createdAt || now,
+            updatedAt: now,
+            error: reason,
+            adsAnalyzed: prev.offersReport?.adsAnalyzed || 0,
+            adCopy: prev.offersReport?.adCopy || {
+              uniqueCreatives: 0,
+              creatives: [],
+              uniqueOffers: [],
+            },
+            landingPages: prev.offersReport?.landingPages || {
+              uniqueUrls: 0,
+              analyzed: 0,
+              failed: 0,
+              pages: [],
+              uniqueOffers: [],
+            },
+          }
+        : prev.offersReport,
+      progress: {
+        ...prev.progress,
+        stage: hasAds ? "done" : "failed",
+        message: reason,
+        offersPhase: inOffers ? "failed" : prev.progress.offersPhase,
+        offersCurrentName: null,
+      },
+      updatedAt: now,
+    };
+    writeDb(db);
+    return db.lookupJobs[idx];
+  });
+}
+
+const SEARCH_IN_FLIGHT_STAGES = new Set([
+  "expanding_queries",
+  "searching_ads",
+  "analyzing_ad",
+  "filling_quota",
+  "brand_review",
+  "analyzing_offers",
+  "searching_pages",
+  "fetching_ads",
+]);
+
+const LOOKUP_IN_FLIGHT_STAGES = new Set([
+  "searching_pages",
+  "verifying_page",
+  "fetching_ads",
+  "analyzing_offers",
+]);
+
+export function isSearchWorkInFlight(job: SearchJob): boolean {
+  if (suppressedSearchJobIds.has(job.id)) return false;
+  return (
+    job.status === "running" ||
+    SEARCH_IN_FLIGHT_STAGES.has(job.progress?.stage || "")
+  );
+}
+
+export function isLookupWorkInFlight(job: LookupJob): boolean {
+  if (suppressedLookupJobIds.has(job.id)) return false;
+  return (
+    job.status === "running" ||
+    LOOKUP_IN_FLIGHT_STAGES.has(job.progress?.stage || "")
+  );
+}
+
+/** Stop every in-flight search, lookup, brand review, and offers analysis. */
+export function stopAllInFlightWork(
+  reason = "Stopped by user",
+  extra?: { jobIds?: string[]; lookupIds?: string[] },
+): { searchJobIds: string[]; lookupIds: string[] } {
+  const searchJobIds = new Set<string>(extra?.jobIds?.filter(Boolean) || []);
+  const lookupIds = new Set<string>(extra?.lookupIds?.filter(Boolean) || []);
+  for (const job of listJobs(200)) {
+    if (isSearchWorkInFlight(job)) searchJobIds.add(job.id);
+  }
+  for (const job of listLookupJobs(200)) {
+    if (isLookupWorkInFlight(job)) lookupIds.add(job.id);
+  }
+  const stoppedSearch: string[] = [];
+  const stoppedLookup: string[] = [];
+  for (const id of searchJobIds) {
+    if (stopSearchJob(id, reason)) stoppedSearch.push(id);
+    else suppressedSearchJobIds.add(id);
+  }
+  for (const id of lookupIds) {
+    if (stopLookupJob(id, reason)) stoppedLookup.push(id);
+    else suppressedLookupJobIds.add(id);
+  }
+  return { searchJobIds: stoppedSearch, lookupIds: stoppedLookup };
 }
 
 function emptyDb(): DatabaseShape {
@@ -35,37 +286,47 @@ function emptyDb(): DatabaseShape {
     seenPageIds: [],
     lookupJobs: [],
     lookupAds: [],
+    searchCompetitorAds: [],
   };
 }
 
+function hydrateDb(parsed: DatabaseShape): DatabaseShape {
+  if (!parsed.lookupJobs) parsed.lookupJobs = [];
+  if (!parsed.lookupAds) parsed.lookupAds = [];
+  if (!parsed.jobs) parsed.jobs = [];
+  if (!parsed.competitors) parsed.competitors = [];
+  if (!parsed.seenPageIds) parsed.seenPageIds = [];
+  if (!parsed.searchCompetitorAds) parsed.searchCompetitorAds = [];
+  return parsed;
+}
+
 function ensureDb(): DatabaseShape {
+  if (memoryDb) return memoryDb;
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
   if (!fs.existsSync(DB_PATH)) {
     const db = emptyDb();
-    fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), "utf8");
+    memoryDb = db;
+    fs.writeFileSync(DB_PATH, JSON.stringify(db), "utf8");
     return db;
   }
   try {
     const raw = fs.readFileSync(DB_PATH, "utf8");
-    const parsed = JSON.parse(raw) as DatabaseShape;
-    if (!parsed.lookupJobs) parsed.lookupJobs = [];
-    if (!parsed.lookupAds) parsed.lookupAds = [];
-    if (!parsed.jobs) parsed.jobs = [];
-    if (!parsed.competitors) parsed.competitors = [];
-    if (!parsed.seenPageIds) parsed.seenPageIds = [];
-    return parsed;
+    memoryDb = hydrateDb(JSON.parse(raw) as DatabaseShape);
+    return memoryDb;
   } catch {
-    return emptyDb();
+    memoryDb = emptyDb();
+    return memoryDb;
   }
 }
 
 function writeDb(db: DatabaseShape) {
+  memoryDb = db;
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), "utf8");
+  fs.writeFileSync(DB_PATH, JSON.stringify(db), "utf8");
 }
 
 function normalizeDb(input: Partial<DatabaseShape> | null | undefined): DatabaseShape {
@@ -76,6 +337,9 @@ function normalizeDb(input: Partial<DatabaseShape> | null | undefined): Database
   if (Array.isArray(input.seenPageIds)) db.seenPageIds = input.seenPageIds;
   if (Array.isArray(input.lookupJobs)) db.lookupJobs = input.lookupJobs;
   if (Array.isArray(input.lookupAds)) db.lookupAds = input.lookupAds;
+  if (Array.isArray(input.searchCompetitorAds)) {
+    db.searchCompetitorAds = input.searchCompetitorAds;
+  }
   return db;
 }
 
@@ -85,6 +349,7 @@ export function getStoreStats(db: DatabaseShape = ensureDb()) {
     competitors: db.competitors.length,
     lookupJobs: db.lookupJobs?.length ?? 0,
     lookupAds: db.lookupAds?.length ?? 0,
+    searchCompetitorAds: db.searchCompetitorAds?.length ?? 0,
     seenPageIds: db.seenPageIds.length,
   };
 }
@@ -127,6 +392,10 @@ export function mergeStore(payload: Partial<DatabaseShape>): {
     ),
     lookupJobs: byId(current.lookupJobs ?? [], incoming.lookupJobs ?? []),
     lookupAds: byId(current.lookupAds ?? [], incoming.lookupAds ?? []),
+    searchCompetitorAds: byId(
+      current.searchCompetitorAds ?? [],
+      incoming.searchCompetitorAds ?? [],
+    ),
   };
 
   // Newest-first ordering for history UIs
@@ -138,6 +407,9 @@ export function mergeStore(payload: Partial<DatabaseShape>): {
     (b.createdAt || "").localeCompare(a.createdAt || ""),
   );
   merged.lookupAds!.sort((a, b) =>
+    (b.createdAt || "").localeCompare(a.createdAt || ""),
+  );
+  merged.searchCompetitorAds!.sort((a, b) =>
     (b.createdAt || "").localeCompare(a.createdAt || ""),
   );
 
@@ -277,6 +549,9 @@ export function deleteHistoryRun(runId: string): {
   const removedPageIds = new Set(removed.map((c) => c.pageId));
 
   db.competitors = db.competitors.filter((c) => c.runId !== runId);
+  if (db.searchCompetitorAds) {
+    db.searchCompetitorAds = db.searchCompetitorAds.filter((a) => a.runId !== runId);
+  }
   db.jobs.splice(jobIdx, 1);
 
   // Only un-see a pageId if no other stored competitor still uses it
@@ -299,6 +574,7 @@ export function clearAllHistory(): { removedRuns: number; removedCompetitors: nu
   const removedCompetitors = db.competitors.length;
   db.jobs = [];
   db.competitors = [];
+  db.searchCompetitorAds = [];
   db.seenPageIds = [];
   writeDb(db);
   return { removedRuns, removedCompetitors };
@@ -308,59 +584,89 @@ export function clearAllHistory(): { removedRuns: number; removedCompetitors: nu
 
 export function saveLookupJob(job: LookupJob): boolean {
   if (suppressedLookupJobIds.has(job.id)) return false;
-  const db = ensureDb();
-  if (!db.lookupJobs) db.lookupJobs = [];
-  const idx = db.lookupJobs.findIndex((j) => j.id === job.id);
-  if (idx >= 0) {
-    const existing = db.lookupJobs[idx];
-    const mergedIds = Array.from(
-      new Set([...(existing.adIds || []), ...(job.adIds || [])]),
-    );
-    db.lookupJobs[idx] = { ...job, adIds: mergedIds };
-  } else {
-    db.lookupJobs.unshift(job);
-  }
-  writeDb(db);
-  return true;
+  return withDbLock(() => {
+    const db = ensureDb();
+    if (!db.lookupJobs) db.lookupJobs = [];
+    const idx = db.lookupJobs.findIndex((j) => j.id === job.id);
+    if (idx >= 0) {
+      const existing = db.lookupJobs[idx];
+      const mergedIds = Array.from(
+        new Set([...(existing.adIds || []), ...(job.adIds || [])]),
+      );
+      db.lookupJobs[idx] = { ...job, adIds: mergedIds };
+    } else {
+      db.lookupJobs.unshift(job);
+    }
+    writeDb(db);
+    return true;
+  });
 }
 
 export function getLookupJob(id: string): LookupJob | null {
   return ensureDb().lookupJobs?.find((j) => j.id === id) ?? null;
 }
 
+export function updateLookupJob(
+  id: string,
+  patch: Partial<LookupJob>,
+): LookupJob | null {
+  if (suppressedLookupJobIds.has(id)) return null;
+  return withDbLock(() => {
+    const db = ensureDb();
+    if (!db.lookupJobs) db.lookupJobs = [];
+    const idx = db.lookupJobs.findIndex((j) => j.id === id);
+    if (idx < 0) return null;
+    db.lookupJobs[idx] = {
+      ...db.lookupJobs[idx],
+      ...patch,
+      updatedAt: new Date().toISOString(),
+    };
+    writeDb(db);
+    return db.lookupJobs[idx];
+  });
+}
+
 export function listLookupHistory(limit = 100): LookupHistorySummary[] {
   const db = ensureDb();
   const jobs = db.lookupJobs ?? [];
   const ads = db.lookupAds ?? [];
-  return jobs.slice(0, limit).map((job) => {
+  return jobs
+    .filter((j) => !j.internalOnly)
+    .slice(0, limit)
+    .map((job) => {
     const fromIds = job.adIds?.length ?? 0;
     const fromFilter = ads.filter((a) => a.lookupId === job.id).length;
     return {
       ...job,
       adCount: Math.max(fromIds, fromFilter),
     };
-  });
+    });
 }
 
 export function saveLookupAd(ad: LookupAdRecord): boolean {
-  if (suppressedLookupJobIds.has(ad.lookupId)) return false;
-  const db = ensureDb();
-  if (!db.lookupAds) db.lookupAds = [];
-  if (!db.lookupJobs) db.lookupJobs = [];
-  if (!db.lookupJobs.some((j) => j.id === ad.lookupId)) return false;
-  const existing = db.lookupAds.findIndex((a) => a.id === ad.id);
-  if (existing >= 0) {
-    db.lookupAds[existing] = ad;
-  } else {
-    db.lookupAds.unshift(ad);
-  }
-  const job = db.lookupJobs.find((j) => j.id === ad.lookupId);
-  if (job && !job.adIds.includes(ad.id)) {
-    job.adIds.push(ad.id);
-    job.updatedAt = new Date().toISOString();
-  }
-  writeDb(db);
-  return true;
+  return saveLookupAds([ad]);
+}
+
+export function saveLookupAds(ads: LookupAdRecord[]): boolean {
+  if (!ads.length) return true;
+  const lookupId = ads[0].lookupId;
+  if (suppressedLookupJobIds.has(lookupId)) return false;
+  return withDbLock(() => {
+    const db = ensureDb();
+    if (!db.lookupAds) db.lookupAds = [];
+    if (!db.lookupJobs) db.lookupJobs = [];
+    if (!db.lookupJobs.some((j) => j.id === lookupId)) return false;
+    const job = db.lookupJobs.find((j) => j.id === lookupId);
+    for (const ad of ads) {
+      const existing = db.lookupAds.findIndex((a) => a.id === ad.id);
+      if (existing >= 0) db.lookupAds[existing] = ad;
+      else db.lookupAds.unshift(ad);
+      if (job && !job.adIds.includes(ad.id)) job.adIds.push(ad.id);
+    }
+    if (job) job.updatedAt = new Date().toISOString();
+    writeDb(db);
+    return true;
+  });
 }
 
 export function getLookupAd(adId: string): LookupAdRecord | null {
@@ -371,15 +677,39 @@ export function updateLookupAd(
   adId: string,
   patch: Partial<LookupAdRecord>,
 ): LookupAdRecord | null {
-  const db = ensureDb();
-  if (!db.lookupAds) db.lookupAds = [];
-  const idx = db.lookupAds.findIndex((a) => a.id === adId);
-  if (idx < 0) return null;
-  db.lookupAds[idx] = { ...db.lookupAds[idx], ...patch };
-  const job = db.lookupJobs?.find((j) => j.id === db.lookupAds![idx].lookupId);
-  if (job) job.updatedAt = new Date().toISOString();
-  writeDb(db);
-  return db.lookupAds[idx];
+  return withDbLock(() => {
+    const db = ensureDb();
+    if (!db.lookupAds) db.lookupAds = [];
+    const idx = db.lookupAds.findIndex((a) => a.id === adId);
+    if (idx < 0) return null;
+    const prev = db.lookupAds[idx];
+    let next = { ...prev, ...patch };
+    // Never let a stale "pending" clobber a completed/failed analysis
+    if (
+      patch.pageAnalysis?.status === "pending" &&
+      (prev.pageAnalysis?.status === "completed" ||
+        prev.pageAnalysis?.status === "failed") &&
+      prev.pageAnalysis.offer
+    ) {
+      // Allow intentional refresh only when previous error/offer will be replaced
+      // by a later completed write; pending marker is fine for UX mid-flight.
+      next = {
+        ...next,
+        pageAnalysis: {
+          ...patch.pageAnalysis,
+          // Keep last good offer visible while refreshing
+          offer: prev.pageAnalysis.offer,
+          pageArchitecture: prev.pageAnalysis.pageArchitecture,
+          summary: prev.pageAnalysis.summary,
+        },
+      };
+    }
+    db.lookupAds[idx] = next;
+    const job = db.lookupJobs?.find((j) => j.id === db.lookupAds![idx].lookupId);
+    if (job) job.updatedAt = new Date().toISOString();
+    writeDb(db);
+    return db.lookupAds[idx];
+  });
 }
 
 export function getLookupAds(lookupId: string): LookupAdRecord[] {
@@ -415,4 +745,49 @@ export function clearAllLookupHistory(): {
   db.lookupAds = [];
   writeDb(db);
   return { removedRuns, removedAds };
+}
+
+export function saveSearchCompetitorAd(ad: SearchCompetitorAdRecord): boolean {
+  return saveSearchCompetitorAds([ad]);
+}
+
+/** Replace cached ads for one competitor in a single store write. */
+export function saveSearchCompetitorAds(
+  ads: SearchCompetitorAdRecord[],
+  options?: { replaceCompetitorId?: string; runId?: string },
+): boolean {
+  if (!ads.length && !options?.replaceCompetitorId) return true;
+  const runId = options?.runId || ads[0]?.runId;
+  if (!runId || suppressedSearchJobIds.has(runId)) return false;
+  return withDbLock(() => {
+    const db = ensureDb();
+    if (!db.searchCompetitorAds) db.searchCompetitorAds = [];
+    if (!db.jobs.some((j) => j.id === runId)) return false;
+    if (options?.replaceCompetitorId) {
+      db.searchCompetitorAds = db.searchCompetitorAds.filter(
+        (a) =>
+          !(a.runId === runId && a.competitorId === options.replaceCompetitorId),
+      );
+    }
+    for (const ad of ads) {
+      const idx = db.searchCompetitorAds.findIndex((a) => a.id === ad.id);
+      if (idx >= 0) db.searchCompetitorAds[idx] = ad;
+      else db.searchCompetitorAds.unshift(ad);
+    }
+    writeDb(db);
+    return true;
+  });
+}
+
+export function getSearchCompetitorAdsByRun(runId: string): SearchCompetitorAdRecord[] {
+  return (ensureDb().searchCompetitorAds ?? []).filter((a) => a.runId === runId);
+}
+
+export function getSearchCompetitorAdsByCompetitor(
+  runId: string,
+  competitorId: string,
+): SearchCompetitorAdRecord[] {
+  return (ensureDb().searchCompetitorAds ?? []).filter(
+    (a) => a.runId === runId && a.competitorId === competitorId,
+  );
 }

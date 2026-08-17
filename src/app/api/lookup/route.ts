@@ -56,6 +56,8 @@ export async function POST(request: Request) {
 
     const lookupId = uuidv4();
     const queryName = forcedCandidate?.name || name;
+    const businessUrl =
+      typeof body.businessUrl === "string" ? body.businessUrl.trim() : "";
 
     after(() => {
       void dispatchPlatformLookup(
@@ -63,6 +65,7 @@ export async function POST(request: Request) {
         queryName,
         platform,
         forcedCandidate,
+        businessUrl ? { businessUrl } : undefined,
       );
     });
 
@@ -70,6 +73,7 @@ export async function POST(request: Request) {
       lookupId,
       queryName,
       platform,
+      businessUrl: businessUrl || null,
       forced: Boolean(forcedCandidate),
     });
   } catch (err) {

@@ -4,6 +4,7 @@ import {
   extractBrandColorsFromHtml,
   luminance,
   normalizeHex,
+  saturation,
   type RankedColor,
 } from "./brandColors";
 import {
@@ -22,6 +23,17 @@ import {
   isJunkBrandHex,
   pickStrongestBrandHex,
 } from "./paletteHarmonize";
+
+/** Muted nav/chrome vs vivid CTA/logo mark — used to fix Firecrawl role mixups. */
+function isMutedChromeHex(hex: string): boolean {
+  const sat = saturation(hex);
+  const lum = luminance(hex);
+  return sat < 0.35 && lum > 0.12 && lum < 0.85;
+}
+
+function isVividBrandHex(hex: string): boolean {
+  return saturation(hex) >= 0.45 && !isJunkBrandHex(hex);
+}
 
 function domainOf(url: string): string {
   try {
@@ -42,9 +54,10 @@ export function isChallengeOrEmptyHtml(html: string | null | undefined): boolean
 }
 
 /**
- * Firecrawl often labels theme/link blues as `colors.primary` while the real
- * brand CTA lives on `buttonPrimary` (+ accent/link/text). Prefer the CTA when
- * it disagrees in hue and is backed by another branding field.
+ * Firecrawl often labels muted nav/chrome as `colors.primary` while the real
+ * brand mark / CTA lives on `buttonPrimary` or accent. Prefer the vivid CTA
+ * when reported primary is low-sat chrome — even in the same coarse hue family
+ * (e.g. dusty rose #AA8D85 vs orange #FF602F both bucket as "red").
  */
 function resolveFirecrawlPrimary(
   reported: string | null,
@@ -53,8 +66,24 @@ function resolveFirecrawlPrimary(
 ): string | null {
   if (!reported && !btnBg) return null;
   if (!reported) return btnBg;
-  if (!btnBg || isJunkBrandHex(btnBg)) return reported;
-  if (hueFamily(btnBg) === hueFamily(reported)) return reported;
+  if (!btnBg || isJunkBrandHex(btnBg)) {
+    // Still allow a vivid accent/link to beat muted reported primary
+    const vividBacker = backing.find(
+      (h): h is string => Boolean(h) && isVividBrandHex(h!),
+    );
+    if (isMutedChromeHex(reported) && vividBacker) return vividBacker;
+    return reported;
+  }
+
+  const reportedMuted = isMutedChromeHex(reported);
+  const btnVivid = isVividBrandHex(btnBg);
+  if (reportedMuted && btnVivid) return btnBg;
+
+  // Same hue family is NOT enough to keep reported — compare saturation
+  if (hueFamily(btnBg) === hueFamily(reported)) {
+    if (saturation(btnBg) >= saturation(reported) + 0.18) return btnBg;
+    return reported;
+  }
 
   const supporters = backing.filter(
     (h): h is string =>
@@ -63,14 +92,91 @@ function resolveFirecrawlPrimary(
       hueFamily(h!) === hueFamily(btnBg),
   ).length;
 
-  // CTA + accent/link/text agree, or reported primary is a lone blue while CTA is not
   if (
     supporters >= 1 ||
-    (hueFamily(reported) === "blue" && hueFamily(btnBg) !== "blue")
+    (hueFamily(reported) === "blue" && hueFamily(btnBg) !== "blue") ||
+    (reportedMuted && btnVivid)
   ) {
     return btnBg;
   }
   return reported;
+}
+
+/**
+ * Post-pass for Firecrawl roles: demote muted chrome from primary when a vivid
+ * accent/CTA exists; never leave body `text` as a neon CTA/accent color.
+ * Does not invent hexes — only reassigns roles among already-extracted colors.
+ */
+export function sanitizeFirecrawlPaletteRoles(colors: BrandColors): BrandColors {
+  let primary = normalizeHex(colors.primary || "") || colors.primary;
+  let secondary = normalizeHex(colors.secondary || "") || colors.secondary;
+  let accent = normalizeHex(colors.accent || "") || colors.accent;
+  let text = normalizeHex(colors.text || "") || colors.text;
+  const background =
+    normalizeHex(colors.background || "") || colors.background || "#FFFFFF";
+  const muted = normalizeHex(colors.muted || "") || colors.muted || "#64748B";
+
+  if (!primary) return colors;
+
+  // Prefer vivid accent as primary when current primary is muted chrome
+  if (
+    primary &&
+    accent &&
+    primary !== accent &&
+    isMutedChromeHex(primary) &&
+    isVividBrandHex(accent)
+  ) {
+    const chrome = primary;
+    primary = accent;
+    // Keep chrome as secondary only if secondary is missing/junk/near-duplicate
+    if (
+      !secondary ||
+      isJunkBrandHex(secondary) ||
+      secondary === chrome ||
+      secondary === primary
+    ) {
+      secondary = chrome;
+    }
+    // Accent stays the vivid action color (same as primary is fine for CTAs)
+    accent = primary;
+  } else if (primary && accent && primary === accent && isMutedChromeHex(primary)) {
+    // Both muted — try secondary if it's vivid (unlikely) else leave
+  }
+
+  // Strongest among primary/accent wins when primary is still muted chrome
+  if (primary && isMutedChromeHex(primary)) {
+    const strongest = pickStrongestBrandHex([primary, accent, secondary]);
+    if (strongest && isVividBrandHex(strongest) && strongest !== primary) {
+      const chrome = primary;
+      primary = strongest;
+      if (accent === chrome || !accent || isMutedChromeHex(accent)) {
+        accent = strongest;
+      }
+      if (!secondary || secondary === strongest) secondary = chrome;
+    }
+  }
+
+  // Text must be readable ink — not the same neon as accent/CTA
+  const textIsAction =
+    Boolean(text) &&
+    (text === accent ||
+      text === primary ||
+      (isVividBrandHex(text!) && saturation(text!) >= 0.4));
+  if (!text || textIsAction) {
+    const darkInk =
+      secondary && luminance(secondary) < 0.18 ? secondary : "#0F172A";
+    text = luminance(background) > 0.45 ? darkInk : "#FFFFFF";
+  }
+
+  return {
+    ...colors,
+    primary,
+    secondary: secondary || primary,
+    accent: accent || primary,
+    background,
+    text: text || "#0F172A",
+    muted: muted || "#64748B",
+  };
 }
 
 /**
@@ -131,7 +237,7 @@ export function colorsFromFirecrawlBranding(
         ? btnBg
         : accent;
 
-  return {
+  const raw: BrandColors = {
     primary,
     secondary: secondary && !isJunkBrandHex(secondary) ? secondary : primary,
     accent: accentFinal && !isJunkBrandHex(accentFinal) ? accentFinal : primary,
@@ -140,6 +246,7 @@ export function colorsFromFirecrawlBranding(
     muted: muted && !isJunkBrandHex(muted) ? muted : "#64748B",
     source: `firecrawl-branding:${sourceUrl}`,
   };
+  return sanitizeFirecrawlPaletteRoles(raw);
 }
 
 export function designFromFirecrawlBranding(

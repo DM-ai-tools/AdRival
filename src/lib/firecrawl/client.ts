@@ -126,6 +126,8 @@ export type FirecrawlScrapeResult = {
     html?: string | null;
     links?: string[];
     branding?: FirecrawlBrandingProfile | null;
+    /** Temporary screenshot URL from Firecrawl (expires ~24h) */
+    screenshot?: string | null;
     metadata?: {
       title?: string | null;
       description?: string | null;
@@ -135,6 +137,43 @@ export type FirecrawlScrapeResult = {
     json?: Record<string, unknown> | null;
   };
 };
+
+/**
+ * Full-page screenshot of a URL via Firecrawl scrape screenshot format.
+ * Returns a temporary HTTPS URL (or null when Firecrawl/key unavailable).
+ */
+export async function firecrawlScrapeScreenshot(
+  url: string,
+  options?: { fullPage?: boolean; quality?: number },
+): Promise<{ screenshotUrl: string | null; finalUrl: string | null }> {
+  if (!hasFirecrawlKey()) {
+    return { screenshotUrl: null, finalUrl: null };
+  }
+  const fullPage = options?.fullPage !== false;
+  const quality = Math.min(100, Math.max(40, options?.quality ?? 72));
+  const result = await firecrawlPost<FirecrawlScrapeResult>("/scrape", {
+    url,
+    formats: [
+      {
+        type: "screenshot",
+        fullPage,
+        quality,
+      },
+    ],
+    onlyMainContent: false,
+    waitFor: 2500,
+    blockAds: true,
+    proxy: "auto",
+  });
+  const shot =
+    (typeof result.data?.screenshot === "string" && result.data.screenshot) ||
+    null;
+  const finalUrl =
+    result.data?.metadata?.sourceURL ||
+    result.data?.metadata?.url ||
+    url;
+  return { screenshotUrl: shot, finalUrl };
+}
 
 export async function firecrawlMapSite(
   url: string,
