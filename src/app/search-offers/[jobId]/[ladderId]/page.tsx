@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import type {
   LookupCoreOfferLadder,
@@ -53,11 +54,10 @@ function adsForLadder(
   return fromNames;
 }
 
-export default function SearchOfferLadderPage({
-  params,
-}: {
-  params: { jobId: string; ladderId: string };
-}) {
+export default function SearchOfferLadderPage() {
+  const params = useParams<{ jobId: string; ladderId: string }>();
+  const jobId = params.jobId;
+  const ladderId = params.ladderId;
   const [job, setJob] = useState<SearchJob | null>(null);
   const [ads, setAds] = useState<SearchCompetitorAdRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -67,7 +67,7 @@ export default function SearchOfferLadderPage({
     async function load() {
       try {
         const res = await fetch(
-          `/api/search/status?jobId=${encodeURIComponent(params.jobId)}`,
+          `/api/search/status?jobId=${encodeURIComponent(jobId)}`,
         );
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Failed to load offers ladder");
@@ -84,12 +84,12 @@ export default function SearchOfferLadderPage({
     return () => {
       cancelled = true;
     };
-  }, [params.jobId]);
+  }, [jobId]);
 
   const ladder = useMemo<LookupCoreOfferLadder | null>(() => {
     const ladders = job?.offersReport?.valueLadder?.ladders || [];
-    return ladders.find((l) => l.id === params.ladderId) || null;
-  }, [job?.offersReport?.valueLadder?.ladders, params.ladderId]);
+    return ladders.find((l) => l.id === ladderId) || null;
+  }, [job?.offersReport?.valueLadder?.ladders, ladderId]);
 
   const referencedAds = useMemo(
     () => (ladder ? adsForLadder(ladder, ads) : []),
