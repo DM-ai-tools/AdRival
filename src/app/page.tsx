@@ -14,6 +14,7 @@ import {
 } from "@/components/SearchOffersReportPanel";
 import { UnifiedHistoryPanel } from "@/components/UnifiedHistoryPanel";
 import { KillWorkButton } from "@/components/KillWorkButton";
+import { AuthHeaderActions } from "@/components/AuthHeaderActions";
 import { PlatformPicker } from "@/components/PlatformPicker";
 import { PLATFORM_META, type AdPlatform } from "@/lib/platforms";
 import type { UnifiedHistoryItem } from "@/lib/historyUnified";
@@ -357,12 +358,15 @@ export default function HomePage() {
             search and lookup in one place.
           </p>
         </div>
-        <KillWorkButton
-          active={workActive}
-          jobId={jobId || historyJob?.id}
-          lookupId={lookupId || historyLookupJob?.id}
-          onStopped={refreshAfterStop}
-        />
+        <div className="product-header-actions">
+          <AuthHeaderActions />
+          <KillWorkButton
+            active={workActive}
+            jobId={jobId || historyJob?.id}
+            lookupId={lookupId || historyLookupJob?.id}
+            onStopped={refreshAfterStop}
+          />
+        </div>
       </header>
 
       <div className="tab-bar tab-bar-wide mode-bar" role="tablist">

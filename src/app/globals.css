@@ -2929,9 +2929,64 @@ a.lp-recreate-link {
   gap: 20px;
 }
 
-.kill-work-btn {
+.product-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
   flex-shrink: 0;
   margin-top: 10px;
+}
+
+.logout-btn {
+  font-size: 0.88rem;
+}
+
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-top: 48px;
+  padding-bottom: 48px;
+}
+
+.login-card {
+  width: min(100%, 420px);
+  padding: 28px 28px 32px;
+}
+
+.login-card-head {
+  margin-bottom: 20px;
+}
+
+.login-card-head .brand {
+  font-size: 2rem;
+  margin-bottom: 8px;
+}
+
+.login-card-head h1 {
+  margin: 0 0 8px;
+  font-size: 1.35rem;
+  font-weight: 600;
+}
+
+.login-card-head .lede {
+  font-size: 0.95rem;
+}
+
+.login-form {
+  margin: 0;
+}
+
+.login-submit {
+  width: 100%;
+}
+
+.kill-work-btn {
+  flex-shrink: 0;
+  margin-top: 0;
   padding: 10px 16px;
   font-size: 0.88rem;
 }
