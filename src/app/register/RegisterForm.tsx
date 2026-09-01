@@ -2,15 +2,14 @@
 
 import Link from "next/link";
 import { FormEvent, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 
-export default function LoginForm() {
+export default function RegisterForm() {
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const nextPath = searchParams.get("next") || "/";
-
+  const [displayName, setDisplayName] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -19,16 +18,21 @@ export default function LoginForm() {
     setError(null);
     setLoading(true);
     try {
-      const res = await fetch("/api/auth/login", {
+      const res = await fetch("/api/auth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({
+          displayName,
+          username,
+          password,
+          confirmPassword,
+        }),
       });
       const data = await res.json();
       if (!res.ok) {
-        throw new Error(data.error || "Login failed");
+        throw new Error(data.error || "Registration failed");
       }
-      router.replace(nextPath.startsWith("/") ? nextPath : "/");
+      router.replace("/");
       router.refresh();
     } catch (err) {
       setError((err as Error).message);
@@ -44,10 +48,10 @@ export default function LoginForm() {
       <section className="login-card panel glow-panel">
         <header className="login-card-head">
           <p className="brand">AdRival</p>
-          <h1>Sign in</h1>
+          <h1>Create account</h1>
           <p className="lede">
-            Sign in with your username and password to access competitive ad
-            intelligence.
+            Choose a display name, username, and password. Your account is
+            stored securely in the app database.
           </p>
         </header>
 
@@ -55,6 +59,22 @@ export default function LoginForm() {
           className="search-form login-form"
           onSubmit={(e) => void handleSubmit(e)}
         >
+          <label htmlFor="displayName" className="search-label">
+            Your name
+          </label>
+          <input
+            id="displayName"
+            type="text"
+            className="search-input"
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            placeholder="e.g. Rithin"
+            autoComplete="name"
+            autoFocus
+            required
+            disabled={loading}
+          />
+
           <label htmlFor="username" className="search-label">
             Username
           </label>
@@ -64,9 +84,8 @@ export default function LoginForm() {
             className="search-input"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
-            placeholder="your_username"
+            placeholder="letters, numbers, underscores"
             autoComplete="username"
-            autoFocus
             required
             disabled={loading}
           />
@@ -80,8 +99,23 @@ export default function LoginForm() {
             className="search-input"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            placeholder="Your password"
-            autoComplete="current-password"
+            placeholder="At least 8 characters"
+            autoComplete="new-password"
+            required
+            disabled={loading}
+          />
+
+          <label htmlFor="confirmPassword" className="search-label">
+            Confirm password
+          </label>
+          <input
+            id="confirmPassword"
+            type="password"
+            className="search-input"
+            value={confirmPassword}
+            onChange={(e) => setConfirmPassword(e.target.value)}
+            placeholder="Repeat password"
+            autoComplete="new-password"
             required
             disabled={loading}
           />
@@ -96,15 +130,21 @@ export default function LoginForm() {
             <button
               type="submit"
               className="search-btn login-submit"
-              disabled={loading || !username.trim() || !password}
+              disabled={
+                loading ||
+                !displayName.trim() ||
+                !username.trim() ||
+                !password ||
+                !confirmPassword
+              }
             >
-              {loading ? "Signing in…" : "Sign in"}
+              {loading ? "Creating account…" : "Create account"}
             </button>
           </div>
         </form>
 
         <p className="form-hint login-switch">
-          No account yet? <Link href="/register">Create one</Link>
+          Already have an account? <Link href="/login">Sign in</Link>
         </p>
       </section>
     </main>

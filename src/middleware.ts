@@ -1,8 +1,15 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { isAuthEnabled, verifySessionToken } from "@/lib/auth/session";
+import { parseSessionToken, SESSION_COOKIE } from "@/lib/auth/session";
 
-const PUBLIC_PATHS = ["/login", "/api/auth/login", "/api/auth/status", "/api/health"];
+const PUBLIC_PATHS = [
+  "/login",
+  "/register",
+  "/api/auth/login",
+  "/api/auth/register",
+  "/api/auth/status",
+  "/api/health",
+];
 
 function isPublicPath(pathname: string): boolean {
   return PUBLIC_PATHS.some(
@@ -11,15 +18,12 @@ function isPublicPath(pathname: string): boolean {
 }
 
 export async function middleware(request: NextRequest) {
-  if (!isAuthEnabled()) {
-    return NextResponse.next();
-  }
-
   const { pathname } = request.nextUrl;
-  const token = request.cookies.get("adrival_session")?.value;
-  const valid = await verifySessionToken(token);
+  const token = request.cookies.get(SESSION_COOKIE)?.value;
+  const session = await parseSessionToken(token);
+  const valid = session !== null;
 
-  if (pathname === "/login") {
+  if (pathname === "/login" || pathname === "/register") {
     if (valid) {
       return NextResponse.redirect(new URL("/", request.url));
     }

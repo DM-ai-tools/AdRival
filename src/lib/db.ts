@@ -1,6 +1,8 @@
 import fs from "fs";
 import path from "path";
 import type {
+  AppUser,
+  AppUserPublic,
   CompetitorRecord,
   DatabaseShape,
   HistoryRunSummary,
@@ -287,6 +289,7 @@ function emptyDb(): DatabaseShape {
     lookupJobs: [],
     lookupAds: [],
     searchCompetitorAds: [],
+    users: [],
   };
 }
 
@@ -297,6 +300,7 @@ function hydrateDb(parsed: DatabaseShape): DatabaseShape {
   if (!parsed.competitors) parsed.competitors = [];
   if (!parsed.seenPageIds) parsed.seenPageIds = [];
   if (!parsed.searchCompetitorAds) parsed.searchCompetitorAds = [];
+  if (!parsed.users) parsed.users = [];
   return parsed;
 }
 
@@ -791,3 +795,77 @@ export function getSearchCompetitorAdsByCompetitor(
     (a) => a.runId === runId && a.competitorId === competitorId,
   );
 }
+
+export function listUsers(): AppUser[] {
+  return [...(ensureDb().users ?? [])];
+}
+
+export function getUserById(id: string): AppUser | null {
+  return (ensureDb().users ?? []).find((u) => u.id === id) || null;
+}
+
+export function getUserByUsername(username: string): AppUser | null {
+  const key = username.trim().toLowerCase();
+  return (ensureDb().users ?? []).find((u) => u.username === key) || null;
+}
+
+export function createUser(input: {
+  username: string;
+  displayName: string;
+  passwordHash: string;
+}): AppUser {
+  return withDbLock(() => {
+    const db = ensureDb();
+    if (!db.users) db.users = [];
+    const username = input.username.trim().toLowerCase();
+    if (db.users.some((u) => u.username === username)) {
+      throw new Error("Username already taken");
+    }
+    const now = new Date().toISOString();
+    const user: AppUser = {
+      id: crypto.randomUUID(),
+      username,
+      displayName: input.displayName.trim(),
+      passwordHash: input.passwordHash,
+      createdAt: now,
+      updatedAt: now,
+    };
+    db.users.unshift(user);
+    writeDb(db);
+    return user;
+  });
+}
+
+export function updateUser(
+  id: string,
+  patch: Partial<Pick<AppUser, "displayName" | "passwordHash">>,
+): AppUser | null {
+  return withDbLock(() => {
+    const db = ensureDb();
+    if (!db.users) db.users = [];
+    const idx = db.users.findIndex((u) => u.id === id);
+    if (idx < 0) return null;
+    const prev = db.users[idx];
+    db.users[idx] = {
+      ...prev,
+      ...patch,
+      displayName:
+        patch.displayName !== undefined
+          ? patch.displayName.trim()
+          : prev.displayName,
+      updatedAt: new Date().toISOString(),
+    };
+    writeDb(db);
+    return db.users[idx];
+  });
+}
+
+export function toPublicUser(user: AppUser): AppUserPublic {
+  return {
+    id: user.id,
+    username: user.username,
+    displayName: user.displayName,
+    createdAt: user.createdAt,
+  };
+}
+

@@ -2984,6 +2984,52 @@ a.lp-recreate-link {
   width: 100%;
 }
 
+.login-switch {
+  margin-top: 16px;
+  text-align: center;
+}
+
+.auth-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.auth-user-link {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--ink);
+  text-decoration: none;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 90%, #fff);
+}
+
+.auth-user-link:hover {
+  text-decoration: none;
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+
+.account-page {
+  min-height: 100vh;
+}
+
+.account-header {
+  margin-bottom: 24px;
+}
+
+.account-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 18px;
+}
+
+.account-panel h2 {
+  margin: 0 0 14px;
+  font-size: 1.1rem;
+}
+
 .kill-work-btn {
   flex-shrink: 0;
   margin-top: 0;

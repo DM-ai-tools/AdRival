@@ -952,7 +952,23 @@ export interface DatabaseShape {
   lookupJobs?: LookupJob[];
   lookupAds?: LookupAdRecord[];
   searchCompetitorAds?: SearchCompetitorAdRecord[];
+  users?: AppUser[];
 }
+
+/** Stored in data/store.json — passwordHash never sent to clients. */
+export interface AppUser {
+  id: string;
+  username: string;
+  displayName: string;
+  passwordHash: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type AppUserPublic = Pick<
+  AppUser,
+  "id" | "username" | "displayName" | "createdAt"
+>;
 
 /** Cached ads fetched for keyword-search competitors (SociaVault reuse). */
 export interface SearchCompetitorAdRecord {

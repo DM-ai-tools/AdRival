@@ -1,20 +1,30 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { LogoutButton } from "@/components/LogoutButton";
+import type { AppUserPublic } from "@/lib/types";
 
 export function AuthHeaderActions() {
-  const [showLogout, setShowLogout] = useState(false);
+  const [user, setUser] = useState<AppUserPublic | null>(null);
 
   useEffect(() => {
     void fetch("/api/auth/status")
       .then((r) => r.json())
-      .then((data: { enabled?: boolean; authenticated?: boolean }) => {
-        setShowLogout(Boolean(data.enabled && data.authenticated));
+      .then((data: { authenticated?: boolean; user?: AppUserPublic | null }) => {
+        setUser(data.authenticated && data.user ? data.user : null);
       })
-      .catch(() => setShowLogout(false));
+      .catch(() => setUser(null));
   }, []);
 
-  if (!showLogout) return null;
-  return <LogoutButton />;
+  if (!user) return null;
+
+  return (
+    <div className="auth-header-actions">
+      <Link href="/account" className="auth-user-link">
+        {user.displayName}
+      </Link>
+      <LogoutButton />
+    </div>
+  );
 }

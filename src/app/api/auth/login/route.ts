@@ -1,41 +1,40 @@
 import { NextResponse } from "next/server";
 import {
   createSessionToken,
-  isAuthEnabled,
+  isSecureRequest,
   sessionCookieOptions,
   SESSION_COOKIE,
-  verifyLoginPassword,
 } from "@/lib/auth/session";
+import { verifyPassword } from "@/lib/auth/password";
+import { validatePassword, validateUsername } from "@/lib/auth/validation";
+import { getUserByUsername, toPublicUser } from "@/lib/db";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
-  if (!isAuthEnabled()) {
-    return NextResponse.json({ ok: true, authDisabled: true });
-  }
-
-  let body: { password?: string } = {};
+  let body: { username?: string; password?: string } = {};
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
 
-  const password = String(body.password ?? "");
-  if (!password) {
-    return NextResponse.json({ error: "Password is required" }, { status: 400 });
+  const usernameErr = validateUsername(String(body.username ?? ""));
+  if (usernameErr) {
+    return NextResponse.json({ error: usernameErr }, { status: 400 });
+  }
+  const passwordErr = validatePassword(String(body.password ?? ""));
+  if (passwordErr) {
+    return NextResponse.json({ error: passwordErr }, { status: 400 });
   }
 
-  if (!verifyLoginPassword(password)) {
-    return NextResponse.json({ error: "Invalid password" }, { status: 401 });
+  const user = getUserByUsername(String(body.username ?? ""));
+  if (!user || !(await verifyPassword(String(body.password ?? ""), user.passwordHash))) {
+    return NextResponse.json({ error: "Invalid username or password" }, { status: 401 });
   }
 
-  const token = await createSessionToken();
-  const secure =
-    process.env.NODE_ENV === "production" ||
-    request.url.startsWith("https://");
-
-  const res = NextResponse.json({ ok: true });
-  res.cookies.set(SESSION_COOKIE, token, sessionCookieOptions(secure));
+  const token = await createSessionToken(toPublicUser(user));
+  const res = NextResponse.json({ ok: true, user: toPublicUser(user) });
+  res.cookies.set(SESSION_COOKIE, token, sessionCookieOptions(isSecureRequest(request)));
   return res;
 }

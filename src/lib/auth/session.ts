@@ -1,16 +1,22 @@
+import type { AppUserPublic } from "../types";
+
 export const SESSION_COOKIE = "adrival_session";
 export const SESSION_MAX_AGE_SEC = 60 * 60 * 24 * 7;
 
-export function isAuthEnabled(): boolean {
-  return Boolean(process.env.LOGIN_PASSWORD?.trim());
+export interface SessionPayload {
+  sub: string;
+  username: string;
+  displayName: string;
+  exp: number;
 }
 
 function sessionSecret(): string {
-  return (
-    process.env.SESSION_SECRET?.trim() ||
-    process.env.LOGIN_PASSWORD?.trim() ||
-    ""
-  );
+  const secret = process.env.SESSION_SECRET?.trim();
+  if (secret) return secret;
+  if (process.env.NODE_ENV === "development") {
+    return "dev-insecure-session-secret-change-me";
+  }
+  throw new Error("SESSION_SECRET is not configured");
 }
 
 function base64UrlEncode(bytes: Uint8Array): string {
@@ -38,40 +44,53 @@ async function hmacSign(data: string, secret: string): Promise<string> {
   return base64UrlEncode(new Uint8Array(sig));
 }
 
-export async function createSessionToken(): Promise<string> {
-  const exp = Math.floor(Date.now() / 1000) + SESSION_MAX_AGE_SEC;
+export async function createSessionToken(user: AppUserPublic): Promise<string> {
+  const payload: SessionPayload = {
+    sub: user.id,
+    username: user.username,
+    displayName: user.displayName,
+    exp: Math.floor(Date.now() / 1000) + SESSION_MAX_AGE_SEC,
+  };
   const payloadB64 = base64UrlEncode(
-    new TextEncoder().encode(JSON.stringify({ exp })),
+    new TextEncoder().encode(JSON.stringify(payload)),
   );
   const sig = await hmacSign(payloadB64, sessionSecret());
   return `${payloadB64}.${sig}`;
 }
 
-export async function verifySessionToken(
+export async function parseSessionToken(
   token: string | undefined | null,
-): Promise<boolean> {
-  if (!isAuthEnabled()) return true;
-  if (!token) return false;
+): Promise<SessionPayload | null> {
+  if (!token) return null;
 
   const [payloadB64, sig] = token.split(".");
-  if (!payloadB64 || !sig) return false;
+  if (!payloadB64 || !sig) return null;
 
-  const expected = await hmacSign(payloadB64, sessionSecret());
-  if (sig !== expected) return false;
+  let secret: string;
+  try {
+    secret = sessionSecret();
+  } catch {
+    return null;
+  }
+
+  const expected = await hmacSign(payloadB64, secret);
+  if (sig !== expected) return null;
 
   try {
-    const json = JSON.parse(base64UrlDecode(payloadB64)) as { exp?: number };
-    if (!json.exp || json.exp < Math.floor(Date.now() / 1000)) return false;
-    return true;
+    const json = JSON.parse(base64UrlDecode(payloadB64)) as SessionPayload;
+    if (!json.sub || !json.exp || json.exp < Math.floor(Date.now() / 1000)) {
+      return null;
+    }
+    return json;
   } catch {
-    return false;
+    return null;
   }
 }
 
-export function verifyLoginPassword(password: string): boolean {
-  const expected = process.env.LOGIN_PASSWORD?.trim();
-  if (!expected) return true;
-  return password === expected;
+export async function verifySessionToken(
+  token: string | undefined | null,
+): Promise<boolean> {
+  return (await parseSessionToken(token)) !== null;
 }
 
 export function sessionCookieOptions(secure: boolean) {
@@ -82,4 +101,10 @@ export function sessionCookieOptions(secure: boolean) {
     path: "/",
     maxAge: SESSION_MAX_AGE_SEC,
   };
+}
+
+export function isSecureRequest(request: Request): boolean {
+  return (
+    process.env.NODE_ENV === "production" || request.url.startsWith("https://")
+  );
 }
