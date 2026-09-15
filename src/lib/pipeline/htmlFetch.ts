@@ -179,7 +179,7 @@ async function fetchViaFirecrawl(url: string): Promise<{
     html = markdownToBasicHtml(markdown, metaTitle);
   }
   if (!html || html.length < 200) {
-    throw new Error(`Firecrawl returned empty HTML for ${url}`);
+    throw new Error(`Site scrape returned empty HTML for ${url}`);
   }
   if (looksBlocked(html)) {
     throw new Error(`Firecrawl still hit bot protection for ${url}`);

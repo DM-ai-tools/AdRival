@@ -11,6 +11,7 @@ import {
   regenerateGeneratedImageForRecreation,
   saveRecreationContentEdits,
 } from "@/lib/pipeline/recreateLandingPage";
+import { sanitizeClientFacingText } from "@/lib/clientFacing";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -135,7 +136,11 @@ export async function POST(request: Request) {
   } catch (err) {
     console.error("[competitors/recreate-page]", err);
     return NextResponse.json(
-      { error: (err as Error).message },
+      {
+        error: sanitizeClientFacingText(
+          (err as Error).message || "Recreation failed",
+        ),
+      },
       { status: 500 },
     );
   }

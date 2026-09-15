@@ -310,7 +310,7 @@ export async function recreateFromArchive(input: {
       html = gen.html;
       generatedImages = gen.images;
       if (gen.images.length) {
-        imageGenNote = `Runway GPT Image 2×${gen.images.length} (${gen.embedded} placed)`;
+        imageGenNote = `Generated images×${gen.images.length} (${gen.embedded} placed)`;
         if (gen.warnings.length) {
           imageGenNote += ` · ${gen.warnings.length} slot warning(s)`;
         }
@@ -403,7 +403,7 @@ export async function recreateFromArchive(input: {
       industry: input.profile?.industry || null,
       designMd,
     });
-    copySource = `Claude CID rewrite×${replacements.size}`;
+    copySource = `Content rewrite×${replacements.size}`;
     const eligible = stamped.nodes.filter((n) => !n.inFooter).length || 1;
     cidCoverage = replacements.size / eligible;
   }
@@ -497,7 +497,7 @@ export async function recreateFromArchive(input: {
 
   const archiveNote = usedStored
     ? "reused content-phase archive"
-    : "fresh Playwright capture";
+    : "fresh page capture";
   const banner = `<div id="adrival-draft-banner" style="position:sticky;top:0;z-index:99999;background:${brand.colors.primary};color:#fff;padding:8px 14px;font:600 13px/1.4 system-ui,sans-serif;">AdRival draft — ${archiveNote} · ${approved ? "approved content" : "CID rewrite"} · keyword “${input.keyword}” · Remove banner on Publish</div>`;
   if (/<body[^>]*>/i.test(html)) {
     html = html.replace(/<body([^>]*)>/i, `<body$1>${banner}`);

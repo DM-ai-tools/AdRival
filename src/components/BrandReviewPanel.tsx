@@ -369,7 +369,7 @@ export function BrandReviewPanel({
       <ConfirmDialog
         open={confirmRedoAll}
         title="Redo brand review for all?"
-        description="This re-scrapes each competitor website with Firecrawl and refreshes Facebook, Instagram, X, YouTube, and LinkedIn metrics via Sociavault. Existing brand metrics will be replaced."
+        description="This re-scrapes each competitor website and refreshes Facebook, Instagram, X, YouTube, and LinkedIn metrics from the ad library. Existing brand metrics will be replaced."
         confirmLabel="Redo all"
         cancelLabel="Cancel"
         tone="danger"

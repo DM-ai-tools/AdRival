@@ -32,7 +32,7 @@ function extractJsonObject(raw: string): string {
   const start = body.indexOf("{");
   const end = body.lastIndexOf("}");
   if (start < 0 || end <= start) {
-    throw new Error("Claude content draft returned no JSON object");
+    throw new Error("Content draft returned no JSON object");
   }
   return body.slice(start, end + 1);
 }
@@ -299,7 +299,7 @@ export async function generateMarkdownContentDraft(input: {
   const markdown = (scrape.data?.markdown || "").trim();
   if (markdown.length < 80) {
     throw new Error(
-      "Firecrawl returned too little markdown to draft landing content",
+      "Site scrape returned too little content to draft landing copy",
     );
   }
 
@@ -438,7 +438,7 @@ ${feedback ? `14) HIGHEST PRIORITY user feedback:\n"""${feedback.slice(0, 2500)}
     .join("\n")
     .trim();
   if (!raw) {
-    throw new Error("Claude returned empty content draft");
+    throw new Error("Content draft returned empty result");
   }
 
   const parsed = claudeDraftSchema.parse(JSON.parse(extractJsonObject(raw)));

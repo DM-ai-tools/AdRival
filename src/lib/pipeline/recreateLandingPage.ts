@@ -227,11 +227,11 @@ export async function generateRecreationContent(
       );
       servicePages = pack.servicePages;
       linkNotes.push(
-        `Firecrawl links: nav×${pack.navLinks.length}, footer×${pack.footerLinks.length}, social×${pack.socialLinks.length}, services×${pack.servicePages.length}`,
+        `Brand links: nav×${pack.navLinks.length}, footer×${pack.footerLinks.length}, social×${pack.socialLinks.length}, services×${pack.servicePages.length}`,
       );
     } catch (err) {
       linkNotes.push(
-        `Firecrawl link scrape skipped: ${(err as Error).message || String(err)}`,
+        `Brand link scrape skipped: ${(err as Error).message || String(err)}`,
       );
     }
 

@@ -141,7 +141,7 @@ export function ProgressPanel({
             <dd>{reasons.noLandingPage ?? 0}</dd>
           </div>
           <div>
-            <dt>LLM reject</dt>
+            <dt>Relevance reject</dt>
             <dd>{reasons.llmReject}</dd>
           </div>
           <div>
@@ -149,7 +149,7 @@ export function ProgressPanel({
             <dd>{reasons.guardrailReject ?? 0}</dd>
           </div>
           <div>
-            <dt>LLM error</dt>
+            <dt>Relevance error</dt>
             <dd>{reasons.llmError}</dd>
           </div>
           <div>

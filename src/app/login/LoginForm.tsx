@@ -104,7 +104,10 @@ export default function LoginForm() {
         </form>
 
         <p className="form-hint login-switch">
-          No account yet? <Link href="/register">Create one</Link>
+          No account yet?{" "}
+          <Link href="/register" className="login-switch-link">
+            Create an account
+          </Link>
         </p>
       </section>
     </main>

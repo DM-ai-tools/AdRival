@@ -824,7 +824,7 @@ ${feedback ? `12) HIGHEST PRIORITY user feedback:\n"""${feedback.slice(0, 2500)}
 
   if (byId.size < 2) {
     throw new Error(
-      "OpenAI content draft returned almost no usable text blocks. Try Regenerate content again.",
+      "Content draft returned almost no usable text blocks. Try Regenerate content again.",
     );
   }
 

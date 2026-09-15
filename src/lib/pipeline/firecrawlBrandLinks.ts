@@ -320,7 +320,7 @@ export async function extractBrandLinksWithFirecrawl(
     !ctaClean.length
   ) {
     warnings.push(
-      "Firecrawl returned no usable non-homepage links — check the business URL / site structure",
+      "Site scrape returned no usable non-homepage links — check the business URL / site structure",
     );
   }
 

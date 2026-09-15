@@ -678,7 +678,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
               className="ghost-btn"
               disabled={busy || !page?.businessUrl}
               onClick={() => void refreshBrandColors()}
-              title="Re-scrape Firecrawl branding for your business URL"
+              title="Re-scrape brand colors and assets from your business URL"
             >
               {refreshingColors ? "Re-analyzing colors…" : "Re-analyze brand colors"}
             </button>
@@ -1018,8 +1018,8 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
             <div>
               <h2>Generated images</h2>
               <p className="muted">
-                Runway GPT Image 2 photos embedded in the design. Regenerate any
-                slot to replace it in the preview automatically.
+                Generated photos embedded in the design. Regenerate any slot to
+                replace it in the preview automatically.
               </p>
             </div>
             <button

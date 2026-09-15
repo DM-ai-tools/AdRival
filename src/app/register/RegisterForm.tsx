@@ -144,7 +144,10 @@ export default function RegisterForm() {
         </form>
 
         <p className="form-hint login-switch">
-          Already have an account? <Link href="/login">Sign in</Link>
+          Already have an account?{" "}
+          <Link href="/login" className="login-switch-link">
+            Sign in
+          </Link>
         </p>
       </section>
     </main>

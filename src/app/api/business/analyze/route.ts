@@ -1,22 +1,23 @@
 import { NextResponse } from "next/server";
 import { analyzeBusinessUrl } from "@/lib/openrouter/businessAnalyzer";
 import { resolveBrandBundle } from "@/lib/pipeline/resolveBrandBundle";
+import { sanitizeClientFacingText } from "@/lib/clientFacing";
 
 export const runtime = "nodejs";
 export const maxDuration = 180;
 
-function friendlyOpenRouterError(err: unknown): string {
+function friendlyAnalyzeError(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
   if (/402|credits|max_tokens/i.test(message)) {
-    return "OpenRouter credit limit hit. Add credits at https://openrouter.ai/settings/credits — or retry (we now use a smaller token limit).";
+    return "URL analysis credit limit reached. Please try again later or contact support.";
   }
   if (/401|unauthorized|invalid.*key/i.test(message)) {
-    return "OpenRouter API key is invalid. Check OPENROUTER_API_KEY in .env.local.";
+    return "URL analysis is not configured correctly. Please contact support.";
   }
-  if (/OPENROUTER_API_KEY is not set/i.test(message)) {
-    return "OPENROUTER_API_KEY is missing from .env.local.";
+  if (/OPENROUTER_API_KEY is not set|API_KEY is missing/i.test(message)) {
+    return "URL analysis is not configured. Please contact support.";
   }
-  return message;
+  return sanitizeClientFacingText(message);
 }
 
 export async function POST(request: Request) {
@@ -25,7 +26,7 @@ export async function POST(request: Request) {
       return NextResponse.json(
         {
           error:
-            "OPENROUTER_API_KEY is not configured. Add it to .env.local to analyze business URLs.",
+            "URL analysis is not configured. Please contact support.",
         },
         { status: 500 },
       );
@@ -42,7 +43,7 @@ export async function POST(request: Request) {
 
     const profile = await analyzeBusinessUrl(url);
 
-    // Brand identity via Firecrawl branding (+ links) — colors, fonts, logo, socials
+    // Brand identity via site branding (+ links) — colors, fonts, logo, socials
     try {
       const bundle = await resolveBrandBundle({
         businessUrl: profile.url || url,
@@ -62,7 +63,7 @@ export async function POST(request: Request) {
   } catch (err) {
     console.error("[business/analyze]", err);
     return NextResponse.json(
-      { error: friendlyOpenRouterError(err) },
+      { error: friendlyAnalyzeError(err) },
       { status: 500 },
     );
   }

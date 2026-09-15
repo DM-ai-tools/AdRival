@@ -688,7 +688,7 @@ export async function generateAndEmbedLandingImages(input: {
       html: input.html,
       images: [],
       warnings: [
-        "RUNWAYML_API_SECRET not set — skipped GPT Image 2 generation",
+        "Image generation API key not set — skipped photo generation",
       ],
       embedded: 0,
     };
@@ -724,11 +724,11 @@ export async function generateAndEmbedLandingImages(input: {
       });
       competitorScreenshotUrl = shot.screenshotUrl;
       if (!competitorScreenshotUrl) {
-        warnings.push("Firecrawl screenshot returned empty URL");
+        warnings.push("Page screenshot returned empty URL");
       }
     } catch (err) {
       warnings.push(
-        `Firecrawl screenshot failed: ${(err as Error).message || String(err)}`,
+        `Page screenshot failed: ${(err as Error).message || String(err)}`,
       );
     }
   }

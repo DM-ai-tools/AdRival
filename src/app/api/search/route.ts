@@ -113,13 +113,16 @@ export async function POST(request: Request) {
 
     if (!process.env.SOCIAVAULT_API_KEY) {
       return NextResponse.json(
-        { error: "SOCIAVAULT_API_KEY is not configured" },
+        { error: "Ad library access is not configured. Please contact support." },
         { status: 500 },
       );
     }
     if (!hasOpenAICompatKey()) {
       return NextResponse.json(
-        { error: "OPENROUTER_API_KEY or OPENAI_API_KEY is not configured" },
+        {
+          error:
+            "Competitor relevance analysis is not configured. Please contact support.",
+        },
         { status: 500 },
       );
     }

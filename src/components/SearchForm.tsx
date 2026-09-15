@@ -238,7 +238,7 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
           disabled={disabled || loading || analyzing || !businessUrl.trim()}
           onClick={() => void analyzeUrl()}
         >
-          {analyzing ? "Analyzing…" : "Analyze with Perplexity"}
+          {analyzing ? "Analyzing…" : "Analyze URL"}
         </button>
       </div>
       <p className="form-hint">

@@ -2989,6 +2989,10 @@ a.lp-recreate-link {
   text-align: center;
 }
 
+.login-switch-link {
+  font-weight: 600;
+}
+
 .auth-header-actions {
   display: flex;
   align-items: center;

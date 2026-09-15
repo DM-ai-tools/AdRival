@@ -383,7 +383,7 @@ function AdCard({
           className="ghost-btn raw-toggle"
           onClick={() => setOpenRaw((v) => !v)}
         >
-          {openRaw ? "Hide raw JSON" : "Show full SociaVault JSON"}
+          {openRaw ? "Hide raw JSON" : "Show full ad JSON"}
         </button>
       </div>
 
@@ -744,7 +744,7 @@ export function LookupResults({
             )}
             <Field label="Alias" value={page.pageAlias} />
             <Field
-              label="LLM confidence"
+              label="Match confidence"
               value={
                 job.llmConfidence != null
                   ? `${Math.round(job.llmConfidence * 100)}%`

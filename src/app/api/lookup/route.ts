@@ -43,13 +43,16 @@ export async function POST(request: Request) {
 
     if (!process.env.SOCIAVAULT_API_KEY) {
       return NextResponse.json(
-        { error: "SOCIAVAULT_API_KEY is not configured" },
+        { error: "Ad library access is not configured. Please contact support." },
         { status: 500 },
       );
     }
     if (!process.env.OPENAI_API_KEY) {
       return NextResponse.json(
-        { error: "OPENAI_API_KEY is not configured" },
+        {
+          error:
+            "Competitor verification is not configured. Please contact support.",
+        },
         { status: 500 },
       );
     }
