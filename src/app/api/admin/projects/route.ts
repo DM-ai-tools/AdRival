@@ -51,6 +51,6 @@ export async function GET(request: Request) {
       unassignedCount: listProjects({ unassignedOnly: true }).length,
     });
   } catch (err) {
-    return errorResponse(err);
+    return errorResponse(err, { audience: "admin" });
   }
 }

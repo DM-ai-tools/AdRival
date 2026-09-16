@@ -85,6 +85,6 @@ export async function POST(request: Request) {
       project: getProject(projectKind, projectId),
     });
   } catch (err) {
-    return errorResponse(err);
+    return errorResponse(err, { audience: "admin" });
   }
 }

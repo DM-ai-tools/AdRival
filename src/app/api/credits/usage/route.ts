@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { errorResponse, listVisibleProjects, requireUser } from "@/lib/authz";
 import { queryProviderCalls } from "@/lib/accounting/service";
 import { redactProviderCreditText } from "@/lib/accounting/errors";
+import { maskClientFacingText } from "@/lib/clientFacing";
 import type { ProviderCallStatus, ProviderId } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -56,9 +57,9 @@ export async function GET(request: Request) {
         usageConfidence: call.usageConfidence,
         creditsCharged: call.creditsCharged,
         status: call.status,
-        errorMessage:
-          redactProviderCreditText(call.errorMessage, user.role === "admin") ??
-          null,
+        errorMessage: maskClientFacingText(
+          redactProviderCreditText(call.errorMessage, false),
+        ),
         // Monetary cost and provider request ids stay in the admin view.
       })),
       total,

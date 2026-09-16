@@ -120,6 +120,6 @@ export async function POST(
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (err) {
-    return errorResponse(err);
+    return errorResponse(err, { audience: "admin" });
   }
 }

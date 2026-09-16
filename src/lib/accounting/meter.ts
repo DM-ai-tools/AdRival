@@ -8,7 +8,6 @@ import type {
 import { convertUsage, reservationCeiling } from "./conversion";
 import { getActiveConversionRuleSet } from "./records";
 import { getBillingContext } from "./context";
-import { providerLabel } from "@/lib/credits/display";
 import {
   InsufficientCreditsError,
   ProviderCreditsExhaustedError,
@@ -327,7 +326,6 @@ export async function meterProviderCall<T>(
       !(err instanceof InsufficientCreditsError)
     ) {
       const user = getUserById(context.chargedUserId);
-      const isAdmin = user?.role === "admin" && user.status === "active";
       if (user) {
         recordProviderCreditAlert({
           userId: user.id,
@@ -337,11 +335,10 @@ export async function meterProviderCall<T>(
           runId: context.runId,
         });
       }
+      // The main app never names the vendor. Admin → Alerts keeps the name.
       throw new ProviderCreditsExhaustedError(
         spec.provider,
-        isAdmin
-          ? `${providerLabel(spec.provider, "admin")} has insufficient credits for this task.`
-          : USER_PROVIDER_CREDIT_MESSAGE,
+        USER_PROVIDER_CREDIT_MESSAGE,
       );
     }
     throw err;

@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from "uuid";
 import { errorResponse, requireUser, resolveSpaceAccess } from "@/lib/authz";
 import { precheckRun, runBillable } from "@/lib/accounting/run";
 import { isCreditError } from "@/lib/accounting/errors";
+import { maskClientFacingText } from "@/lib/clientFacing";
 import { saveLookupJob, updateLookupJob } from "@/lib/db";
 import { dispatchPlatformLookup } from "@/lib/pipeline/dispatch";
 import { AD_PLATFORMS, type AdPlatform } from "@/lib/platforms";
@@ -130,7 +131,8 @@ export async function POST(request: Request) {
       } catch (err) {
         const message = isCreditError(err)
           ? (err as Error).message
-          : `Lookup failed: ${(err as Error).message}`;
+          : maskClientFacingText(`Lookup failed: ${(err as Error).message}`) ||
+            "Lookup failed";
         updateLookupJob(lookupId, {
           status: "failed",
           error: message,

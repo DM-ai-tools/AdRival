@@ -3,6 +3,7 @@ import { getCompetitorsByRun, getJob, getSearchCompetitorAdsByRun } from "@/lib/
 import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
 import { reportRunCredits } from "@/lib/accounting/run";
 import { redactProviderCreditText } from "@/lib/accounting/errors";
+import { maskClientFacingText, maskPageAnalysis } from "@/lib/clientFacing";
 import { getCreditSummary } from "@/lib/accounting/service";
 
 export const runtime = "nodejs";
@@ -25,24 +26,26 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: "Job not found" }, { status: 404 });
     }
 
-    const competitors = getCompetitorsByRun(jobId);
+    const competitors = getCompetitorsByRun(jobId).map((competitor) => ({
+      ...competitor,
+      pageAnalysis: maskPageAnalysis(competitor.pageAnalysis),
+    }));
     const ads = getSearchCompetitorAdsByRun(jobId).map((ad) => ({
       ...ad,
       raw: {},
     }));
     const summary = getCreditSummary(user.id);
-    const isAdmin = user.role === "admin";
+    const visible = (text: string | null | undefined) =>
+      maskClientFacingText(redactProviderCreditText(text, false));
     return NextResponse.json({
       job: {
         ...job,
-        error: redactProviderCreditText(job.error, isAdmin) ?? null,
+        error: visible(job.error),
+        offersReport: job.offersReport
+          ? { ...job.offersReport, error: visible(job.offersReport.error) }
+          : job.offersReport,
         progress: job.progress
-          ? {
-              ...job.progress,
-              message:
-                redactProviderCreditText(job.progress.message, isAdmin) ??
-                job.progress.message,
-            }
+          ? { ...job.progress, message: visible(job.progress.message) || "" }
           : job.progress,
       },
       competitors,

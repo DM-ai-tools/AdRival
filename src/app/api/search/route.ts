@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from "uuid";
 import { errorResponse, requireUser, resolveSpaceAccess } from "@/lib/authz";
 import { runBillable, precheckRun } from "@/lib/accounting/run";
 import { isCreditError } from "@/lib/accounting/errors";
+import { maskClientFacingText } from "@/lib/clientFacing";
 import { saveJob, updateJob } from "@/lib/db";
 import { dispatchPlatformSearch } from "@/lib/pipeline/dispatch";
 import { resolveSearchGeoContext } from "@/lib/pipeline/keywordSuggestions";
@@ -218,7 +219,8 @@ export async function POST(request: Request) {
         // the HTTP response was already sent.
         const message = isCreditError(err)
           ? (err as Error).message
-          : `Search failed: ${(err as Error).message}`;
+          : maskClientFacingText(`Search failed: ${(err as Error).message}`) ||
+            "Search failed";
         updateJob(jobId, {
           status: "failed",
           error: message,

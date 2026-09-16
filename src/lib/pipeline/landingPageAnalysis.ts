@@ -28,6 +28,8 @@ import {
   getAnthropicClient,
   getAnthropicModel,
 } from "../anthropic/client";
+import { isCreditError } from "../accounting/errors";
+import { maskClientFacingText } from "../clientFacing";
 import { fetchRawLandingHtml, normalizeLandingUrl } from "./htmlFetch";
 import {
   collectSameLandingPageAds,
@@ -527,6 +529,7 @@ async function analyzeWithLlm(input: {
       });
       raw = completion.choices[0]?.message?.content || null;
     } catch (err) {
+      if (isCreditError(err)) throw err;
       console.error("[page-analysis] direct OpenAI failed, falling back", err);
     }
   }
@@ -547,6 +550,7 @@ async function analyzeWithLlm(input: {
         .join("\n")
         .trim();
     } catch (err) {
+      if (isCreditError(err)) throw err;
       console.error("[page-analysis] Anthropic failed, falling back", err);
     }
   }
@@ -566,6 +570,7 @@ async function analyzeWithLlm(input: {
       });
       raw = completion.choices[0]?.message?.content?.trim() || null;
     } catch (err) {
+      if (isCreditError(err)) throw err;
       console.error(
         "[page-analysis] OpenRouter OpenAI failed, falling back",
         err,
@@ -587,13 +592,19 @@ async function analyzeWithLlm(input: {
       });
       raw = completion.choices[0]?.message?.content?.trim() || "";
     } catch (err) {
+      if (isCreditError(err)) throw err;
       console.error("[page-analysis] OpenRouter Perplexity failed", err);
     }
   }
 
   if (!raw) {
+    console.error("[page-analysis] no model response", {
+      openai: Boolean(process.env.OPENAI_API_KEY?.trim()),
+      anthropic: Boolean(process.env.ANTHROPIC_API_KEY?.trim()),
+      openrouter: hasOpenRouterKey(),
+    });
     throw new Error(
-      "ANTHROPIC_API_KEY, OPENROUTER_API_KEY, or OPENAI_API_KEY is required",
+      "Landing-page analysis could not get a response. Try again, or contact your administrator if this keeps happening.",
     );
   }
 
@@ -665,6 +676,7 @@ async function analyzeWithLlm(input: {
         }
       }
     } catch (err) {
+      if (isCreditError(err)) throw err;
       console.warn("[page-analysis] architecture expansion failed", err);
     }
   }
@@ -790,7 +802,9 @@ export async function analyzeLookupAdLandingPage(
     if (!updated) throw new Error("Failed to save page analysis");
     return updated;
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message =
+      maskClientFacingText(err instanceof Error ? err.message : String(err)) ||
+      "Analysis failed";
     // Keep prior completed analysis visible; only stamp error if nothing useful exists
     if (ad.pageAnalysis?.status === "completed" && ad.pageAnalysis.offer) {
       updateLookupAd(adId, {
@@ -937,7 +951,9 @@ export async function analyzeCompetitorLandingPage(
 
     return getCompetitor(competitorId) || updated;
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message =
+      maskClientFacingText(err instanceof Error ? err.message : String(err)) ||
+      "Analysis failed";
     // Preserve last good analysis on refresh failure
     if (
       competitor.pageAnalysis?.status === "completed" &&

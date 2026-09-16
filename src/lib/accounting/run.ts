@@ -1,7 +1,11 @@
 import { getAppSettings } from "@/lib/db";
 import type { AppUser, ProjectKind } from "@/lib/types";
 import { runWithBillingContext } from "./context";
-import { InsufficientCreditsError, SpendAuthorizationRevokedError } from "./errors";
+import {
+  InsufficientCreditsError,
+  LOW_CREDIT_MESSAGE,
+  SpendAuthorizationRevokedError,
+} from "./errors";
 import {
   countOpenReservations,
   creditsForRun,
@@ -85,8 +89,7 @@ export function precheckRun(
     return {
       ok: false,
       reason: "insufficient_credits",
-      message:
-        "You do not have enough credits to run this task. Contact your administrator.",
+      message: LOW_CREDIT_MESSAGE,
       requiredSubunits: initialHoldSubunits,
       availableSubunits: summary.availableSubunits,
     };

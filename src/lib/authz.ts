@@ -1,3 +1,4 @@
+import { maskClientFacingText } from "@/lib/clientFacing";
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import {
@@ -54,17 +55,20 @@ export class HttpError extends Error {
   }
 }
 
-export function errorResponse(err: unknown): NextResponse {
+export function errorResponse(
+  err: unknown,
+  options?: { audience?: "user" | "admin" },
+): NextResponse {
+  const raw = err instanceof Error ? err.message : "Unexpected error";
+  const error =
+    options?.audience === "admin" ? raw : maskClientFacingText(raw) || raw;
   if (err instanceof HttpError) {
     return NextResponse.json(
-      { error: err.message, code: err.code },
+      { error, code: err.code },
       { status: err.status },
     );
   }
-  return NextResponse.json(
-    { error: (err as Error)?.message || "Unexpected error" },
-    { status: 500 },
-  );
+  return NextResponse.json({ error }, { status: 500 });
 }
 
 /** 401 when unauthenticated, 403 when a password reset must be completed. */

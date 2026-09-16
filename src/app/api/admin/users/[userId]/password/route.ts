@@ -49,6 +49,6 @@ export async function POST(
         "Share this temporary password with the user now — it is not stored and cannot be shown again. All their existing sessions have been signed out.",
     });
   } catch (err) {
-    return errorResponse(err);
+    return errorResponse(err, { audience: "admin" });
   }
 }

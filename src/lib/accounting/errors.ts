@@ -1,3 +1,7 @@
+/** Shown in the main app when the signed-in person's allowance cannot cover a task. */
+export const LOW_CREDIT_MESSAGE =
+  "Your credit balance is too low to run this task. Please contact your administrator.";
+
 /** Thrown when a paid step cannot be funded. Surfaced to the user verbatim. */
 export class InsufficientCreditsError extends Error {
   readonly code = "insufficient_credits";
@@ -5,9 +9,7 @@ export class InsufficientCreditsError extends Error {
   readonly availableSubunits: number;
 
   constructor(requiredSubunits: number, availableSubunits: number) {
-    super(
-      "You do not have enough credits to run this task. Contact your administrator.",
-    );
+    super(LOW_CREDIT_MESSAGE);
     this.name = "InsufficientCreditsError";
     this.requiredSubunits = requiredSubunits;
     this.availableSubunits = availableSubunits;
@@ -75,6 +77,7 @@ export function looksLikeProviderCreditFailure(err: unknown): boolean {
   const message = raw.toLowerCase();
   if (message.includes("did not include a numeric balance")) return false;
   if (message.includes("do not have enough credits to run this task")) return false;
+  if (message.includes("credit balance is too low")) return false;
   return (
     /\b402\b/.test(message) ||
     /credits exhausted/.test(message) ||

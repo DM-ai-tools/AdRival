@@ -17,6 +17,7 @@ import {
   resolveProjectAccess,
 } from "@/lib/authz";
 import { reportRunCredits } from "@/lib/accounting/run";
+import { maskClientFacingText, maskPageAnalysis } from "@/lib/clientFacing";
 import { listUnifiedHistory } from "@/lib/historyUnified";
 
 export const runtime = "nodejs";
@@ -36,8 +37,26 @@ export async function GET(request: Request) {
       }
       return NextResponse.json({
         kind: "lookup",
-        job,
-        ads: getLookupAds(runId),
+        job: {
+          ...job,
+          error: maskClientFacingText(job.error),
+          offersReport: job.offersReport
+            ? {
+                ...job.offersReport,
+                error: maskClientFacingText(job.offersReport.error),
+              }
+            : job.offersReport,
+          progress: job.progress
+            ? {
+                ...job.progress,
+                message: maskClientFacingText(job.progress.message) || "",
+              }
+            : job.progress,
+        },
+        ads: getLookupAds(runId).map((ad) => ({
+          ...ad,
+          pageAnalysis: maskPageAnalysis(ad.pageAnalysis),
+        })),
         // Credits the caller spent on this run — never the owner's balance.
         credits: reportRunCredits(user.id, runId),
       });
@@ -51,8 +70,26 @@ export async function GET(request: Request) {
       }
       return NextResponse.json({
         kind: "search",
-        job,
-        competitors: getCompetitorsByRun(runId),
+        job: {
+          ...job,
+          error: maskClientFacingText(job.error),
+          offersReport: job.offersReport
+            ? {
+                ...job.offersReport,
+                error: maskClientFacingText(job.offersReport.error),
+              }
+            : job.offersReport,
+          progress: job.progress
+            ? {
+                ...job.progress,
+                message: maskClientFacingText(job.progress.message) || "",
+              }
+            : job.progress,
+        },
+        competitors: getCompetitorsByRun(runId).map((competitor) => ({
+          ...competitor,
+          pageAnalysis: maskPageAnalysis(competitor.pageAnalysis),
+        })),
         credits: reportRunCredits(user.id, runId),
       });
     }

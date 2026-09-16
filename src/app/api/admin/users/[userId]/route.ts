@@ -60,7 +60,7 @@ export async function GET(
       sharedWithThisUser: listMemberships({ userId: user.id }),
     });
   } catch (err) {
-    return errorResponse(err);
+    return errorResponse(err, { audience: "admin" });
   }
 }
 
@@ -163,7 +163,7 @@ export async function PATCH(
     });
     return NextResponse.json({ ok: true, user: toPublicUser(updated) });
   } catch (err) {
-    return errorResponse(err);
+    return errorResponse(err, { audience: "admin" });
   }
 }
 
@@ -249,6 +249,6 @@ export async function DELETE(
       note: "Account soft-deleted. Credit ledger and audit history are retained.",
     });
   } catch (err) {
-    return errorResponse(err);
+    return errorResponse(err, { audience: "admin" });
   }
 }

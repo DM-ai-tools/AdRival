@@ -30,7 +30,7 @@ export async function GET() {
       },
     });
   } catch (err) {
-    return errorResponse(err);
+    return errorResponse(err, { audience: "admin" });
   }
 }
 
@@ -120,7 +120,7 @@ export async function PUT(request: Request) {
     });
     return NextResponse.json({ ok: true, settings });
   } catch (err) {
-    return errorResponse(err);
+    return errorResponse(err, { audience: "admin" });
   }
 }
 
@@ -164,6 +164,6 @@ export async function POST(request: Request) {
     });
     return NextResponse.json({ ok: true, ruleSet: created });
   } catch (err) {
-    return errorResponse(err);
+    return errorResponse(err, { audience: "admin" });
   }
 }

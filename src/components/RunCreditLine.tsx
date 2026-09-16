@@ -1,5 +1,6 @@
 "use client";
 
+import { LOW_CREDIT_MESSAGE } from "@/lib/accounting/errors";
 import { formatCredits } from "@/lib/accounting/units";
 
 export interface RunCredits {
@@ -64,7 +65,7 @@ export function RunBlockedNotice({
 }) {
   const text =
     code === "insufficient_credits"
-      ? "You do not have enough credits to run this task. Contact your administrator."
+      ? LOW_CREDIT_MESSAGE
       : message;
   return (
     <p className="credits-warning" role="alert">

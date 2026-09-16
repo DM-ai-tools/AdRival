@@ -34,3 +34,31 @@ export function sanitizeClientFacingText(input: string): string {
   }
   return out.replace(/\s{2,}/g, " ").trim();
 }
+
+const NOT_CONFIGURED =
+  "This task is not configured. Please contact your administrator.";
+
+/**
+ * Text shown in the main app. Vendor names and API key names are removed.
+ * Admin screens should keep the original string.
+ */
+export function maskClientFacingText(
+  input: string | null | undefined,
+): string | null {
+  if (input == null || input === "") return input ?? null;
+  if (/API_KEY|API_SECRET/i.test(input)) return NOT_CONFIGURED;
+  return sanitizeClientFacingText(input);
+}
+
+export function maskPageAnalysis<
+  T extends { error?: string | null; techNotes?: string[] } | null | undefined,
+>(analysis: T): T {
+  if (!analysis) return analysis;
+  return {
+    ...analysis,
+    error: maskClientFacingText(analysis.error),
+    techNotes: analysis.techNotes?.map(
+      (note) => maskClientFacingText(note) || note,
+    ),
+  };
+}

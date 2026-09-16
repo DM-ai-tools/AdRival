@@ -128,6 +128,6 @@ export async function GET(request: Request) {
         : [],
     });
   } catch (err) {
-    return errorResponse(err);
+    return errorResponse(err, { audience: "admin" });
   }
 }

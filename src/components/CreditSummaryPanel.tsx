@@ -122,7 +122,7 @@ export function CreditSummaryPanel({
 
       {!compact ? (
         <>
-          <h3 className="credits-subhead">Usage by provider</h3>
+          <h3 className="credits-subhead">Usage by service</h3>
           {usageByProvider.length === 0 ? (
             <p className="empty-hint">No provider usage recorded yet.</p>
           ) : (

@@ -67,7 +67,7 @@ export async function GET(request: Request) {
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (err) {
-    return errorResponse(err);
+    return errorResponse(err, { audience: "admin" });
   }
 }
 
@@ -150,6 +150,6 @@ export async function POST(request: Request) {
         "Share this temporary password with the user now — it is not stored and cannot be shown again.",
     });
   } catch (err) {
-    return errorResponse(err);
+    return errorResponse(err, { audience: "admin" });
   }
 }

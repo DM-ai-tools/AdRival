@@ -116,7 +116,7 @@ export async function GET() {
       })),
     });
   } catch (err) {
-    return errorResponse(err);
+    return errorResponse(err, { audience: "admin" });
   }
 }
 
@@ -254,6 +254,6 @@ export async function POST(request: Request) {
 
     throw new HttpError(400, "Unknown action");
   } catch (err) {
-    return errorResponse(err);
+    return errorResponse(err, { audience: "admin" });
   }
 }

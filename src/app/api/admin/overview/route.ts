@@ -57,6 +57,6 @@ export async function GET() {
       providerBalances: await getProviderBalances(),
     });
   } catch (err) {
-    return errorResponse(err);
+    return errorResponse(err, { audience: "admin" });
   }
 }
