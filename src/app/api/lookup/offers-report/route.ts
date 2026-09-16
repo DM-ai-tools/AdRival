@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 import { getLookupAds, getLookupJob } from "@/lib/db";
+import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
+import { reportRunCredits, runBillable } from "@/lib/accounting/run";
+import { isCreditError } from "@/lib/accounting/errors";
 import { runLookupOffersReportPhase } from "@/lib/pipeline/lookupOffersReport";
 
 export const runtime = "nodejs";
@@ -11,6 +14,7 @@ export const maxDuration = 300;
  */
 export async function POST(request: Request) {
   try {
+    const user = await requireUser();
     const body = await request.json();
     const lookupId = String(body.lookupId ?? "").trim();
     if (!lookupId) {
@@ -19,6 +23,8 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
+
+    resolveProjectAccess("lookup", lookupId, user, "run");
 
     const job = getLookupJob(lookupId);
     if (!job) {
@@ -39,27 +45,37 @@ export async function POST(request: Request) {
       job.offersReport?.status === "completed" &&
       job.offersReport.adsAnalyzed === ads.length
     ) {
-      return NextResponse.json({
-        job,
-        ads,
-        cached: true,
-      });
+      return NextResponse.json({ job, ads, cached: true });
     }
 
-    const updated = await runLookupOffersReportPhase(lookupId, {
-      force,
-      finalStatus: ads.length > 0 ? "completed" : "partial",
-    });
+    const updated = await runBillable(
+      {
+        user,
+        operation: "lookup.offers_report",
+        projectKind: "lookup",
+        projectId: lookupId,
+        runId: lookupId,
+      },
+      () =>
+        runLookupOffersReportPhase(lookupId, {
+          force,
+          finalStatus: ads.length > 0 ? "completed" : "partial",
+        }),
+    );
 
     return NextResponse.json({
       job: updated || getLookupJob(lookupId),
       ads: getLookupAds(lookupId),
       cached: false,
+      credits: reportRunCredits(user.id, lookupId),
     });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Offers report failed" },
-      { status: 500 },
-    );
+    if (isCreditError(err)) {
+      return NextResponse.json(
+        { error: (err as Error).message, code: (err as { code?: string }).code },
+        { status: 402 },
+      );
+    }
+    return errorResponse(err);
   }
 }

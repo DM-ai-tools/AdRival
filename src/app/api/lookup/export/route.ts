@@ -1,15 +1,20 @@
 import { NextResponse } from "next/server";
 import { getLookupAds, getLookupJob } from "@/lib/db";
+import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
 import { buildLookupWorkbook } from "@/lib/export/lookupExcel";
 
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
+  try {
+  const user = await requireUser();
   const { searchParams } = new URL(request.url);
   const lookupId = searchParams.get("lookupId");
   if (!lookupId) {
     return NextResponse.json({ error: "lookupId is required" }, { status: 400 });
   }
+
+  resolveProjectAccess("lookup", lookupId, user, "view");
 
   const job = getLookupJob(lookupId);
   if (!job) {
@@ -30,4 +35,7 @@ export async function GET(request: Request) {
       "Content-Disposition": `attachment; filename="lookup_${safeName}.xlsx"`,
     },
   });
+  } catch (err) {
+    return errorResponse(err);
+  }
 }

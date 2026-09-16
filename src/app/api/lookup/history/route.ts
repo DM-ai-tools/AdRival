@@ -1,56 +1,89 @@
 import { NextResponse } from "next/server";
 import {
-  clearAllLookupHistory,
   deleteLookupHistoryRun,
   getLookupAds,
   getLookupJob,
   listLookupHistory,
+  listProjects,
 } from "@/lib/db";
+import {
+  errorResponse,
+  requireUser,
+  resolveProjectAccess,
+  visibleProjectKeys,
+} from "@/lib/authz";
 
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const runId = searchParams.get("runId");
+  try {
+    const user = await requireUser();
+    const { searchParams } = new URL(request.url);
+    const runId = searchParams.get("runId");
 
-  if (runId) {
-    const job = getLookupJob(runId);
-    if (!job) {
-      return NextResponse.json({ error: "Lookup run not found" }, { status: 404 });
+    if (runId) {
+      resolveProjectAccess("lookup", runId, user, "view");
+      const job = getLookupJob(runId);
+      if (!job) {
+        return NextResponse.json(
+          { error: "Lookup run not found" },
+          { status: 404 },
+        );
+      }
+      return NextResponse.json({ job, ads: getLookupAds(runId) });
     }
-    return NextResponse.json({
-      job,
-      ads: getLookupAds(runId),
-    });
-  }
 
-  return NextResponse.json({ runs: listLookupHistory() });
+    const visible = visibleProjectKeys(user);
+    return NextResponse.json({
+      runs: listLookupHistory(500).filter((run) =>
+        visible.has(`lookup:${run.id}`),
+      ),
+    });
+  } catch (err) {
+    return errorResponse(err);
+  }
 }
 
 export async function DELETE(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const all = searchParams.get("all");
-  const runId = searchParams.get("runId");
+  try {
+    const user = await requireUser();
+    const { searchParams } = new URL(request.url);
+    const all = searchParams.get("all");
+    const runId = searchParams.get("runId");
 
-  if (all === "1" || all === "true") {
-    const result = clearAllLookupHistory();
-    return NextResponse.json({ ok: true, ...result });
-  }
+    if (all === "1" || all === "true") {
+      const owned = listProjects({ ownerUserId: user.id }).filter(
+        (p) => p.kind === "lookup",
+      );
+      let removedAds = 0;
+      for (const project of owned) {
+        removedAds += deleteLookupHistoryRun(project.id).removedAds;
+      }
+      return NextResponse.json({
+        ok: true,
+        removedRuns: owned.length,
+        removedAds,
+      });
+    }
 
-  if (!runId) {
-    return NextResponse.json(
-      { error: "runId or all=1 is required" },
-      { status: 400 },
-    );
-  }
+    if (!runId) {
+      return NextResponse.json(
+        { error: "runId or all=1 is required" },
+        { status: 400 },
+      );
+    }
 
-  const result = deleteLookupHistoryRun(runId);
-  if (!result.ok) {
-    return NextResponse.json({ error: "Run not found" }, { status: 404 });
+    resolveProjectAccess("lookup", runId, user, "edit");
+    const result = deleteLookupHistoryRun(runId);
+    if (!result.ok) {
+      return NextResponse.json({ error: "Run not found" }, { status: 404 });
+    }
+    return NextResponse.json({
+      ok: true,
+      runId,
+      removedAds: result.removedAds,
+    });
+  } catch (err) {
+    return errorResponse(err);
   }
-  return NextResponse.json({
-    ok: true,
-    runId,
-    removedAds: result.removedAds,
-  });
 }

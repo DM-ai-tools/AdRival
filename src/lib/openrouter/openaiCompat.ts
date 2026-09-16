@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { meterOpenAiClient } from "@/lib/accounting/meteredClients";
 import { getOpenRouterClient, hasOpenRouterKey } from "./client";
 
 /** OpenAI models via OpenRouter (avoids direct platform.openai.com credits). */
@@ -22,11 +23,19 @@ export function hasOpenAICompatKey(): boolean {
  */
 export function getOpenAICompatClient(): OpenAI {
   if (hasOpenRouterKey()) return getOpenRouterClient();
+  return getDirectOpenAIClient();
+}
+
+/**
+ * platform.openai.com client. Completions are metered against the "openai"
+ * provider so direct-OpenAI spend is accounted separately from OpenRouter.
+ */
+export function getDirectOpenAIClient(): OpenAI {
   const key = process.env.OPENAI_API_KEY?.trim();
   if (!key) {
     throw new Error("OPENROUTER_API_KEY or OPENAI_API_KEY is required");
   }
-  return new OpenAI({ apiKey: key });
+  return meterOpenAiClient(new OpenAI({ apiKey: key }), "openai");
 }
 
 /** Ensure bare OpenAI ids become OpenRouter slugs when routed via OpenRouter. */

@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import { z } from "zod";
+import { getDirectOpenAIClient } from "../openrouter/openaiCompat";
 import {
   getLookupAds,
   getLookupJob,
@@ -42,7 +43,7 @@ function getOffersLlmClient(): {
   const key = process.env.OPENAI_API_KEY?.trim();
   if (key) {
     return {
-      client: new OpenAI({ apiKey: key }),
+      client: getDirectOpenAIClient(),
       model: process.env.OFFERS_OPENAI_MODEL?.trim() || "gpt-4o-mini",
     };
   }

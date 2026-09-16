@@ -1,4 +1,4 @@
-import type { AppUserPublic } from "../types";
+import type { AppUser, AppUserPublic, UserRole } from "../types";
 
 export const SESSION_COOKIE = "adrival_session";
 export const SESSION_MAX_AGE_SEC = 60 * 60 * 24 * 7;
@@ -7,6 +7,14 @@ export interface SessionPayload {
   sub: string;
   username: string;
   displayName: string;
+  role: UserRole;
+  /**
+   * The user's sessionEpoch at the time the cookie was minted. Every request
+   * compares this against the stored epoch, so suspending an account,
+   * resetting its password or deleting it invalidates issued cookies without
+   * needing a session table.
+   */
+  epoch: number;
   exp: number;
 }
 
@@ -44,11 +52,15 @@ async function hmacSign(data: string, secret: string): Promise<string> {
   return base64UrlEncode(new Uint8Array(sig));
 }
 
-export async function createSessionToken(user: AppUserPublic): Promise<string> {
+export async function createSessionToken(
+  user: AppUserPublic & Pick<AppUser, "sessionEpoch">,
+): Promise<string> {
   const payload: SessionPayload = {
     sub: user.id,
     username: user.username,
     displayName: user.displayName,
+    role: user.role,
+    epoch: user.sessionEpoch,
     exp: Math.floor(Date.now() / 1000) + SESSION_MAX_AGE_SEC,
   };
   const payloadB64 = base64UrlEncode(

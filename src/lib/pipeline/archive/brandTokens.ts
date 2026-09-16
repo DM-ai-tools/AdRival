@@ -1,3 +1,4 @@
+import { meterProviderCall, singleRequestUsage } from "@/lib/accounting/meter";
 import type { BrandColors, BrandDesignSystem, BusinessProfile } from "../../types";
 import {
   normalizeHex,
@@ -85,12 +86,21 @@ async function fetchBrandfetch(domain: string): Promise<{
   const key = process.env.BRANDFETCH_API_KEY?.trim();
   if (!key) return null;
 
-  const res = await fetch(
-    `https://api.brandfetch.io/v2/brands/domain/${encodeURIComponent(domain)}`,
+  const res = await meterProviderCall(
     {
-      headers: { Authorization: `Bearer ${key}` },
-      signal: AbortSignal.timeout(20_000),
+      provider: "brandfetch",
+      endpoint: "/v2/brands/domain",
+      operation: "brandfetch.brand",
+      extractUsage: () => singleRequestUsage(),
     },
+    () =>
+      fetch(
+        `https://api.brandfetch.io/v2/brands/domain/${encodeURIComponent(domain)}`,
+        {
+          headers: { Authorization: `Bearer ${key}` },
+          signal: AbortSignal.timeout(20_000),
+        },
+      ),
   );
   if (!res.ok) {
     console.warn("[brandfetch]", res.status, await res.text().catch(() => ""));

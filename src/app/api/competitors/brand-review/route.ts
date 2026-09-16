@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 import { getCompetitor, getCompetitorsByRun, getJob } from "@/lib/db";
+import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
+import { runBillable } from "@/lib/accounting/run";
+import { isCreditError } from "@/lib/accounting/errors";
 import {
   runBrandReviewForCompetitor,
   runBrandReviewForJob,
@@ -17,6 +20,7 @@ export const maxDuration = 300;
  */
 export async function POST(request: Request) {
   try {
+    const user = await requireUser();
     const body = (await request.json()) as {
       runId?: string;
       competitorId?: string;
@@ -31,7 +35,18 @@ export async function POST(request: Request) {
           { status: 404 },
         );
       }
-      const brand = await runBrandReviewForCompetitor(competitor);
+      resolveProjectAccess("search", competitor.runId, user, "run");
+
+      const brand = await runBillable(
+        {
+          user,
+          operation: "competitor.brand_review",
+          projectKind: "search",
+          projectId: competitor.runId,
+          runId: competitor.runId,
+        },
+        () => runBrandReviewForCompetitor(competitor),
+      );
       const updated = getCompetitor(body.competitorId);
       return NextResponse.json({
         ok: true,
@@ -43,20 +58,29 @@ export async function POST(request: Request) {
     }
 
     if (body.runId) {
+      resolveProjectAccess("search", body.runId, user, "run");
       const job = getJob(body.runId);
       if (!job) {
         return NextResponse.json({ error: "Run not found" }, { status: 404 });
       }
-      const result = await runBrandReviewForJob(body.runId, {
-        force: body.force !== false,
-      });
+      const runId = body.runId;
+      const result = await runBillable(
+        {
+          user,
+          operation: "search.brand_review_batch",
+          projectKind: "search",
+          projectId: runId,
+          runId,
+        },
+        () => runBrandReviewForJob(runId, { force: body.force !== false }),
+      );
       return NextResponse.json({
         ok: true,
         mode: "batch",
-        runId: body.runId,
+        runId,
         ...result,
-        competitors: getCompetitorsByRun(body.runId),
-        job: getJob(body.runId),
+        competitors: getCompetitorsByRun(runId),
+        job: getJob(runId),
       });
     }
 
@@ -65,9 +89,12 @@ export async function POST(request: Request) {
       { status: 400 },
     );
   } catch (err) {
-    return NextResponse.json(
-      { error: (err as Error).message || "Brand review failed" },
-      { status: 500 },
-    );
+    if (isCreditError(err)) {
+      return NextResponse.json(
+        { error: (err as Error).message, code: (err as { code?: string }).code },
+        { status: 402 },
+      );
+    }
+    return errorResponse(err);
   }
 }

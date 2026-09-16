@@ -3,6 +3,8 @@
  * Auth: FIRECRAWL_API_KEY
  */
 
+import { meterProviderCall, singleRequestUsage } from "@/lib/accounting/meter";
+
 const FIRECRAWL_BASE = "https://api.firecrawl.dev/v2";
 
 function getApiKey(): string {
@@ -13,7 +15,26 @@ function getApiKey(): string {
   return key;
 }
 
+/**
+ * Firecrawl bills per scrape/map request and returns no usage body, so one call
+ * is charged as one request-unit.
+ */
 async function firecrawlPost<T>(
+  path: string,
+  body: Record<string, unknown>,
+): Promise<T> {
+  return meterProviderCall<T>(
+    {
+      provider: "firecrawl",
+      endpoint: path,
+      operation: `firecrawl ${path}`,
+      extractUsage: () => singleRequestUsage(),
+    },
+    () => firecrawlPostRaw<T>(path, body),
+  );
+}
+
+async function firecrawlPostRaw<T>(
   path: string,
   body: Record<string, unknown>,
 ): Promise<T> {

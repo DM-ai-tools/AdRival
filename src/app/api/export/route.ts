@@ -1,15 +1,21 @@
 import { NextResponse } from "next/server";
 import { getCompetitorsByRun, getJob } from "@/lib/db";
+import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
 import { buildCompetitorsWorkbook } from "@/lib/export/excel";
 
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
+  try {
+  // Downloads are authorized like any other read — a known jobId is not enough.
+  const user = await requireUser();
   const { searchParams } = new URL(request.url);
   const jobId = searchParams.get("jobId");
   if (!jobId) {
     return NextResponse.json({ error: "jobId is required" }, { status: 400 });
   }
+
+  resolveProjectAccess("search", jobId, user, "view");
 
   const job = getJob(jobId);
   if (!job) {
@@ -30,4 +36,7 @@ export async function GET(request: Request) {
       "Content-Disposition": `attachment; filename="${filename}"`,
     },
   });
+  } catch (err) {
+    return errorResponse(err);
+  }
 }

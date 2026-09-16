@@ -403,6 +403,17 @@ export interface SearchJob {
   status: JobStatus;
   progress: JobProgress;
   competitorIds: string[];
+  /**
+   * Owning user. Absent on rows created before multi-user support — those stay
+   * invisible to everyone until an admin assigns an owner.
+   */
+  ownerUserId?: string | null;
+  /**
+   * Client project space this run belongs to. Sharing and deletion happen on
+   * the space, so every run with the same spaceId moves together.
+   */
+  spaceId?: string | null;
+  archivedAt?: string | null;
   error?: string | null;
   createdAt: string;
   updatedAt: string;
@@ -475,6 +486,14 @@ export interface LookupJob {
   locationSource?: CompetitorLocationSource | null;
   /** Internal synthetic rows hidden from history UI. */
   internalOnly?: boolean;
+  /** See SearchJob.ownerUserId — absent means legacy/unassigned. */
+  ownerUserId?: string | null;
+  /**
+   * Client project space this run belongs to. Sharing and deletion happen on
+   * the space, so every run with the same spaceId moves together.
+   */
+  spaceId?: string | null;
+  archivedAt?: string | null;
   error?: string | null;
   createdAt: string;
   updatedAt: string;
@@ -946,6 +965,8 @@ export type LookupHistorySummary = LookupJob & {
 };
 
 export interface DatabaseShape {
+  /** Bumped by src/lib/db.ts migrations; see docs/MULTI_USER.md. */
+  schemaVersion?: number;
   jobs: SearchJob[];
   competitors: CompetitorRecord[];
   seenPageIds: string[];
@@ -953,7 +974,24 @@ export interface DatabaseShape {
   lookupAds?: LookupAdRecord[];
   searchCompetitorAds?: SearchCompetitorAdRecord[];
   users?: AppUser[];
+  appSettings?: AppSettings;
+  conversionRuleSets?: ConversionRuleSet[];
+  creditPeriods?: CreditPeriod[];
+  creditLedger?: CreditLedgerEntry[];
+  creditReservations?: CreditReservation[];
+  providerCalls?: ProviderCallRecord[];
+  projectMemberships?: ProjectMembership[];
+  projectSpaces?: ProjectSpace[];
+  spaceMemberships?: SpaceMembership[];
+  auditLogs?: AuditLogEntry[];
+  adminAlerts?: AdminAlert[];
+  loginAttempts?: LoginAttemptRecord[];
+  ledgerSeq?: number;
+  auditSeq?: number;
 }
+
+export type UserRole = "admin" | "user";
+export type UserStatus = "active" | "suspended" | "deleted";
 
 /** Stored in data/store.json — passwordHash never sent to clients. */
 export interface AppUser {
@@ -961,14 +999,318 @@ export interface AppUser {
   username: string;
   displayName: string;
   passwordHash: string;
+  role: UserRole;
+  status: UserStatus;
+  /**
+   * Bumped on password change, admin reset, suspension and deletion.
+   * Session cookies carry the epoch they were minted with, so bumping it
+   * invalidates every existing session for the user.
+   */
+  sessionEpoch: number;
+  /** Set by an admin password reset — blocks all other work until changed. */
+  mustChangePassword: boolean;
+  /** null inherits AppSettings.maxConcurrentRunsPerUser */
+  maxConcurrentRuns?: number | null;
+  /** null allows every provider not globally disabled */
+  allowedProviders?: ProviderId[] | null;
+  blockedModels?: string[] | null;
   createdAt: string;
   updatedAt: string;
+  createdByUserId?: string | null;
+  suspendedAt?: string | null;
+  deletedAt?: string | null;
 }
 
 export type AppUserPublic = Pick<
   AppUser,
-  "id" | "username" | "displayName" | "createdAt"
+  | "id"
+  | "username"
+  | "displayName"
+  | "role"
+  | "status"
+  | "mustChangePassword"
+  | "createdAt"
 >;
+
+/* ─────────────────────────── Projects & sharing ─────────────────────────── */
+
+/** A "project" is one run row: a keyword search job or a competitor lookup job. */
+export type ProjectKind = "search" | "lookup";
+export type ProjectRole = "owner" | "editor" | "viewer";
+/** view = read, edit = mutate stored data, run = start billable provider work. */
+export type ProjectAction = "view" | "edit" | "run";
+
+export interface ProjectMembership {
+  id: string;
+  projectKind: ProjectKind;
+  projectId: string;
+  userId: string;
+  role: Exclude<ProjectRole, "owner">;
+  grantedByUserId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * A named client workspace. Search and lookup runs live inside it. Admins
+ * share or delete the space, which covers every run in it — not one history
+ * row at a time.
+ */
+export interface ProjectSpace {
+  id: string;
+  clientName: string;
+  ownerUserId: string;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt?: string | null;
+}
+
+export interface SpaceMembership {
+  id: string;
+  spaceId: string;
+  userId: string;
+  role: Exclude<ProjectRole, "owner">;
+  grantedByUserId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/* ──────────────────────── Provider usage accounting ─────────────────────── */
+
+export const PROVIDER_IDS = [
+  "sociavault",
+  "openrouter",
+  "openai",
+  "anthropic",
+  "firecrawl",
+  "brandfetch",
+  "runway",
+] as const;
+
+export type ProviderId = (typeof PROVIDER_IDS)[number];
+
+/**
+ * Measurable provider usage. Only fields the provider actually reported are
+ * populated — an absent field means "not reported", never zero.
+ */
+export interface ProviderUsageUnits {
+  requests?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedInputTokens?: number;
+  images?: number;
+}
+
+/**
+ * confirmed              — units came back from the provider
+ * estimated              — units came from a configured estimate
+ * pending_reconciliation — call may have been billed; usage unknown
+ */
+export type UsageConfidence =
+  | "confirmed"
+  | "estimated"
+  | "pending_reconciliation";
+
+export type ProviderCallStatus =
+  | "succeeded"
+  | "failed"
+  | "timeout"
+  | "not_billable"
+  | "blocked";
+
+export interface ProviderCallRecord {
+  id: string;
+  /** Settlement is keyed on this so retries cannot double-charge. */
+  idempotencyKey: string;
+  initiatedByUserId: string;
+  chargedUserId: string;
+  projectKind: ProjectKind | null;
+  projectId: string | null;
+  runId: string | null;
+  provider: ProviderId;
+  /** Model id for LLMs, null for plain HTTP providers. */
+  model: string | null;
+  /** API path for HTTP providers. */
+  endpoint: string | null;
+  operation: string;
+  providerRequestId: string | null;
+  usage: ProviderUsageUnits;
+  usageConfidence: UsageConfidence;
+  /** Integer credit subunits. */
+  creditsCharged: number;
+  /** Integer micro-USD, or null when no price is configured for this rate. */
+  estimatedCostUsdMicros: number | null;
+  conversionRuleVersion: number;
+  status: ProviderCallStatus;
+  /** Sanitized message safe to render to the charged user. */
+  errorMessage: string | null;
+  reservationId: string | null;
+  startedAt: string;
+  completedAt: string;
+  durationMs: number;
+  settledAt: string | null;
+}
+
+/** Credit subunits charged per unit of provider usage. */
+export interface ProviderRate {
+  perRequest?: number;
+  perThousandInputTokens?: number;
+  perThousandOutputTokens?: number;
+  perImage?: number;
+  /** Optional monetary price. Omit entirely when no price is configured. */
+  usdMicrosPerRequest?: number;
+  usdMicrosPerThousandInputTokens?: number;
+  usdMicrosPerThousandOutputTokens?: number;
+  usdMicrosPerImage?: number;
+  /** Labeled fallback used only when the provider reports no usage. */
+  estimatedInputTokens?: number;
+  estimatedOutputTokens?: number;
+}
+
+export interface ConversionRuleSet {
+  version: number;
+  createdAt: string;
+  createdByUserId: string | null;
+  note: string | null;
+  /** provider id -> ("default" | model/endpoint key) -> rate */
+  rates: Record<string, Record<string, ProviderRate>>;
+  /** Conservative per-call hold, in subunits, keyed by provider id. */
+  perCallReservationCeiling: Record<string, number>;
+}
+
+/* ───────────────────────── Allowances & the ledger ──────────────────────── */
+
+export type ResetCadence = "none" | "monthly";
+
+export interface CreditPeriod {
+  id: string;
+  userId: string;
+  startsAt: string;
+  /** null while the period is current */
+  endsAt: string | null;
+  /** null when resetCadence is "none" */
+  nextResetAt: string | null;
+  resetCadence: ResetCadence;
+  /** All amounts are integer credit subunits. */
+  allowanceSubunits: number;
+  consumedSubunits: number;
+  reservedSubunits: number;
+  status: "current" | "closed";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type LedgerEntryType =
+  | "period_open"
+  | "period_close"
+  | "allowance_set"
+  | "allowance_added"
+  | "adjustment"
+  | "charge"
+  | "reservation_hold"
+  | "reservation_release";
+
+/** Append-only. Rows are never updated or deleted. */
+export interface CreditLedgerEntry {
+  id: string;
+  seq: number;
+  userId: string;
+  periodId: string | null;
+  type: LedgerEntryType;
+  /** Signed subunits. Negative reduces the user's available credits. */
+  deltaSubunits: number;
+  /** Available credits after the entry, for audit reconstruction. */
+  balanceAfterSubunits: number | null;
+  reason: string | null;
+  actorUserId: string | null;
+  providerCallId: string | null;
+  reservationId: string | null;
+  projectKind: ProjectKind | null;
+  projectId: string | null;
+  runId: string | null;
+  provider: ProviderId | null;
+  conversionRuleVersion: number | null;
+  idempotencyKey: string | null;
+  createdAt: string;
+}
+
+export type ReservationStatus =
+  | "open"
+  | "settled"
+  | "released"
+  | "expired"
+  | "pending_reconciliation";
+
+export interface CreditReservation {
+  id: string;
+  userId: string;
+  periodId: string;
+  projectKind: ProjectKind | null;
+  projectId: string | null;
+  runId: string | null;
+  operation: string;
+  /** Currently held subunits (decreases as the reservation is settled). */
+  amountSubunits: number;
+  /** Total already charged against this reservation. */
+  settledSubunits: number;
+  status: ReservationStatus;
+  /** Heartbeat deadline used to recover reservations abandoned by a crash. */
+  expiresAt: string;
+  createdAt: string;
+  updatedAt: string;
+  closedAt: string | null;
+  note: string | null;
+}
+
+/* ──────────────────────────── Audit & settings ──────────────────────────── */
+
+export interface AdminAlert {
+  id: string;
+  kind: "provider_credits_exhausted";
+  userId: string;
+  username: string;
+  displayName: string;
+  provider: ProviderId;
+  runId: string | null;
+  createdAt: string;
+}
+
+export interface AuditLogEntry {
+  id: string;
+  seq: number;
+  actorUserId: string | null;
+  actorUsername: string | null;
+  action: string;
+  targetUserId?: string | null;
+  projectKind?: ProjectKind | null;
+  projectId?: string | null;
+  /** Small non-sensitive diff. Never credentials or prompt content. */
+  details?: Record<string, string | number | boolean | null> | null;
+  createdAt: string;
+}
+
+export interface AppSettings {
+  publicSignupEnabled: boolean;
+  defaultAllowanceSubunits: number;
+  defaultResetCadence: ResetCadence;
+  lowCreditWarningSubunits: number;
+  maxConcurrentRunsPerUser: number;
+  /** Hard ceiling on a single run's reservation, in subunits. */
+  maxRunReservationSubunits: number;
+  disabledProviders: ProviderId[];
+  disabledModels: string[];
+  activeConversionRuleVersion: number;
+  updatedAt: string;
+  updatedByUserId: string | null;
+}
+
+export interface LoginAttemptRecord {
+  /** Lowercased username. */
+  key: string;
+  attempts: number;
+  firstAttemptAt: string;
+  lockedUntil: string | null;
+}
 
 /** Cached ads fetched for keyword-search competitors (SociaVault reuse). */
 export interface SearchCompetitorAdRecord {

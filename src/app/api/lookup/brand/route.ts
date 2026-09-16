@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 import { getLookupJob } from "@/lib/db";
+import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
+import { runBillable } from "@/lib/accounting/run";
+import { isCreditError } from "@/lib/accounting/errors";
 import { resolveBrandDisplayName } from "@/lib/pipeline/brandDisplayName";
 import { setLookupBusinessBrand } from "@/lib/pipeline/lookupRecreateBridge";
 import { resolveBrandBundle } from "@/lib/pipeline/resolveBrandBundle";
@@ -10,6 +13,7 @@ export const maxDuration = 90;
 /** Attach / refresh brand website on a lookup job. */
 export async function POST(request: Request) {
   try {
+    const user = await requireUser();
     const body = await request.json();
     const lookupId = String(body.lookupId ?? "").trim();
     const businessUrl = String(body.businessUrl ?? "").trim();
@@ -26,6 +30,8 @@ export async function POST(request: Request) {
       );
     }
 
+    resolveProjectAccess("lookup", lookupId, user, "run");
+
     const lookup = getLookupJob(lookupId);
     if (!lookup) {
       return NextResponse.json({ error: "Lookup not found" }, { status: 404 });
@@ -34,10 +40,16 @@ export async function POST(request: Request) {
     let profile = lookup.businessProfile || null;
     const warnings: string[] = [];
     try {
-      const brand = await resolveBrandBundle({
-        businessUrl,
-        profile,
-      });
+      const brand = await runBillable(
+        {
+          user,
+          operation: "lookup.resolve_brand",
+          projectKind: "lookup",
+          projectId: lookupId,
+          runId: lookupId,
+        },
+        () => resolveBrandBundle({ businessUrl, profile }),
+      );
       const businessName = resolveBrandDisplayName({
         businessUrl: brand.finalUrl || businessUrl,
         siteName: brand.assets?.siteName,
@@ -63,6 +75,8 @@ export async function POST(request: Request) {
       };
       warnings.push(...brand.warnings);
     } catch (err) {
+      // Credit failures must not be swallowed into a soft warning.
+      if (isCreditError(err)) throw err;
       warnings.push(
         `Brand analyze deferred: ${(err as Error).message || String(err)}`,
       );
@@ -75,9 +89,12 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ job, warnings });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Failed to save brand" },
-      { status: 500 },
-    );
+    if (isCreditError(err)) {
+      return NextResponse.json(
+        { error: (err as Error).message, code: (err as { code?: string }).code },
+        { status: 402 },
+      );
+    }
+    return errorResponse(err);
   }
 }

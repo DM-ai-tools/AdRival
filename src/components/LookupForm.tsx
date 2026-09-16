@@ -1,8 +1,12 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import type { AdPlatform } from "@/lib/platforms";
 import { PLATFORM_META } from "@/lib/platforms";
+import { RunBlockedNotice } from "@/components/RunCreditLine";
+import { SPACE_EVENT, readSelectedSpaceId, runnableSpaceId } from "@/components/ClientSpaceBar";
+import { formatCredits } from "@/lib/accounting/units";
+import { useCredits } from "@/lib/credits/useCredits";
 
 interface LookupFormProps {
   platform: AdPlatform;
@@ -15,10 +19,28 @@ export function LookupForm({ platform, onStarted, disabled }: LookupFormProps) {
   const [businessUrl, setBusinessUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [blockedCode, setBlockedCode] = useState<string | null>(null);
+  const [spaceId, setSpaceId] = useState<string | null>(null);
+  const credits = useCredits();
+
+  useEffect(() => {
+    const sync = (id?: string | null) => setSpaceId(id || null);
+    const onChange = (event: Event) =>
+      sync(runnableSpaceId((event as CustomEvent<string>).detail));
+    window.addEventListener(SPACE_EVENT, onChange);
+    void fetch("/api/auth/status")
+      .then((res) => res.json())
+      .then((data: { user?: { id?: string } | null }) =>
+        sync(readSelectedSpaceId(data.user?.id ?? null)),
+      )
+      .catch(() => sync(null));
+    return () => window.removeEventListener(SPACE_EVENT, onChange);
+  }, []);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
+    setBlockedCode(null);
     setLoading(true);
     try {
       const res = await fetch("/api/lookup", {
@@ -28,11 +50,21 @@ export function LookupForm({ platform, onStarted, disabled }: LookupFormProps) {
           name,
           platform,
           businessUrl: businessUrl.trim() || undefined,
+          spaceId,
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to start lookup");
+      if (!res.ok) {
+        if (res.status === 402 || res.status === 403) {
+          setBlockedCode(data.code || "insufficient_credits");
+          setError(data.error || "This run was blocked.");
+          void credits.refresh();
+          return;
+        }
+        throw new Error(data.error || "Failed to start lookup");
+      }
       onStarted(data.lookupId, data.queryName, data.platform);
+      void credits.refresh();
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -67,7 +99,7 @@ export function LookupForm({ platform, onStarted, disabled }: LookupFormProps) {
         <button
           type="submit"
           className="search-btn"
-          disabled={disabled || loading || !name.trim()}
+          disabled={disabled || loading || !name.trim() || !spaceId}
         >
           {loading ? "Starting…" : "Fetch ads"}
         </button>
@@ -90,7 +122,25 @@ export function LookupForm({ platform, onStarted, disabled }: LookupFormProps) {
         collide, then pulls creatives. Add your website to unlock Content + Design
         recreation for their landing pages.
       </p>
-      {error && <p className="error-text">{error}</p>}
+      {credits.data?.credits.unlimited ? (
+        <p className="form-hint run-charge-note">
+          This run is not credit-limited for administrators. Provider usage is
+          still recorded.
+        </p>
+      ) : credits.data ? (
+        <p className="form-hint run-charge-note">
+          This run is charged to your account —{" "}
+          {formatCredits(credits.data.credits.availableSubunits)} credits
+          available.
+        </p>
+      ) : null}
+      {blockedCode ? (
+        <RunBlockedNotice message={error || ""} code={blockedCode} />
+      ) : error ? (
+        <p className="error-text" role="alert">
+          {error}
+        </p>
+      ) : null}
     </form>
   );
 }

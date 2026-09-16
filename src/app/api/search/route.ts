@@ -1,6 +1,10 @@
 import { after } from "next/server";
 import { NextResponse } from "next/server";
 import { v4 as uuidv4 } from "uuid";
+import { errorResponse, requireUser, resolveSpaceAccess } from "@/lib/authz";
+import { runBillable, precheckRun } from "@/lib/accounting/run";
+import { isCreditError } from "@/lib/accounting/errors";
+import { saveJob, updateJob } from "@/lib/db";
 import { dispatchPlatformSearch } from "@/lib/pipeline/dispatch";
 import { resolveSearchGeoContext } from "@/lib/pipeline/keywordSuggestions";
 import { AD_PLATFORMS, parseKeywords, type AdPlatform } from "@/lib/platforms";
@@ -20,6 +24,22 @@ export const maxDuration = 300;
 
 export async function POST(request: Request) {
   try {
+    const user = await requireUser();
+
+    // Cheap pre-flight so the caller gets a clear message instead of a run that
+    // dies on its first provider call. runBillable() re-checks atomically.
+    const precheck = precheckRun(user);
+    if (!precheck.ok) {
+      return NextResponse.json(
+        {
+          error: precheck.message,
+          code: precheck.reason,
+          availableSubunits: precheck.availableSubunits,
+        },
+        { status: precheck.reason === "suspended" ? 403 : 402 },
+      );
+    }
+
     const body = await request.json();
     const platformRaw = String(body.platform ?? "facebook").toLowerCase();
     const platform = (
@@ -128,19 +148,91 @@ export async function POST(request: Request) {
     }
 
     const jobId = uuidv4();
+    const startedAt = new Date().toISOString();
+    const spaceId =
+      typeof body.spaceId === "string" && body.spaceId.trim()
+        ? body.spaceId.trim()
+        : null;
+    if (spaceId) {
+      resolveSpaceAccess(spaceId, user, "run");
+    }
 
-    after(() => {
-      void dispatchPlatformSearch(jobId, keywords, platform, {
-        geo,
-        businessProfile,
-        businessUrl,
-        geoMode: geoCtx.geoMode,
-        selectedCategory,
-        targetLocations: geoCtx.targetLocations,
-        keywordLocation: geoCtx.keywordLocation,
-        skipGuardrails,
-        guardrailOverride,
-      });
+    // Stamp ownership before any work starts, so the run is private from its
+    // first tick. The pipeline's own saveJob() calls preserve ownerUserId.
+    saveJob({
+      id: jobId,
+      keyword: keywords.join(", "),
+      keywords,
+      platform,
+      geo,
+      geoMode: geoCtx.geoMode,
+      selectedCategory,
+      targetLocations: geoCtx.targetLocations,
+      keywordLocation: geoCtx.keywordLocation,
+      businessUrl,
+      businessProfile,
+      skipGuardrails,
+      guardrailOverride,
+      status: "running",
+      progress: {
+        stage: "queued",
+        scannedAds: 0,
+        scannedPages: 0,
+        accepted: 0,
+        target: 0,
+        rejected: 0,
+        message: "Reserving credits…",
+      },
+      competitorIds: [],
+      ownerUserId: user.id,
+      spaceId,
+      createdAt: startedAt,
+      updatedAt: startedAt,
+    });
+
+    after(async () => {
+      try {
+        await runBillable(
+          {
+            user,
+            operation: "search.competitor_discovery",
+            projectKind: "search",
+            projectId: jobId,
+            runId: jobId,
+          },
+          () =>
+            dispatchPlatformSearch(jobId, keywords, platform, {
+              geo,
+              businessProfile,
+              businessUrl,
+              geoMode: geoCtx.geoMode,
+              selectedCategory,
+              targetLocations: geoCtx.targetLocations,
+              keywordLocation: geoCtx.keywordLocation,
+              skipGuardrails,
+              guardrailOverride,
+            }),
+        );
+      } catch (err) {
+        // Credit and authorization failures must surface on the run row, since
+        // the HTTP response was already sent.
+        const message = isCreditError(err)
+          ? (err as Error).message
+          : `Search failed: ${(err as Error).message}`;
+        updateJob(jobId, {
+          status: "failed",
+          error: message,
+          progress: {
+            stage: "failed",
+            scannedAds: 0,
+            scannedPages: 0,
+            accepted: 0,
+            target: 0,
+            rejected: 0,
+            message,
+          },
+        });
+      }
     });
 
     return NextResponse.json({
@@ -164,9 +256,6 @@ export async function POST(request: Request) {
         : null,
     });
   } catch (err) {
-    return NextResponse.json(
-      { error: (err as Error).message },
-      { status: 500 },
-    );
+    return errorResponse(err);
   }
 }

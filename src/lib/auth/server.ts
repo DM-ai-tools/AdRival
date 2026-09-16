@@ -1,13 +1,13 @@
-import { cookies } from "next/headers";
-import { getUserById, toPublicUser } from "@/lib/db";
+import { toPublicUser } from "@/lib/db";
+import { getSessionUser } from "@/lib/authz";
 import type { AppUserPublic } from "@/lib/types";
-import { parseSessionToken, SESSION_COOKIE } from "@/lib/auth/session";
 
+/**
+ * Server-side current user. Delegates to getSessionUser() so the account status
+ * and session-epoch checks are applied everywhere, not just in API routes.
+ */
 export async function getCurrentUser(): Promise<AppUserPublic | null> {
-  const jar = await cookies();
-  const session = await parseSessionToken(jar.get(SESSION_COOKIE)?.value);
-  if (!session) return null;
-  const user = getUserById(session.sub);
+  const user = await getSessionUser();
   return user ? toPublicUser(user) : null;
 }
 

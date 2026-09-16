@@ -14,6 +14,11 @@ export type UnifiedHistoryItem = {
   count: number;
   countLabel: string;
   subtitle?: string;
+  /** Set by the API from the caller's project access — absent means unknown. */
+  accessRole?: "owner" | "editor" | "viewer";
+  ownerDisplayName?: string | null;
+  spaceId?: string | null;
+  clientName?: string | null;
 };
 
 export function listUnifiedHistory(limit = 150): UnifiedHistoryItem[] {

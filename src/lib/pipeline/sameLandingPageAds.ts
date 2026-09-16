@@ -1,4 +1,4 @@
-import OpenAI from "openai";
+
 import { z } from "zod";
 import {
   adRunsOnFacebook,
@@ -13,7 +13,10 @@ import {
   getOpenRouterClient,
   hasOpenRouterKey,
 } from "../openrouter/client";
-import { OPENROUTER_OPENAI_MINI_MODEL } from "../openrouter/openaiCompat";
+import {
+  getDirectOpenAIClient,
+  OPENROUTER_OPENAI_MINI_MODEL,
+} from "../openrouter/openaiCompat";
 import { normalizeLandingUrl } from "./htmlFetch";
 import {
   SEARCH_COUNTRIES,
@@ -165,7 +168,7 @@ async function enrichHooksAndOffers(
       }
     : process.env.OPENAI_API_KEY
       ? {
-          client: new OpenAI({ apiKey: process.env.OPENAI_API_KEY }),
+          client: getDirectOpenAIClient(),
           model: "gpt-4o-mini",
         }
       : null;

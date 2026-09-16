@@ -1,3 +1,8 @@
+import {
+  extractSociavaultUsage,
+  meterProviderCall,
+} from "@/lib/accounting/meter";
+
 const BASE_URL = "https://api.sociavault.com";
 
 function getApiKey(): string {
@@ -8,7 +13,31 @@ function getApiKey(): string {
   return key;
 }
 
+/**
+ * Every SociaVault scrape is billable. When the response includes
+ * `credits_used` (documented on SociaVault's standard envelope) that figure is
+ * recorded as confirmed request-units. Otherwise accounting falls back to a
+ * labeled per-request estimate rather than inventing a zero.
+ *
+ * Account balance is a separate, unmetered call: GET /v1/credits
+ * (https://docs.sociavault.com/api-reference/credits).
+ */
 async function svFetch<T>(
+  path: string,
+  params: Record<string, string | boolean | number | undefined | null> = {},
+): Promise<T> {
+  return meterProviderCall<T>(
+    {
+      provider: "sociavault",
+      endpoint: path,
+      operation: `sociavault ${path}`,
+      extractUsage: extractSociavaultUsage,
+    },
+    () => svFetchRaw<T>(path, params),
+  );
+}
+
+async function svFetchRaw<T>(
   path: string,
   params: Record<string, string | boolean | number | undefined | null> = {},
 ): Promise<T> {
@@ -55,6 +84,31 @@ async function svFetch<T>(
   }
 
   return json as T;
+}
+
+export interface SociavaultCreditBalance {
+  credits: number;
+  subscriptionStatus: string | null;
+}
+
+/**
+ * GET /v1/credits — remaining SociaVault credits for this API key.
+ * Docs: https://docs.sociavault.com/api-reference/credits
+ *
+ * Unmetered: this is an account-balance lookup, not a scrape.
+ */
+export async function getSociavaultCreditBalance(): Promise<SociavaultCreditBalance> {
+  const json = await svFetchRaw<{
+    credits?: number;
+    subscriptionStatus?: string;
+  }>("/v1/credits");
+  if (typeof json.credits !== "number" || !Number.isFinite(json.credits)) {
+    throw new Error("SociaVault credits response did not include a numeric balance.");
+  }
+  return {
+    credits: json.credits,
+    subscriptionStatus: json.subscriptionStatus ?? null,
+  };
 }
 
 export interface AdLibrarySearchResult {

@@ -1,7 +1,9 @@
 import fs from "fs";
 import path from "path";
 import type {
+  AppSettings,
   AppUser,
+  AdminAlert,
   AppUserPublic,
   CompetitorRecord,
   DatabaseShape,
@@ -10,15 +12,34 @@ import type {
   SearchCompetitorAdRecord,
   LookupHistorySummary,
   LookupJob,
+  ProjectKind,
+  ProjectSpace,
   SearchJob,
+  SpaceMembership,
+  UserRole,
+  UserStatus,
 } from "./types";
+import { seedConversionRuleSet } from "./accounting/conversion";
+import { creditsToSubunits } from "./accounting/units";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+/** ADRIVAL_DATA_DIR lets tests point the store at a scratch directory. */
+const DATA_DIR =
+  process.env.ADRIVAL_DATA_DIR?.trim() || path.join(process.cwd(), "data");
 const DB_PATH = path.join(DATA_DIR, "store.json");
 const DB_LOCK_PATH = path.join(DATA_DIR, "store.json.lock");
 
+/** Current store shape. Bump whenever migrateDb() gains a step. */
+export const SCHEMA_VERSION = 2;
+
 /** In-process cache so status polls don't re-parse a multi-MB store on every request. */
 let memoryDb: DatabaseShape | null = null;
+/**
+ * `mtime:size` of the file this process last loaded or wrote. Next.js can
+ * bundle this module twice, so a write in the credits route must be visible
+ * to the users route. Matching the file stamp forces a re-read instead of
+ * serving a balance frozen before the last adjustment.
+ */
+let memoryDbStamp = "";
 
 /**
  * Tombstones for runs deleted while a pipeline is still in-flight.
@@ -27,8 +48,23 @@ let memoryDb: DatabaseShape | null = null;
 const suppressedSearchJobIds = new Set<string>();
 const suppressedLookupJobIds = new Set<string>();
 
+/**
+ * Re-entrancy depth. Accounting composes several store mutations into one
+ * logical transaction, so an inner withDbLock must not deadlock on the
+ * lockfile this same process already holds.
+ */
+let lockDepth = 0;
+
 /** Cross-request / multi-process lock for read-modify-write of store.json */
 function withDbLock<T>(fn: () => T): T {
+  if (lockDepth > 0) {
+    lockDepth += 1;
+    try {
+      return fn();
+    } finally {
+      lockDepth -= 1;
+    }
+  }
   const started = Date.now();
   while (true) {
     try {
@@ -57,15 +93,37 @@ function withDbLock<T>(fn: () => T): T {
       }
     }
   }
+  lockDepth = 1;
   try {
     return fn();
   } finally {
+    lockDepth = 0;
     try {
       fs.unlinkSync(DB_LOCK_PATH);
     } catch {
       /* ignore */
     }
   }
+}
+
+/**
+ * Read-modify-write the whole store under the exclusive lock. This is the
+ * concurrency control the credit accounting service relies on: two runs
+ * reserving credits at the same time are serialized here, so they cannot both
+ * observe the same available balance.
+ */
+export function transaction<T>(fn: (db: DatabaseShape) => T): T {
+  return withDbLock(() => {
+    const db = ensureDb();
+    const result = fn(db);
+    writeDb(db);
+    return result;
+  });
+}
+
+/** Consistent read snapshot. Callers must not mutate the returned object. */
+export function readDb(): DatabaseShape {
+  return ensureDb();
 }
 
 export function isSearchJobSuppressed(jobId: string): boolean {
@@ -281,8 +339,28 @@ export function stopAllInFlightWork(
   return { searchJobIds: stoppedSearch, lookupIds: stoppedLookup };
 }
 
-function emptyDb(): DatabaseShape {
+export function defaultAppSettings(): AppSettings {
   return {
+    // Closed by default: a fresh deployment should not accept signups before
+    // the operator has bootstrapped the first admin.
+    publicSignupEnabled: false,
+    // Zero credits for new users unless an admin raises this.
+    defaultAllowanceSubunits: 0,
+    defaultResetCadence: "none",
+    lowCreditWarningSubunits: creditsToSubunits(25),
+    maxConcurrentRunsPerUser: 3,
+    maxRunReservationSubunits: creditsToSubunits(500),
+    disabledProviders: [],
+    disabledModels: [],
+    activeConversionRuleVersion: 1,
+    updatedAt: new Date().toISOString(),
+    updatedByUserId: null,
+  };
+}
+
+function emptyDb(): DatabaseShape {
+  return migrateDb({
+    schemaVersion: 0,
     jobs: [],
     competitors: [],
     seenPageIds: [],
@@ -290,22 +368,89 @@ function emptyDb(): DatabaseShape {
     lookupAds: [],
     searchCompetitorAds: [],
     users: [],
-  };
+  });
 }
 
-function hydrateDb(parsed: DatabaseShape): DatabaseShape {
-  if (!parsed.lookupJobs) parsed.lookupJobs = [];
-  if (!parsed.lookupAds) parsed.lookupAds = [];
+/**
+ * Forward-only store migrations.
+ *
+ * v1 → v2 (multi-user workspaces, credits, admin):
+ *   - adds the accounting/authorization collections
+ *   - seeds settings and conversion rule set v1
+ *   - backfills role/status/sessionEpoch on pre-existing users
+ *   - deliberately does NOT infer ownership for pre-existing jobs. Rows keep
+ *     `ownerUserId === undefined` and are only reachable from the admin
+ *     "Unassigned projects" screen until an admin assigns an owner.
+ */
+function migrateDb(parsed: DatabaseShape): DatabaseShape {
   if (!parsed.jobs) parsed.jobs = [];
   if (!parsed.competitors) parsed.competitors = [];
   if (!parsed.seenPageIds) parsed.seenPageIds = [];
+  if (!parsed.lookupJobs) parsed.lookupJobs = [];
+  if (!parsed.lookupAds) parsed.lookupAds = [];
   if (!parsed.searchCompetitorAds) parsed.searchCompetitorAds = [];
   if (!parsed.users) parsed.users = [];
+
+  const from = parsed.schemaVersion ?? 1;
+
+  if (from < 2) {
+    if (!parsed.appSettings) parsed.appSettings = defaultAppSettings();
+    if (!parsed.conversionRuleSets?.length) {
+      parsed.conversionRuleSets = [seedConversionRuleSet()];
+    }
+    for (const user of parsed.users) {
+      // Existing accounts predate roles. They become regular users; the first
+      // admin must be created through the documented bootstrap.
+      if (!user.role) user.role = "user";
+      if (!user.status) user.status = "active";
+      if (typeof user.sessionEpoch !== "number") user.sessionEpoch = 1;
+      if (typeof user.mustChangePassword !== "boolean") {
+        user.mustChangePassword = false;
+      }
+    }
+  }
+
+  if (!parsed.appSettings) parsed.appSettings = defaultAppSettings();
+  if (!parsed.conversionRuleSets?.length) {
+    parsed.conversionRuleSets = [seedConversionRuleSet()];
+  }
+  if (!parsed.creditPeriods) parsed.creditPeriods = [];
+  if (!parsed.creditLedger) parsed.creditLedger = [];
+  if (!parsed.creditReservations) parsed.creditReservations = [];
+  if (!parsed.providerCalls) parsed.providerCalls = [];
+  if (!parsed.projectMemberships) parsed.projectMemberships = [];
+  if (!parsed.projectSpaces) parsed.projectSpaces = [];
+  if (!parsed.spaceMemberships) parsed.spaceMemberships = [];
+  if (!parsed.auditLogs) parsed.auditLogs = [];
+  if (!parsed.adminAlerts) parsed.adminAlerts = [];
+  if (!parsed.loginAttempts) parsed.loginAttempts = [];
+  if (typeof parsed.ledgerSeq !== "number") {
+    parsed.ledgerSeq = parsed.creditLedger.length;
+  }
+  if (typeof parsed.auditSeq !== "number") {
+    parsed.auditSeq = parsed.auditLogs.length;
+  }
+
+  parsed.schemaVersion = SCHEMA_VERSION;
   return parsed;
 }
 
+function hydrateDb(parsed: DatabaseShape): DatabaseShape {
+  return migrateDb(parsed);
+}
+
+function storeStamp(): string {
+  try {
+    const stat = fs.statSync(DB_PATH);
+    return `${stat.mtimeMs}:${stat.size}`;
+  } catch {
+    return "";
+  }
+}
+
 function ensureDb(): DatabaseShape {
-  if (memoryDb) return memoryDb;
+  const stamp = storeStamp();
+  if (memoryDb && stamp && stamp === memoryDbStamp) return memoryDb;
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
@@ -313,14 +458,24 @@ function ensureDb(): DatabaseShape {
     const db = emptyDb();
     memoryDb = db;
     fs.writeFileSync(DB_PATH, JSON.stringify(db), "utf8");
+    memoryDbStamp = storeStamp();
     return db;
   }
   try {
     const raw = fs.readFileSync(DB_PATH, "utf8");
-    memoryDb = hydrateDb(JSON.parse(raw) as DatabaseShape);
+    const parsed = JSON.parse(raw) as DatabaseShape;
+    const previousVersion = parsed.schemaVersion ?? 1;
+    memoryDb = hydrateDb(parsed);
+    if (previousVersion < SCHEMA_VERSION) {
+      // Persist the migration immediately so a read-only request path cannot
+      // leave the on-disk store un-migrated.
+      fs.writeFileSync(DB_PATH, JSON.stringify(memoryDb), "utf8");
+    }
+    memoryDbStamp = storeStamp();
     return memoryDb;
   } catch {
     memoryDb = emptyDb();
+    memoryDbStamp = "";
     return memoryDb;
   }
 }
@@ -331,10 +486,33 @@ function writeDb(db: DatabaseShape) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
   fs.writeFileSync(DB_PATH, JSON.stringify(db), "utf8");
+  memoryDbStamp = storeStamp();
 }
 
+/**
+ * Shape an imported payload into a store. Only run/history collections are
+ * taken from the import — accounts, credits, ledger, audit and settings are
+ * always preserved from the live store so a history import can never clobber
+ * billing or authorization data.
+ */
 function normalizeDb(input: Partial<DatabaseShape> | null | undefined): DatabaseShape {
+  const current = ensureDb();
   const db = emptyDb();
+  db.users = current.users;
+  db.appSettings = current.appSettings;
+  db.conversionRuleSets = current.conversionRuleSets;
+  db.creditPeriods = current.creditPeriods;
+  db.creditLedger = current.creditLedger;
+  db.creditReservations = current.creditReservations;
+  db.providerCalls = current.providerCalls;
+  db.projectMemberships = current.projectMemberships;
+  db.projectSpaces = current.projectSpaces;
+  db.spaceMemberships = current.spaceMemberships;
+  db.auditLogs = current.auditLogs;
+  db.adminAlerts = current.adminAlerts;
+  db.loginAttempts = current.loginAttempts;
+  db.ledgerSeq = current.ledgerSeq;
+  db.auditSeq = current.auditSeq;
   if (!input || typeof input !== "object") return db;
   if (Array.isArray(input.jobs)) db.jobs = input.jobs;
   if (Array.isArray(input.competitors)) db.competitors = input.competitors;
@@ -389,6 +567,7 @@ export function mergeStore(payload: Partial<DatabaseShape>): {
   };
 
   const merged: DatabaseShape = {
+    ...current,
     jobs: byId(current.jobs, incoming.jobs),
     competitors: byId(current.competitors, incoming.competitors),
     seenPageIds: Array.from(
@@ -444,7 +623,16 @@ export function saveJob(job: SearchJob): boolean {
     const mergedIds = Array.from(
       new Set([...(existing.competitorIds || []), ...(job.competitorIds || [])]),
     );
-    db.jobs[idx] = { ...job, competitorIds: mergedIds };
+    db.jobs[idx] = {
+      ...job,
+      competitorIds: mergedIds,
+      // The API route stamps ownership before dispatching the pipeline; the
+      // pipeline's own writes don't carry it and must not erase it.
+      ownerUserId:
+        job.ownerUserId !== undefined ? job.ownerUserId : existing.ownerUserId,
+      spaceId: job.spaceId !== undefined ? job.spaceId : existing.spaceId,
+      archivedAt: job.archivedAt !== undefined ? job.archivedAt : existing.archivedAt,
+    };
   } else {
     db.jobs.unshift(job);
   }
@@ -597,7 +785,16 @@ export function saveLookupJob(job: LookupJob): boolean {
       const mergedIds = Array.from(
         new Set([...(existing.adIds || []), ...(job.adIds || [])]),
       );
-      db.lookupJobs[idx] = { ...job, adIds: mergedIds };
+      db.lookupJobs[idx] = {
+        ...job,
+        adIds: mergedIds,
+        // See saveJob(): ownership is stamped by the route, not the pipeline.
+        ownerUserId:
+          job.ownerUserId !== undefined ? job.ownerUserId : existing.ownerUserId,
+        spaceId: job.spaceId !== undefined ? job.spaceId : existing.spaceId,
+        archivedAt:
+          job.archivedAt !== undefined ? job.archivedAt : existing.archivedAt,
+      };
     } else {
       db.lookupJobs.unshift(job);
     }
@@ -796,26 +993,40 @@ export function getSearchCompetitorAdsByCompetitor(
   );
 }
 
-export function listUsers(): AppUser[] {
-  return [...(ensureDb().users ?? [])];
+/* ───────────────────────────────── Users ────────────────────────────────── */
+
+export function listUsers(options?: { includeDeleted?: boolean }): AppUser[] {
+  const all = [...(readDb().users ?? [])];
+  return options?.includeDeleted
+    ? all
+    : all.filter((u) => u.status !== "deleted");
 }
 
 export function getUserById(id: string): AppUser | null {
-  return (ensureDb().users ?? []).find((u) => u.id === id) || null;
+  return (readDb().users ?? []).find((u) => u.id === id) || null;
 }
 
 export function getUserByUsername(username: string): AppUser | null {
   const key = username.trim().toLowerCase();
-  return (ensureDb().users ?? []).find((u) => u.username === key) || null;
+  return (readDb().users ?? []).find((u) => u.username === key) || null;
+}
+
+export function countActiveAdmins(): number {
+  return (readDb().users ?? []).filter(
+    (u) => u.role === "admin" && u.status === "active",
+  ).length;
 }
 
 export function createUser(input: {
   username: string;
   displayName: string;
   passwordHash: string;
+  role?: UserRole;
+  status?: UserStatus;
+  mustChangePassword?: boolean;
+  createdByUserId?: string | null;
 }): AppUser {
-  return withDbLock(() => {
-    const db = ensureDb();
+  return transaction((db) => {
     if (!db.users) db.users = [];
     const username = input.username.trim().toLowerCase();
     if (db.users.some((u) => u.username === username)) {
@@ -827,35 +1038,58 @@ export function createUser(input: {
       username,
       displayName: input.displayName.trim(),
       passwordHash: input.passwordHash,
+      role: input.role ?? "user",
+      status: input.status ?? "active",
+      sessionEpoch: 1,
+      mustChangePassword: input.mustChangePassword ?? false,
+      maxConcurrentRuns: null,
+      allowedProviders: null,
+      blockedModels: null,
       createdAt: now,
       updatedAt: now,
+      createdByUserId: input.createdByUserId ?? null,
     };
     db.users.unshift(user);
-    writeDb(db);
     return user;
   });
 }
 
-export function updateUser(
-  id: string,
-  patch: Partial<Pick<AppUser, "displayName" | "passwordHash">>,
-): AppUser | null {
-  return withDbLock(() => {
-    const db = ensureDb();
+export type UserPatch = Partial<
+  Pick<
+    AppUser,
+    | "displayName"
+    | "passwordHash"
+    | "role"
+    | "status"
+    | "mustChangePassword"
+    | "maxConcurrentRuns"
+    | "allowedProviders"
+    | "blockedModels"
+    | "suspendedAt"
+    | "deletedAt"
+  >
+> & {
+  /** Invalidates every existing session for this user. */
+  bumpSessionEpoch?: boolean;
+};
+
+export function updateUser(id: string, patch: UserPatch): AppUser | null {
+  return transaction((db) => {
     if (!db.users) db.users = [];
     const idx = db.users.findIndex((u) => u.id === id);
     if (idx < 0) return null;
     const prev = db.users[idx];
+    const { bumpSessionEpoch, ...fields } = patch;
     db.users[idx] = {
       ...prev,
-      ...patch,
+      ...fields,
       displayName:
-        patch.displayName !== undefined
-          ? patch.displayName.trim()
+        fields.displayName !== undefined
+          ? fields.displayName.trim()
           : prev.displayName,
+      sessionEpoch: bumpSessionEpoch ? prev.sessionEpoch + 1 : prev.sessionEpoch,
       updatedAt: new Date().toISOString(),
     };
-    writeDb(db);
     return db.users[idx];
   });
 }
@@ -865,7 +1099,320 @@ export function toPublicUser(user: AppUser): AppUserPublic {
     id: user.id,
     username: user.username,
     displayName: user.displayName,
+    role: user.role,
+    status: user.status,
+    mustChangePassword: user.mustChangePassword,
     createdAt: user.createdAt,
   };
+}
+
+/* ────────────────────────────── App settings ────────────────────────────── */
+
+export function getAppSettings(): AppSettings {
+  return readDb().appSettings ?? defaultAppSettings();
+}
+
+export function updateAppSettings(
+  patch: Partial<AppSettings>,
+  actorUserId: string | null,
+): AppSettings {
+  return transaction((db) => {
+    const next: AppSettings = {
+      ...(db.appSettings ?? defaultAppSettings()),
+      ...patch,
+      updatedAt: new Date().toISOString(),
+      updatedByUserId: actorUserId,
+    };
+    db.appSettings = next;
+    return next;
+  });
+}
+
+/* ──────────────────────── Project ownership helpers ─────────────────────── */
+
+export interface ProjectOwnership {
+  kind: ProjectKind;
+  id: string;
+  ownerUserId: string | null | undefined;
+  spaceId: string | null;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+}
+
+function describeProject(
+  kind: ProjectKind,
+  row: SearchJob | LookupJob,
+): ProjectOwnership {
+  return {
+    kind,
+    id: row.id,
+    ownerUserId: row.ownerUserId,
+    spaceId: row.spaceId ?? null,
+    title:
+      kind === "search"
+        ? (row as SearchJob).keyword || "Keyword search"
+        : (row as LookupJob).queryName || "Competitor lookup",
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    archivedAt: row.archivedAt ?? null,
+  };
+}
+
+export function getProject(
+  kind: ProjectKind,
+  id: string,
+): ProjectOwnership | null {
+  const db = readDb();
+  if (kind === "search") {
+    const row = db.jobs.find((j) => j.id === id);
+    return row ? describeProject("search", row) : null;
+  }
+  const row = (db.lookupJobs ?? []).find((j) => j.id === id);
+  return row ? describeProject("lookup", row) : null;
+}
+
+export function listProjects(options?: {
+  ownerUserId?: string;
+  unassignedOnly?: boolean;
+}): ProjectOwnership[] {
+  const db = readDb();
+  const rows: ProjectOwnership[] = [
+    ...db.jobs.map((j) => describeProject("search", j)),
+    ...(db.lookupJobs ?? [])
+      .filter((j) => !j.internalOnly)
+      .map((j) => describeProject("lookup", j)),
+  ];
+  const filtered = options?.unassignedOnly
+    ? rows.filter((r) => !r.ownerUserId)
+    : options?.ownerUserId
+      ? rows.filter((r) => r.ownerUserId === options.ownerUserId)
+      : rows;
+  return filtered.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export function setProjectOwner(
+  kind: ProjectKind,
+  id: string,
+  ownerUserId: string | null,
+): boolean {
+  return transaction((db) => {
+    const rows: Array<SearchJob | LookupJob> =
+      kind === "search" ? db.jobs : (db.lookupJobs ?? []);
+    const row = rows.find((r) => r.id === id);
+    if (!row) return false;
+    row.ownerUserId = ownerUserId;
+    row.updatedAt = new Date().toISOString();
+    return true;
+  });
+}
+
+export function setProjectArchived(
+  kind: ProjectKind,
+  id: string,
+  archived: boolean,
+): boolean {
+  return transaction((db) => {
+    const rows: Array<SearchJob | LookupJob> =
+      kind === "search" ? db.jobs : (db.lookupJobs ?? []);
+    const row = rows.find((r) => r.id === id);
+    if (!row) return false;
+    row.archivedAt = archived ? new Date().toISOString() : null;
+    row.updatedAt = new Date().toISOString();
+    return true;
+  });
+}
+
+export function listProjectSpaces(options?: {
+  ownerUserId?: string;
+  includeArchived?: boolean;
+}): ProjectSpace[] {
+  return (readDb().projectSpaces ?? [])
+    .filter((space) => {
+      if (!options?.includeArchived && space.archivedAt) return false;
+      if (options?.ownerUserId && space.ownerUserId !== options.ownerUserId) {
+        return false;
+      }
+      return true;
+    })
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+export function getProjectSpace(id: string): ProjectSpace | null {
+  return (readDb().projectSpaces ?? []).find((space) => space.id === id) ?? null;
+}
+
+export function createProjectSpace(input: {
+  clientName: string;
+  ownerUserId: string;
+}): ProjectSpace {
+  return transaction((db) => {
+    if (!db.projectSpaces) db.projectSpaces = [];
+    const now = new Date().toISOString();
+    const space: ProjectSpace = {
+      id: crypto.randomUUID(),
+      clientName: input.clientName.trim(),
+      ownerUserId: input.ownerUserId,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null,
+    };
+    db.projectSpaces.unshift(space);
+    return space;
+  });
+}
+
+export function setProjectSpaceOwner(spaceId: string, ownerUserId: string): boolean {
+  return transaction((db) => {
+    const space = (db.projectSpaces ?? []).find((s) => s.id === spaceId);
+    if (!space) return false;
+    space.ownerUserId = ownerUserId;
+    space.updatedAt = new Date().toISOString();
+    return true;
+  });
+}
+
+export function archiveProjectSpace(spaceId: string): {
+  ok: boolean;
+  runsArchived: number;
+} {
+  return transaction((db) => {
+    const space = (db.projectSpaces ?? []).find((s) => s.id === spaceId);
+    if (!space) return { ok: false, runsArchived: 0 };
+    const now = new Date().toISOString();
+    space.archivedAt = now;
+    space.updatedAt = now;
+    let runsArchived = 0;
+    for (const job of db.jobs) {
+      if (job.spaceId === spaceId && !job.archivedAt) {
+        job.archivedAt = now;
+        job.updatedAt = now;
+        runsArchived += 1;
+      }
+    }
+    for (const job of db.lookupJobs ?? []) {
+      if (job.spaceId === spaceId && !job.archivedAt) {
+        job.archivedAt = now;
+        job.updatedAt = now;
+        runsArchived += 1;
+      }
+    }
+    return { ok: true, runsArchived };
+  });
+}
+
+export function assignRunsToSpace(
+  spaceId: string,
+  runs: Array<{ kind: ProjectKind; id: string }>,
+): number {
+  return transaction((db) => {
+    const space = (db.projectSpaces ?? []).find((s) => s.id === spaceId);
+    if (!space || space.archivedAt) return 0;
+    const now = new Date().toISOString();
+    let moved = 0;
+    for (const run of runs) {
+      const rows = run.kind === "search" ? db.jobs : (db.lookupJobs ?? []);
+      const row = rows.find((r) => r.id === run.id);
+      if (!row) continue;
+      row.spaceId = spaceId;
+      if (!row.ownerUserId) row.ownerUserId = space.ownerUserId;
+      row.updatedAt = now;
+      moved += 1;
+    }
+    space.updatedAt = now;
+    return moved;
+  });
+}
+
+export function listSpaceMemberships(spaceId?: string): SpaceMembership[] {
+  return (readDb().spaceMemberships ?? []).filter(
+    (m) => !spaceId || m.spaceId === spaceId,
+  );
+}
+
+export function upsertSpaceMembership(input: {
+  spaceId: string;
+  userId: string;
+  role: "editor" | "viewer";
+  grantedByUserId: string;
+}): SpaceMembership {
+  return transaction((db) => {
+    if (!db.spaceMemberships) db.spaceMemberships = [];
+    const now = new Date().toISOString();
+    const existing = db.spaceMemberships.find(
+      (m) => m.spaceId === input.spaceId && m.userId === input.userId,
+    );
+    if (existing) {
+      existing.role = input.role;
+      existing.updatedAt = now;
+      return existing;
+    }
+    const created: SpaceMembership = {
+      id: crypto.randomUUID(),
+      spaceId: input.spaceId,
+      userId: input.userId,
+      role: input.role,
+      grantedByUserId: input.grantedByUserId,
+      createdAt: now,
+      updatedAt: now,
+    };
+    db.spaceMemberships.push(created);
+    return created;
+  });
+}
+
+export function removeSpaceMembership(spaceId: string, userId: string): boolean {
+  return transaction((db) => {
+    if (!db.spaceMemberships) return false;
+    const before = db.spaceMemberships.length;
+    db.spaceMemberships = db.spaceMemberships.filter(
+      (m) => !(m.spaceId === spaceId && m.userId === userId),
+    );
+    return db.spaceMemberships.length < before;
+  });
+}
+
+const PROVIDER_ALERT_DEDUPE_MS = 15 * 60 * 1000;
+
+/** Record that a provider account is out of credits. Deduped per user+provider. */
+export function recordProviderCreditAlert(input: {
+  userId: string;
+  username: string;
+  displayName: string;
+  provider: AdminAlert["provider"];
+  runId: string | null;
+}): void {
+  transaction((db) => {
+    if (!db.adminAlerts) db.adminAlerts = [];
+    const cutoff = Date.now() - PROVIDER_ALERT_DEDUPE_MS;
+    const duplicate = db.adminAlerts.some(
+      (alert) =>
+        alert.kind === "provider_credits_exhausted" &&
+        alert.userId === input.userId &&
+        alert.provider === input.provider &&
+        new Date(alert.createdAt).getTime() >= cutoff,
+    );
+    if (duplicate) return;
+    db.adminAlerts.push({
+      id: crypto.randomUUID(),
+      kind: "provider_credits_exhausted",
+      userId: input.userId,
+      username: input.username,
+      displayName: input.displayName,
+      provider: input.provider,
+      runId: input.runId,
+      createdAt: new Date().toISOString(),
+    });
+    if (db.adminAlerts.length > 300) {
+      db.adminAlerts = db.adminAlerts.slice(-300);
+    }
+  });
+}
+
+export function listAdminAlerts(): AdminAlert[] {
+  return [...(readDb().adminAlerts ?? [])].sort((a, b) =>
+    b.createdAt.localeCompare(a.createdAt),
+  );
 }
 

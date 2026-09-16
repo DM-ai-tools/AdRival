@@ -52,16 +52,28 @@ function resolveAdLandingUrl(ad: LookupAdRecord): string | null {
 /** Find prior recreations for the same landing-page destination. */
 export function findExistingRecreationsForUrl(
   url: string | null | undefined,
-  options?: { excludeCompetitorId?: string | null },
+  options?: {
+    excludeCompetitorId?: string | null;
+    /**
+     * Run ids the caller is allowed to see. Required for user-facing calls so
+     * prior recreations from other workspaces never leak. Omit only for
+     * admin/system callers.
+     */
+    visibleRunIds?: Iterable<string> | null;
+  },
 ): ExistingRecreationHit[] {
   const key = landingPageMatchKey(url);
   if (!key) return [];
 
   const hits: ExistingRecreationHit[] = [];
   const exclude = options?.excludeCompetitorId || null;
+  const visible = options?.visibleRunIds
+    ? new Set(options.visibleRunIds)
+    : null;
 
   for (const c of listAllCompetitors(5000)) {
     if (exclude && c.id === exclude) continue;
+    if (visible && !visible.has(c.runId)) continue;
     const page = c.recreatedPage;
     if (!page) continue;
     if (
@@ -162,6 +174,8 @@ export function ensureLookupRecreationCompetitor(adId: string): {
       competitorIds: [],
       businessUrl: normalizedBusiness,
       businessProfile: lookup.businessProfile || null,
+      // The bridge job is a view onto the lookup, so it inherits its owner.
+      ownerUserId: lookup.ownerUserId ?? null,
       createdAt: now,
       updatedAt: now,
     };

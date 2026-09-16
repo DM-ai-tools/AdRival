@@ -1,6 +1,10 @@
 import { after } from "next/server";
 import { NextResponse } from "next/server";
 import { v4 as uuidv4 } from "uuid";
+import { errorResponse, requireUser, resolveSpaceAccess } from "@/lib/authz";
+import { precheckRun, runBillable } from "@/lib/accounting/run";
+import { isCreditError } from "@/lib/accounting/errors";
+import { saveLookupJob, updateLookupJob } from "@/lib/db";
 import { dispatchPlatformLookup } from "@/lib/pipeline/dispatch";
 import { AD_PLATFORMS, type AdPlatform } from "@/lib/platforms";
 import type { LookupPageCandidate } from "@/lib/types";
@@ -10,6 +14,20 @@ export const maxDuration = 300;
 
 export async function POST(request: Request) {
   try {
+    const user = await requireUser();
+
+    const precheck = precheckRun(user);
+    if (!precheck.ok) {
+      return NextResponse.json(
+        {
+          error: precheck.message,
+          code: precheck.reason,
+          availableSubunits: precheck.availableSubunits,
+        },
+        { status: precheck.reason === "suspended" ? 403 : 402 },
+      );
+    }
+
     const body = await request.json();
     const name = String(body.name ?? body.queryName ?? "").trim();
     if (!name) {
@@ -61,15 +79,70 @@ export async function POST(request: Request) {
     const queryName = forcedCandidate?.name || name;
     const businessUrl =
       typeof body.businessUrl === "string" ? body.businessUrl.trim() : "";
+    const spaceId =
+      typeof body.spaceId === "string" && body.spaceId.trim()
+        ? body.spaceId.trim()
+        : null;
+    if (spaceId) resolveSpaceAccess(spaceId, user, "run");
 
-    after(() => {
-      void dispatchPlatformLookup(
-        lookupId,
-        queryName,
-        platform,
-        forcedCandidate,
-        businessUrl ? { businessUrl } : undefined,
-      );
+    // Stamp ownership before dispatching so the row is never world-readable.
+    const startedAt = new Date().toISOString();
+    saveLookupJob({
+      id: lookupId,
+      queryName,
+      platform,
+      status: "running",
+      progress: {
+        stage: "queued",
+        message: "Reserving credits…",
+        candidatesFound: 0,
+        adsFetched: 0,
+        pagesScanned: 0,
+      },
+      candidates: [],
+      adIds: [],
+      businessUrl: businessUrl || null,
+      ownerUserId: user.id,
+      spaceId,
+      createdAt: startedAt,
+      updatedAt: startedAt,
+    });
+
+    after(async () => {
+      try {
+        await runBillable(
+          {
+            user,
+            operation: "lookup.competitor_ads",
+            projectKind: "lookup",
+            projectId: lookupId,
+            runId: lookupId,
+          },
+          () =>
+            dispatchPlatformLookup(
+              lookupId,
+              queryName,
+              platform,
+              forcedCandidate,
+              businessUrl ? { businessUrl } : undefined,
+            ),
+        );
+      } catch (err) {
+        const message = isCreditError(err)
+          ? (err as Error).message
+          : `Lookup failed: ${(err as Error).message}`;
+        updateLookupJob(lookupId, {
+          status: "failed",
+          error: message,
+          progress: {
+            stage: "failed",
+            message,
+            candidatesFound: 0,
+            adsFetched: 0,
+            pagesScanned: 0,
+          },
+        });
+      }
     });
 
     return NextResponse.json({
@@ -80,9 +153,6 @@ export async function POST(request: Request) {
       forced: Boolean(forcedCandidate),
     });
   } catch (err) {
-    return NextResponse.json(
-      { error: (err as Error).message },
-      { status: 500 },
-    );
+    return errorResponse(err);
   }
 }

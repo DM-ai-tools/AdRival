@@ -1,4 +1,7 @@
 import { NextResponse } from "next/server";
+import { errorResponse, requireUser } from "@/lib/authz";
+import { runBillable } from "@/lib/accounting/run";
+import { isCreditError } from "@/lib/accounting/errors";
 import { analyzeBusinessUrl } from "@/lib/openrouter/businessAnalyzer";
 import { resolveBrandBundle } from "@/lib/pipeline/resolveBrandBundle";
 import { sanitizeClientFacingText } from "@/lib/clientFacing";
@@ -22,6 +25,8 @@ function friendlyAnalyzeError(err: unknown): string {
 
 export async function POST(request: Request) {
   try {
+    const user = await requireUser();
+
     if (!process.env.OPENROUTER_API_KEY) {
       return NextResponse.json(
         {
@@ -41,26 +46,49 @@ export async function POST(request: Request) {
       );
     }
 
-    const profile = await analyzeBusinessUrl(url);
+    // URL analysis is not attached to a project yet — it is what produces the
+    // profile a project is later created from — so it bills the caller directly.
+    const profile = await runBillable(
+      {
+        user,
+        operation: "business.analyze_url",
+        projectKind: null,
+        projectId: null,
+        runId: null,
+      },
+      async () => {
+        const analyzed = await analyzeBusinessUrl(url);
 
-    // Brand identity via site branding (+ links) — colors, fonts, logo, socials
-    try {
-      const bundle = await resolveBrandBundle({
-        businessUrl: profile.url || url,
-        profile,
-      });
-      profile.brandColors = bundle.colors;
-      profile.brandAssets = bundle.assets;
-      profile.brandDesign = bundle.design;
-      if (bundle.warnings.length) {
-        console.warn("[business/analyze] brand warnings", bundle.warnings);
-      }
-    } catch (err) {
-      console.warn("[business/analyze] brand bundle failed", err);
-    }
+        // Brand identity via site branding (+ links) — colors, fonts, logo, socials
+        try {
+          const bundle = await resolveBrandBundle({
+            businessUrl: analyzed.url || url,
+            profile: analyzed,
+          });
+          analyzed.brandColors = bundle.colors;
+          analyzed.brandAssets = bundle.assets;
+          analyzed.brandDesign = bundle.design;
+          if (bundle.warnings.length) {
+            console.warn("[business/analyze] brand warnings", bundle.warnings);
+          }
+        } catch (err) {
+          console.warn("[business/analyze] brand bundle failed", err);
+        }
+        return analyzed;
+      },
+    );
 
     return NextResponse.json({ profile });
   } catch (err) {
+    if (isCreditError(err)) {
+      return NextResponse.json(
+        { error: (err as Error).message, code: (err as { code?: string }).code },
+        { status: 402 },
+      );
+    }
+    if (err instanceof Error && err.name === "HttpError") {
+      return errorResponse(err);
+    }
     console.error("[business/analyze]", err);
     return NextResponse.json(
       { error: friendlyAnalyzeError(err) },

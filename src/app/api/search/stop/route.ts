@@ -1,17 +1,22 @@
 import { NextResponse } from "next/server";
 import { getJob, listJobs, isSearchWorkInFlight, stopSearchJob } from "@/lib/db";
+import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
 
 export const runtime = "nodejs";
 
-/** Stop one search job, or all currently running jobs when stopAll=true. */
+/** Stop one of the caller's search jobs, or all of their running jobs. */
 export async function POST(request: Request) {
   try {
+    const user = await requireUser();
     const body = await request.json().catch(() => ({}));
     const stopAll = Boolean(body.stopAll);
     const jobId = String(body.jobId ?? "").trim();
 
     if (stopAll) {
-      const running = listJobs(200).filter(isSearchWorkInFlight);
+      // Scoped to the caller's own runs.
+      const running = listJobs(500).filter(
+        (job) => job.ownerUserId === user.id && isSearchWorkInFlight(job),
+      );
       const stopped = running
         .map((j) => stopSearchJob(j.id, "Stopped — search cancelled"))
         .filter(Boolean);
@@ -27,15 +32,13 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
+    resolveProjectAccess("search", jobId, user, "edit");
     if (!getJob(jobId)) {
       return NextResponse.json({ error: "Job not found" }, { status: 404 });
     }
     const job = stopSearchJob(jobId, "Stopped — search cancelled");
     return NextResponse.json({ job });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Failed to stop search" },
-      { status: 500 },
-    );
+    return errorResponse(err);
   }
 }

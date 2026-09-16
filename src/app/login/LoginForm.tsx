@@ -1,11 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { FormEvent, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 
 export default function LoginForm() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const nextPath = searchParams.get("next") || "/";
 
@@ -13,6 +12,18 @@ export default function LoginForm() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [signupEnabled, setSignupEnabled] = useState<boolean | null>(null);
+  const [needsBootstrap, setNeedsBootstrap] = useState(false);
+
+  useEffect(() => {
+    void fetch("/api/auth/status", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((data: { publicSignupEnabled?: boolean; needsBootstrap?: boolean }) => {
+        setSignupEnabled(Boolean(data.publicSignupEnabled));
+        setNeedsBootstrap(Boolean(data.needsBootstrap));
+      })
+      .catch(() => setSignupEnabled(false));
+  }, []);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -28,11 +39,15 @@ export default function LoginForm() {
       if (!res.ok) {
         throw new Error(data.error || "Login failed");
       }
-      router.replace(nextPath.startsWith("/") ? nextPath : "/");
-      router.refresh();
+      const target = data.mustChangePassword
+        ? "/account?mustChangePassword=1"
+        : nextPath.startsWith("/")
+          ? nextPath
+          : "/";
+      // Hard navigation so no state from a previously signed-in account survives.
+      window.location.replace(target);
     } catch (err) {
       setError((err as Error).message);
-    } finally {
       setLoading(false);
     }
   }
@@ -103,12 +118,25 @@ export default function LoginForm() {
           </div>
         </form>
 
-        <p className="form-hint login-switch">
-          No account yet?{" "}
-          <Link href="/register" className="login-switch-link">
-            Create an account
-          </Link>
-        </p>
+        {needsBootstrap ? (
+          <p className="form-hint login-switch">
+            No administrator exists yet.{" "}
+            <Link href="/setup" className="login-switch-link">
+              Run first-admin setup
+            </Link>
+          </p>
+        ) : signupEnabled ? (
+          <p className="form-hint login-switch">
+            No account yet?{" "}
+            <Link href="/register" className="login-switch-link">
+              Create an account
+            </Link>
+          </p>
+        ) : signupEnabled === false ? (
+          <p className="form-hint login-switch">
+            Public signup is disabled. Ask your administrator for an account.
+          </p>
+        ) : null}
       </section>
     </main>
   );

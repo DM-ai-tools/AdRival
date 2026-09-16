@@ -1,49 +1,64 @@
 import { NextResponse } from "next/server";
-import { stopAllInFlightWork, stopLookupJob, stopSearchJob } from "@/lib/db";
+import {
+  isLookupWorkInFlight,
+  isSearchWorkInFlight,
+  listJobs,
+  listLookupJobs,
+  stopLookupJob,
+  stopSearchJob,
+} from "@/lib/db";
+import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
 
 export const runtime = "nodejs";
 
 /**
  * Kill in-flight work.
  * Body: { all?: true, jobId?: string, lookupId?: string }
+ *
+ * "all" means "all of mine": it never stops another user's runs, so a suspended
+ * or malicious account cannot disrupt other workspaces.
  */
 export async function POST(request: Request) {
   try {
+    const user = await requireUser();
     const body = await request.json().catch(() => ({}));
     const reason = "Stopped by user";
-    const all = body.all !== false && !body.jobId && !body.lookupId
-      ? true
-      : Boolean(body.all);
     const jobId = String(body.jobId ?? "").trim();
     const lookupId = String(body.lookupId ?? "").trim();
+    const all =
+      body.all !== false && !jobId && !lookupId ? true : Boolean(body.all);
 
-    if (all) {
-      const stopped = stopAllInFlightWork(reason, {
-        jobIds: jobId ? [jobId] : [],
-        lookupIds: lookupId ? [lookupId] : [],
-      });
-      return NextResponse.json({
-        stopped: true,
-        ...stopped,
-      });
-    }
+    const searchJobIds: string[] = [];
+    const lookupIds: string[] = [];
 
     if (jobId) {
-      const job = stopSearchJob(jobId, reason);
-      return NextResponse.json({ stopped: true, job });
+      resolveProjectAccess("search", jobId, user, "edit");
+      if (stopSearchJob(jobId, reason)) searchJobIds.push(jobId);
     }
-
     if (lookupId) {
-      const job = stopLookupJob(lookupId, reason);
-      return NextResponse.json({ stopped: true, job });
+      resolveProjectAccess("lookup", lookupId, user, "edit");
+      if (stopLookupJob(lookupId, reason)) lookupIds.push(lookupId);
     }
 
-    const stopped = stopAllInFlightWork(reason);
-    return NextResponse.json({ stopped: true, ...stopped });
+    if (all) {
+      for (const job of listJobs(500)) {
+        if (job.ownerUserId !== user.id) continue;
+        if (!isSearchWorkInFlight(job)) continue;
+        if (stopSearchJob(job.id, reason)) searchJobIds.push(job.id);
+      }
+      for (const job of listLookupJobs(500)) {
+        if (job.ownerUserId !== user.id) continue;
+        if (!isLookupWorkInFlight(job)) continue;
+        if (stopLookupJob(job.id, reason)) lookupIds.push(job.id);
+      }
+    }
+
+    return NextResponse.json({
+      stopped: true,
+      searchJobIds: [...new Set(searchJobIds)],
+      lookupIds: [...new Set(lookupIds)],
+    });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Failed to stop work" },
-      { status: 500 },
-    );
+    return errorResponse(err);
   }
 }

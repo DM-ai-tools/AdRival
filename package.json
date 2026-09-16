@@ -11,6 +11,9 @@
     "start": "next start --hostname 0.0.0.0 --port ${PORT:-3000}",
     "start:standalone": "HOSTNAME=0.0.0.0 node server.js",
     "lint": "next lint",
+    "test": "tsx --test tests/accounting.test.ts tests/authorization.test.ts tests/runGating.test.ts tests/migration.test.ts tests/apiSurface.test.ts",
+    "test:e2e": "next build && tsx --test tests/e2e.test.ts",
+    "test:all": "npm run test && npm run test:e2e",
     "postinstall": "playwright install chromium",
     "playwright:install": "playwright install chromium"
   },
@@ -41,6 +44,7 @@
     "eslint": "^9",
     "eslint-config-next": "^15.3.0",
     "tailwindcss": "^4",
+    "tsx": "^4.23.13",
     "typescript": "^5"
   }
 }

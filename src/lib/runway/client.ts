@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import RunwayML, { TaskFailedError } from "@runwayml/sdk";
+import { meterProviderCall } from "@/lib/accounting/meter";
 
 export type GptImage2Ratio =
   | "2048:880"
@@ -205,13 +206,30 @@ export async function generateGptImage2(input: {
     background: "opaque" as const,
   };
 
+  /**
+   * Each call starts a new billable Runway task, so the retries below are
+   * metered separately rather than folded into the first attempt.
+   */
   async function runCreate(refs: Array<{ uri: string; tag: string }>) {
-    return client.textToImage
-      .create({
-        ...basePayload,
-        ...(refs.length ? { referenceImages: refs as any } : {}),
-      })
-      .waitForTaskOutput({ timeout: 5 * 60 * 1000 });
+    return meterProviderCall(
+      {
+        provider: "runway",
+        model: basePayload.model,
+        endpoint: "/v1/text_to_image",
+        operation: "runway.text_to_image",
+        extractUsage: (task: { id?: string }) => ({
+          usage: { requests: 1, images: 1 },
+          providerRequestId: task?.id ?? null,
+        }),
+      },
+      () =>
+        client.textToImage
+          .create({
+            ...basePayload,
+            ...(refs.length ? { referenceImages: refs as any } : {}),
+          })
+          .waitForTaskOutput({ timeout: 5 * 60 * 1000 }),
+    );
   }
 
   try {

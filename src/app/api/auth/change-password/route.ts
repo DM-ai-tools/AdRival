@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
-import { cookies } from "next/headers";
 import { hashPassword, verifyPassword } from "@/lib/auth/password";
 import { validatePassword } from "@/lib/auth/validation";
-import { getUserById, toPublicUser, updateUser } from "@/lib/db";
+import { toPublicUser, updateUser } from "@/lib/db";
+import { errorResponse, requireUser } from "@/lib/authz";
+import { recordAudit } from "@/lib/accounting/records";
 import {
   createSessionToken,
   isSecureRequest,
-  parseSessionToken,
   sessionCookieOptions,
   SESSION_COOKIE,
 } from "@/lib/auth/session";
@@ -14,53 +14,78 @@ import {
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
-  const jar = await cookies();
-  const session = await parseSessionToken(jar.get(SESSION_COOKIE)?.value);
-  if (!session) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  const user = getUserById(session.sub);
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  let body: {
-    currentPassword?: string;
-    newPassword?: string;
-    confirmPassword?: string;
-  } = {};
   try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
-  }
+    // Reachable while a forced password change is pending — that is the point.
+    const user = await requireUser({ allowPasswordChangePending: true });
 
-  const currentPassword = String(body.currentPassword ?? "");
-  const newPassword = String(body.newPassword ?? "");
-  const confirmPassword = String(body.confirmPassword ?? "");
+    let body: {
+      currentPassword?: string;
+      newPassword?: string;
+      confirmPassword?: string;
+    } = {};
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+    }
 
-  if (!(await verifyPassword(currentPassword, user.passwordHash))) {
-    return NextResponse.json({ error: "Current password is incorrect" }, { status: 401 });
-  }
+    const currentPassword = String(body.currentPassword ?? "");
+    const newPassword = String(body.newPassword ?? "");
+    const confirmPassword = String(body.confirmPassword ?? "");
 
-  const passwordErr = validatePassword(newPassword);
-  if (passwordErr) {
-    return NextResponse.json({ error: passwordErr }, { status: 400 });
-  }
-  if (newPassword !== confirmPassword) {
-    return NextResponse.json({ error: "New passwords do not match" }, { status: 400 });
-  }
+    if (!(await verifyPassword(currentPassword, user.passwordHash))) {
+      return NextResponse.json(
+        { error: "Current password is incorrect" },
+        { status: 401 },
+      );
+    }
 
-  const updated = updateUser(user.id, {
-    passwordHash: await hashPassword(newPassword),
-  });
-  if (!updated) {
-    return NextResponse.json({ error: "User not found" }, { status: 404 });
-  }
+    const passwordErr = validatePassword(newPassword);
+    if (passwordErr) {
+      return NextResponse.json({ error: passwordErr }, { status: 400 });
+    }
+    if (newPassword === currentPassword) {
+      return NextResponse.json(
+        { error: "New password must be different from the current password" },
+        { status: 400 },
+      );
+    }
+    if (newPassword !== confirmPassword) {
+      return NextResponse.json(
+        { error: "New passwords do not match" },
+        { status: 400 },
+      );
+    }
 
-  const token = await createSessionToken(toPublicUser(updated));
-  const res = NextResponse.json({ ok: true });
-  res.cookies.set(SESSION_COOKIE, token, sessionCookieOptions(isSecureRequest(request)));
-  return res;
+    // Bumping the session epoch invalidates every other session for this user.
+    const updated = updateUser(user.id, {
+      passwordHash: await hashPassword(newPassword),
+      mustChangePassword: false,
+      bumpSessionEpoch: true,
+    });
+    if (!updated) {
+      return NextResponse.json({ error: "User not found" }, { status: 404 });
+    }
+    recordAudit({
+      actorUserId: user.id,
+      actorUsername: user.username,
+      action: "auth.password_changed",
+      targetUserId: user.id,
+    });
+
+    // Re-issue this session with the new epoch so the caller stays signed in.
+    const token = await createSessionToken({
+      ...toPublicUser(updated),
+      sessionEpoch: updated.sessionEpoch,
+    });
+    const res = NextResponse.json({ ok: true });
+    res.cookies.set(
+      SESSION_COOKIE,
+      token,
+      sessionCookieOptions(isSecureRequest(request)),
+    );
+    return res;
+  } catch (err) {
+    return errorResponse(err);
+  }
 }

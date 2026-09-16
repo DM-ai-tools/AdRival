@@ -1,5 +1,13 @@
 import { NextResponse } from "next/server";
 import { getLookupAd, getLookupJob } from "@/lib/db";
+import {
+  errorResponse,
+  requireUser,
+  resolveProjectAccess,
+  visibleRunIds,
+} from "@/lib/authz";
+import { runBillable } from "@/lib/accounting/run";
+import { isCreditError } from "@/lib/accounting/errors";
 import { resolveBrandDisplayName } from "@/lib/pipeline/brandDisplayName";
 import {
   ensureLookupRecreationCompetitor,
@@ -18,6 +26,7 @@ export const maxDuration = 120;
  */
 export async function POST(request: Request) {
   try {
+    const user = await requireUser();
     const body = await request.json();
     const adId = String(body.adId ?? "").trim();
     if (!adId) {
@@ -28,6 +37,8 @@ export async function POST(request: Request) {
     if (!ad) {
       return NextResponse.json({ error: "Lookup ad not found" }, { status: 404 });
     }
+
+    resolveProjectAccess("lookup", ad.lookupId, user, "run");
 
     const lookup = getLookupJob(ad.lookupId);
     if (!lookup) {
@@ -50,10 +61,20 @@ export async function POST(request: Request) {
 
       if (needsAnalyze || body.refreshBrand) {
         try {
-          const brand = await resolveBrandBundle({
-            businessUrl: businessUrlRaw,
-            profile: lookup.businessProfile || null,
-          });
+          const brand = await runBillable(
+            {
+              user,
+              operation: "lookup.recreate_bridge.resolve_brand",
+              projectKind: "lookup",
+              projectId: ad.lookupId,
+              runId: ad.lookupId,
+            },
+            () =>
+              resolveBrandBundle({
+                businessUrl: businessUrlRaw,
+                profile: lookup.businessProfile || null,
+              }),
+          );
           const businessName = resolveBrandDisplayName({
             businessUrl: brand.finalUrl || businessUrlRaw,
             siteName: brand.assets?.siteName,
@@ -83,6 +104,7 @@ export async function POST(request: Request) {
             },
           });
         } catch (err) {
+          if (isCreditError(err)) throw err;
           // Still store the URL so recreate can retry brand resolve later
           setLookupBusinessBrand(ad.lookupId, {
             businessUrl: businessUrlRaw,
@@ -104,7 +126,9 @@ export async function POST(request: Request) {
       ad.youtubeUrl ||
       null;
 
-    const prior = findExistingRecreationsForUrl(landingUrl);
+    const prior = findExistingRecreationsForUrl(landingUrl, {
+      visibleRunIds: visibleRunIds(user, "search"),
+    });
     const confirmRedesign = Boolean(body.confirmRedesign || body.force);
     const alreadyDone = prior.filter(
       (h) =>
@@ -137,15 +161,19 @@ export async function POST(request: Request) {
       ad: getLookupAd(adId),
     });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Recreate bridge failed" },
-      { status: 500 },
-    );
+    if (isCreditError(err)) {
+      return NextResponse.json(
+        { error: (err as Error).message, code: (err as { code?: string }).code },
+        { status: 402 },
+      );
+    }
+    return errorResponse(err);
   }
 }
 
 export async function GET(request: Request) {
   try {
+    const user = await requireUser();
     const { searchParams } = new URL(request.url);
     const adId = String(searchParams.get("adId") || "").trim();
     if (!adId) {
@@ -155,12 +183,15 @@ export async function GET(request: Request) {
     if (!ad) {
       return NextResponse.json({ error: "Lookup ad not found" }, { status: 404 });
     }
+    resolveProjectAccess("lookup", ad.lookupId, user, "view");
     const landingUrl =
       ad.pageAnalysis?.analyzedUrl ||
       ad.landingPageUrl ||
       ad.youtubeUrl ||
       null;
-    const existing = findExistingRecreationsForUrl(landingUrl);
+    const existing = findExistingRecreationsForUrl(landingUrl, {
+      visibleRunIds: visibleRunIds(user, "search"),
+    });
     return NextResponse.json({
       adId,
       landingUrl,
@@ -169,9 +200,6 @@ export async function GET(request: Request) {
       lookupJob: getLookupJob(ad.lookupId),
     });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Status check failed" },
-      { status: 500 },
-    );
+    return errorResponse(err);
   }
 }

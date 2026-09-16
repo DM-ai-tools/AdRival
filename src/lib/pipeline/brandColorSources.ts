@@ -1,3 +1,4 @@
+import { meterProviderCall, singleRequestUsage } from "@/lib/accounting/meter";
 import type { BrandColors, BrandDesignSystem } from "../types";
 import {
   collectRankedColors,
@@ -547,12 +548,21 @@ export async function fetchBrandfetchColors(
   if (!key) return null;
   const domain = domainOf(businessUrl);
   try {
-    const res = await fetch(
-      `https://api.brandfetch.io/v2/brands/domain/${encodeURIComponent(domain)}`,
+    const res = await meterProviderCall(
       {
-        headers: { Authorization: `Bearer ${key}` },
-        signal: AbortSignal.timeout(20_000),
+        provider: "brandfetch",
+        endpoint: "/v2/brands/domain",
+        operation: "brandfetch.brand",
+        extractUsage: () => singleRequestUsage(),
       },
+      () =>
+        fetch(
+          `https://api.brandfetch.io/v2/brands/domain/${encodeURIComponent(domain)}`,
+          {
+            headers: { Authorization: `Bearer ${key}` },
+            signal: AbortSignal.timeout(20_000),
+          },
+        ),
     );
     if (!res.ok) return null;
     const data = (await res.json()) as {

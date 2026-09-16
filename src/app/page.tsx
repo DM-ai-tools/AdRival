@@ -15,7 +15,9 @@ import {
 import { UnifiedHistoryPanel } from "@/components/UnifiedHistoryPanel";
 import { KillWorkButton } from "@/components/KillWorkButton";
 import { AuthHeaderActions } from "@/components/AuthHeaderActions";
+import { ClientSpaceBar, SPACE_EVENT, type SpaceSelection } from "@/components/ClientSpaceBar";
 import { PlatformPicker } from "@/components/PlatformPicker";
+import { RunCreditLine, type RunCredits } from "@/components/RunCreditLine";
 import { PLATFORM_META, type AdPlatform } from "@/lib/platforms";
 import type { UnifiedHistoryItem } from "@/lib/historyUnified";
 import type {
@@ -48,11 +50,20 @@ export default function HomePage() {
   const [lookupJob, setLookupJob] = useState<LookupJob | null>(null);
   const [lookupAds, setLookupAds] = useState<LookupAdRecord[]>([]);
 
+  const [searchCredits, setSearchCredits] = useState<RunCredits | null>(null);
+  const [lookupCredits, setLookupCredits] = useState<RunCredits | null>(null);
+  const [historyCredits, setHistoryCredits] = useState<RunCredits | null>(null);
+
   const [historyRuns, setHistoryRuns] = useState<UnifiedHistoryItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyFilter, setHistoryFilter] = useState<
     "all" | "search" | "lookup"
   >("all");
+  const [activeSpace, setActiveSpace] = useState<SpaceSelection>({
+    id: "",
+    clientName: "",
+    role: "",
+  });
   const [selectedHistory, setSelectedHistory] =
     useState<UnifiedHistoryItem | null>(null);
   const [historyJob, setHistoryJob] = useState<SearchJob | null>(null);
@@ -91,6 +102,7 @@ export default function HomePage() {
     const data = await res.json();
     setJob(data.job);
     setCompetitors(data.competitors ?? []);
+    setSearchCredits((data.credits as RunCredits) ?? null);
     // Surface brand-review stage on the Brand review tab
     if (data.job?.progress?.stage === "brand_review") {
       setResultsView("brand");
@@ -105,6 +117,7 @@ export default function HomePage() {
     if (Array.isArray(data.competitors)) {
       setHistoryCompetitors(data.competitors as CompetitorRecord[]);
     }
+    setHistoryCredits((data.credits as RunCredits) ?? null);
   }, []);
 
   const pollLookup = useCallback(async (id: string) => {
@@ -112,6 +125,7 @@ export default function HomePage() {
     if (!res.ok) return;
     const data = await res.json();
     setLookupJob(data.job);
+    setLookupCredits((data.credits as RunCredits) ?? null);
     const incoming = (data.ads ?? []) as LookupAdRecord[];
     setLookupAds((prev) => {
       if (!prev.length) return incoming;
@@ -153,6 +167,19 @@ export default function HomePage() {
     }
   }, []);
 
+  useEffect(() => {
+    const onSpace = (event: Event) => {
+      const detail = (event as CustomEvent<SpaceSelection | string>).detail;
+      if (typeof detail === "string") {
+        setActiveSpace({ id: detail, clientName: "", role: "" });
+        return;
+      }
+      setActiveSpace(detail ?? { id: "", clientName: "", role: "" });
+    };
+    window.addEventListener(SPACE_EVENT, onSpace);
+    return () => window.removeEventListener(SPACE_EVENT, onSpace);
+  }, []);
+
   const loadHistoryItem = useCallback(
     async (run: UnifiedHistoryItem) => {
       setSelectedHistory(run);
@@ -162,6 +189,7 @@ export default function HomePage() {
       setHistoryLookupAds([]);
       setHistoryResultsView("preview");
       setHistoryOffersError(null);
+      setHistoryCredits(null);
       setGeneratingHistoryOffers(false);
       // Immediate scroll so the user sees the report region loading
       scrollToHistoryReport();
@@ -178,6 +206,7 @@ export default function HomePage() {
         setHistoryJob(data.job ?? null);
         setHistoryCompetitors(data.competitors ?? []);
       }
+      setHistoryCredits((data.credits as RunCredits) ?? null);
       // Scroll again after content paints
       setTimeout(() => scrollToHistoryReport(), 80);
     },
@@ -369,6 +398,8 @@ export default function HomePage() {
         </div>
       </header>
 
+      <ClientSpaceBar />
+
       <div className="tab-bar tab-bar-wide mode-bar" role="tablist">
         <button
           type="button"
@@ -422,6 +453,7 @@ export default function HomePage() {
                 setPlatform(p);
                 setJob(null);
                 setCompetitors([]);
+                setSearchCredits(null);
                 setResultsView("preview");
                 setMode("search");
               }}
@@ -443,6 +475,10 @@ export default function HomePage() {
               stopJobId={jobId}
             />
           )}
+
+          {job && !searchRunning ? (
+            <RunCreditLine credits={searchCredits} />
+          ) : null}
 
           <section className="results">
             <div className="results-head">
@@ -567,10 +603,14 @@ export default function HomePage() {
                 setPlatform(p);
                 setLookupJob(null);
                 setLookupAds([]);
+                setLookupCredits(null);
                 setMode("lookup");
               }}
             />
           </section>
+          {lookupJob && !lookupRunning ? (
+            <RunCreditLine credits={lookupCredits} />
+          ) : null}
           {lookupJob && (
             <LookupResults
               job={lookupJob}
@@ -627,6 +667,8 @@ export default function HomePage() {
               deletingId={deletingId}
               filterKind={historyFilter}
               onFilterKind={setHistoryFilter}
+              spaceId={activeSpace.id || null}
+              spaceName={activeSpace.clientName || null}
             />
           </div>
 
@@ -651,6 +693,9 @@ export default function HomePage() {
                 </span>
               )}
             </div>
+            {selectedHistory ? (
+              <RunCreditLine credits={historyCredits} />
+            ) : null}
             {!selectedHistory ? (
               <p className="empty-hint">
                 Select a search or lookup run above to open its report.

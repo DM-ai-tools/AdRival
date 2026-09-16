@@ -19,6 +19,7 @@ import {
   type AdFilterResult,
 } from "../openai/analyzer";
 import { newId } from "./brandReview";
+import { isCreditError } from "../accounting/errors";
 import {
   isSearchJobSuppressed,
   markPageSeen,
@@ -304,7 +305,9 @@ async function countMetaActiveAds(
       if (id) seen.add(id);
     }
     return seen.size;
-  } catch {
+  } catch (err) {
+    // A missing ad count is recoverable; a missing budget or grant is not.
+    if (isCreditError(err)) throw err;
     return 0;
   }
 }
@@ -524,7 +527,8 @@ export async function runCompetitorSearch(
           selectedCategory,
         });
         for (const q of expanded) querySet.add(q);
-      } catch {
+      } catch (err) {
+        if (isCreditError(err)) throw err;
         // keep seed keyword
       }
     }
@@ -579,6 +583,9 @@ export async function runCompetitorSearch(
               trim: false,
             });
           } catch (err) {
+            // A run that has lost its funding or authorization must stop, not
+            // degrade into "no competitors found" on the next query.
+            if (isCreditError(err)) throw err;
             setProgress(job, {
               message: `Search error for "${query}" (${country}): ${(err as Error).message}. Trying next…`,
             });
@@ -746,6 +753,7 @@ export async function runCompetitorSearch(
                 },
               );
             } catch (err) {
+              if (isCreditError(err)) throw err;
               setProgress(job, {
                 message: `LLM error on ${primary.pageName}: ${(err as Error).message}`,
               });
@@ -824,7 +832,8 @@ export async function runCompetitorSearch(
               });
               const counted = await countMetaActiveAds(pageId, country);
               activeCount = Math.max(seenCount, counted);
-            } catch {
+            } catch (err) {
+              if (isCreditError(err)) throw err;
               activeCount = seenCount;
             }
 
@@ -900,7 +909,8 @@ export async function runCompetitorSearch(
               activeCount,
               await countMetaActiveAds(miss.pageId, missCountry),
             );
-          } catch {
+          } catch (err) {
+            if (isCreditError(err)) throw err;
             /* keep prior count */
           }
           if (activeCount < floor) continue;

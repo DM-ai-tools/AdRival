@@ -33,6 +33,9 @@ Required environment variables (set in the Railway service):
 | `OPENROUTER_API_KEY` | Yes* | OpenRouter key for Perplexity Sonar business URL analysis (`*` required for URL analyze) |
 | `OPENROUTER_MODEL` | No | Defaults to `perplexity/sonar` |
 | `PORT` | Auto | Injected by Railway (app binds `0.0.0.0:$PORT`) |
+| `SESSION_SECRET` | Yes (prod) | HMAC secret for session cookies |
+| `ADMIN_BOOTSTRAP_TOKEN` | First admin only | One-time secret for `/setup`. Remove after bootstrap. |
+| `ADMIN_BOOTSTRAP_USERNAME` | First admin only | Username created or promoted as the first admin |
 | `HISTORY_IMPORT_SECRET` | No | Bearer secret for `/api/admin/import-history` (remove after importing) |
 
 ### Import local history into production
@@ -64,6 +67,16 @@ Persist note: job history is stored under `data/store.json` (created at runtime)
 
 Repo: [DM-ai-tools/AdRival](https://github.com/DM-ai-tools/AdRival)
 
+## Multi-user, credits, and admin
+
+See [docs/MULTI_USER.md](docs/MULTI_USER.md) for first-admin bootstrap, public
+signup, credit conversion rules, project sharing, and legacy ownership
+assignment.
+
+```bash
+npm test
+```
+
 ## SociaVault endpoints used
 
 | Purpose | Endpoint |
@@ -71,6 +84,7 @@ Repo: [DM-ai-tools/AdRival](https://github.com/DM-ai-tools/AdRival)
 | Keyword ad search | `GET /v1/scrape/facebook-ad-library/search` |
 | Active ad count | `GET /v1/scrape/facebook-ad-library/company-ads` |
 | Company metadata | `GET /v1/scrape/facebook-ad-library/search-companies` |
+| Account credit balance (admin) | `GET /v1/credits` |
 | Facebook followers | `GET /v1/scrape/facebook/profile` |
 | Instagram followers | `GET /v1/scrape/instagram/profile` |
 | X followers | `GET /v1/scrape/twitter/profile` |
@@ -84,4 +98,8 @@ Auth header: `X-API-Key`. See [SociaVault docs](https://docs.sociavault.com/).
 
 ## Credits note
 
-Most SociaVault calls cost **1 credit** each. Local persist is JSON under `data/store.json` (gitignored).
+SociaVault bills in its own credits (`GET /v1/credits` for remaining balance;
+scrape responses may include `credits_used`). Application credits charged to
+users are a separate, admin-configured conversion — one SociaVault credit is
+not assumed to equal one Claude or GPT credit. Local persist is JSON under
+`data/store.json` (gitignored).

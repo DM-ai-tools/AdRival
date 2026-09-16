@@ -10,6 +10,7 @@ import {
   adRunsOnInstagram,
 } from "../sociavault/client";
 import { pickCompanyPageMatch } from "../openai/analyzer";
+import { isCreditError } from "../accounting/errors";
 import {
   saveLookupAd,
   saveLookupJob,
@@ -235,7 +236,9 @@ export async function runCompetitorLookup(
             cursor,
             trim: false,
           });
-        } catch {
+        } catch (allErr) {
+          // A run without funding or authorization must stop rather than retry.
+          if (isCreditError(allErr)) throw allErr;
           // Some regions fail with ALL — retry ACTIVE
           try {
             response = await getCompanyAds({
@@ -247,6 +250,7 @@ export async function runCompetitorLookup(
               trim: false,
             });
           } catch (err) {
+            if (isCreditError(err)) throw err;
             setProgress(job, {
               message: `Ad fetch error (${country}): ${(err as Error).message}`,
             });

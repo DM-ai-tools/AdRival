@@ -14,6 +14,10 @@ import type {
 } from "@/lib/types";
 import { buildKeywordsForCategory } from "@/lib/pipeline/keywordSuggestions";
 import { resolveIndustrySop } from "@/lib/guardrails/industrySops";
+import { RunBlockedNotice } from "@/components/RunCreditLine";
+import { SPACE_EVENT, readSelectedSpaceId, runnableSpaceId } from "@/components/ClientSpaceBar";
+import { formatCredits } from "@/lib/accounting/units";
+import { useCredits } from "@/lib/credits/useCredits";
 
 type GuardrailChoice = "enforce" | "override" | "skip";
 
@@ -43,6 +47,9 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
   const [guardrailNotes, setGuardrailNotes] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [blockedCode, setBlockedCode] = useState<string | null>(null);
+  const [spaceId, setSpaceId] = useState<string | null>(null);
+  const credits = useCredits();
 
   const geoOptions = useMemo(() => geosForPlatform(platform), [platform]);
   const categories = profile?.categories?.length
@@ -77,6 +84,20 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
         : defaultGeoForPlatform(platform),
     );
   }, [platform]);
+
+  useEffect(() => {
+    const sync = (id?: string | null) => setSpaceId(id || null);
+    const onChange = (event: Event) =>
+      sync(runnableSpaceId((event as CustomEvent<string>).detail));
+    window.addEventListener(SPACE_EVENT, onChange);
+    void fetch("/api/auth/status")
+      .then((res) => res.json())
+      .then((data: { user?: { id?: string } | null }) =>
+        sync(readSelectedSpaceId(data.user?.id ?? null)),
+      )
+      .catch(() => sync(null));
+    return () => window.removeEventListener(SPACE_EVENT, onChange);
+  }, []);
 
   useEffect(() => {
     // Reset override fields when a new URL profile is loaded
@@ -159,6 +180,7 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
+    setBlockedCode(null);
     if (
       guardrailChoice === "override" &&
       !seekCompetitors.trim() &&
@@ -193,11 +215,21 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
           businessProfile: profile,
           skipGuardrails,
           guardrailOverride,
+          spaceId,
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to start search");
+      if (!res.ok) {
+        if (res.status === 402 || res.status === 403) {
+          setBlockedCode(data.code || "insufficient_credits");
+          setError(data.error || "This run was blocked.");
+          void credits.refresh();
+          return;
+        }
+        throw new Error(data.error || "Failed to start search");
+      }
       onStarted(data.jobId, data.keywords ?? [data.keyword], data.platform);
+      void credits.refresh();
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -503,22 +535,36 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
         Auto-filled from the selected category + locations — clear or rewrite
         freely. Your list is what the search uses.
       </p>
+      {credits.data?.credits.unlimited ? (
+        <p className="form-hint run-charge-note">
+          This run is not credit-limited for administrators. Provider usage is
+          still recorded.
+        </p>
+      ) : credits.data ? (
+        <p className="form-hint run-charge-note">
+          This run is charged to your account —{" "}
+          {formatCredits(credits.data.credits.availableSubunits)} credits
+          available.
+        </p>
+      ) : null}
       <div className="search-row">
         <button
           type="submit"
           className="search-btn"
-          disabled={disabled || loading || !keywordsText.trim()}
+          disabled={disabled || loading || !keywordsText.trim() || !spaceId}
         >
           {loading
             ? "Starting…"
             : `Find ${meta.short} competitors${profile ? ` in ${profile.industry}` : ""}`}
         </button>
       </div>
-      {error && (
+      {blockedCode ? (
+        <RunBlockedNotice message={error || ""} code={blockedCode} />
+      ) : error ? (
         <p className="error-text" role="alert">
           {error}
         </p>
-      )}
+      ) : null}
     </form>
   );
 }

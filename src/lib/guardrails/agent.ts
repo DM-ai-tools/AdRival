@@ -1,4 +1,5 @@
-import OpenAI from "openai";
+import { isCreditError } from "../accounting/errors";
+import { getDirectOpenAIClient } from "../openrouter/openaiCompat";
 import type { BusinessProfile, LookupCoreOfferLadder } from "../types";
 import {
   INDUSTRY_SOPS,
@@ -315,7 +316,7 @@ export async function guardCompetitorLlm(
   if (!key) return null;
   const sop = getSopForContext(ctx);
   try {
-    const client = new OpenAI({ apiKey: key });
+    const client = getDirectOpenAIClient();
     const completion = await client.chat.completions.create({
       model: process.env.OFFERS_OPENAI_MODEL?.trim() || "gpt-4o-mini",
       temperature: 0,
@@ -355,7 +356,8 @@ Return JSON: { "ok": boolean, "reason": string }`,
       source: "llm",
       sopId: sop.id,
     };
-  } catch {
+  } catch (err) {
+    if (isCreditError(err)) throw err;
     return null;
   }
 }

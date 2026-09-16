@@ -2,11 +2,15 @@
 
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
+import { CreditSummaryPanel } from "@/components/CreditSummaryPanel";
+import { useCredits } from "@/lib/credits/useCredits";
 import type { AppUserPublic } from "@/lib/types";
 
 export default function AccountSettings() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const credits = useCredits();
   const [user, setUser] = useState<AppUserPublic | null>(null);
   const [displayName, setDisplayName] = useState("");
   const [profileLoading, setProfileLoading] = useState(false);
@@ -78,12 +82,22 @@ export default function AccountSettings() {
       setNewPassword("");
       setConfirmPassword("");
       setPasswordSuccess("Password updated.");
+      // The server bumped the session epoch and issued a fresh cookie; reload so
+      // every client cache reflects the new session.
+      if (mustChangePassword) {
+        window.location.replace("/");
+        return;
+      }
     } catch (err) {
       setPasswordError((err as Error).message);
     } finally {
       setPasswordLoading(false);
     }
   }
+
+  const mustChangePassword =
+    searchParams.get("mustChangePassword") === "1" ||
+    Boolean(user?.mustChangePassword);
 
   if (!user) {
     return (
@@ -106,12 +120,39 @@ export default function AccountSettings() {
           <h1>Account settings</h1>
           <p className="lede">
             Signed in as <strong>@{user.username}</strong>
+            {user.role === "admin" ? " · Administrator" : ""}
           </p>
         </div>
-        <Link href="/" className="ghost-btn">
-          Back to app
-        </Link>
+        <div className="header-link-row">
+          <Link href="/credits" className="ghost-btn">
+            Credits &amp; usage
+          </Link>
+          {user.role === "admin" ? (
+            <Link href="/admin" className="ghost-btn">
+              Admin
+            </Link>
+          ) : null}
+          <Link href="/" className="ghost-btn">
+            Back to app
+          </Link>
+        </div>
       </header>
+
+      {mustChangePassword ? (
+        <section className="panel glow-panel credits-panel">
+          <p className="credits-warning" role="alert">
+            Your password was reset by an administrator. Choose a new password
+            below before continuing.
+          </p>
+        </section>
+      ) : null}
+
+      <CreditSummaryPanel
+        data={credits.data}
+        loading={credits.loading}
+        error={credits.error}
+        compact
+      />
 
       <div className="account-grid">
         <section className="panel glow-panel account-panel">

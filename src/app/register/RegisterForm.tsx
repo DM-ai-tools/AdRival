@@ -1,17 +1,25 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useState } from "react";
-import { useRouter } from "next/navigation";
+import { FormEvent, useEffect, useState } from "react";
 
 export default function RegisterForm() {
-  const router = useRouter();
   const [displayName, setDisplayName] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [signupEnabled, setSignupEnabled] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    void fetch("/api/auth/status", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((data: { publicSignupEnabled?: boolean }) =>
+        setSignupEnabled(Boolean(data.publicSignupEnabled)),
+      )
+      .catch(() => setSignupEnabled(false));
+  }, []);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -32,11 +40,10 @@ export default function RegisterForm() {
       if (!res.ok) {
         throw new Error(data.error || "Registration failed");
       }
-      router.replace("/");
-      router.refresh();
+      // Hard navigation so no state from a previous account survives.
+      window.location.replace("/");
     } catch (err) {
       setError((err as Error).message);
-    } finally {
       setLoading(false);
     }
   }
@@ -54,6 +61,13 @@ export default function RegisterForm() {
             stored securely in the app database.
           </p>
         </header>
+
+        {signupEnabled === false ? (
+          <p className="credits-warning" role="alert">
+            Public signup is currently disabled. Ask your administrator to
+            create an account for you.
+          </p>
+        ) : null}
 
         <form
           className="search-form login-form"
@@ -132,6 +146,7 @@ export default function RegisterForm() {
               className="search-btn login-submit"
               disabled={
                 loading ||
+                signupEnabled === false ||
                 !displayName.trim() ||
                 !username.trim() ||
                 !password ||

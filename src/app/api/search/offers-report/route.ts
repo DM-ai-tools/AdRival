@@ -1,6 +1,9 @@
 import { after } from "next/server";
 import { NextResponse } from "next/server";
 import { getCompetitorsByRun, getJob, saveJob } from "@/lib/db";
+import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
+import { precheckRun, runBillable } from "@/lib/accounting/run";
+import { isCreditError } from "@/lib/accounting/errors";
 import { runSearchOffersReportPhase } from "@/lib/pipeline/searchOffersReport";
 
 export const runtime = "nodejs";
@@ -16,11 +19,28 @@ export const maxDuration = 300;
  */
 export async function POST(request: Request) {
   try {
+    const user = await requireUser();
     const body = await request.json();
     const jobId = String(body.jobId ?? "").trim();
     if (!jobId) {
       return NextResponse.json({ error: "jobId is required" }, { status: 400 });
     }
+
+    // Viewers of a shared project cannot start paid analysis.
+    resolveProjectAccess("search", jobId, user, "run");
+
+    const precheck = precheckRun(user);
+    if (!precheck.ok) {
+      return NextResponse.json(
+        {
+          error: precheck.message,
+          code: precheck.reason,
+          availableSubunits: precheck.availableSubunits,
+        },
+        { status: precheck.reason === "suspended" ? 403 : 402 },
+      );
+    }
+
     const job = getJob(jobId);
     if (!job) {
       return NextResponse.json({ error: "Search job not found" }, { status: 404 });
@@ -80,11 +100,23 @@ export async function POST(request: Request) {
     saveJob(job);
 
     after(() => {
-      void runSearchOffersReportPhase(jobId, {
-        force,
-        refetchAds,
-        competitorIds: job.offersCompetitorIds || undefined,
-      }).catch((err) => {
+      // The run is charged to whoever pressed the button, even inside a project
+      // shared by another user.
+      void runBillable(
+        {
+          user,
+          operation: "search.offers_report",
+          projectKind: "search",
+          projectId: jobId,
+          runId: jobId,
+        },
+        () =>
+          runSearchOffersReportPhase(jobId, {
+            force,
+            refetchAds,
+            competitorIds: job.offersCompetitorIds || undefined,
+          }),
+      ).catch((err) => {
         const current = getJob(jobId);
         if (!current) return;
         current.progress = {
@@ -124,11 +156,15 @@ export async function POST(request: Request) {
       job: getJob(jobId),
       competitors,
       started: true,
+      chargedTo: user.username,
     });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Offers report failed" },
-      { status: 500 },
-    );
+    if (isCreditError(err)) {
+      return NextResponse.json(
+        { error: (err as Error).message, code: (err as { code?: string }).code },
+        { status: 402 },
+      );
+    }
+    return errorResponse(err);
   }
 }

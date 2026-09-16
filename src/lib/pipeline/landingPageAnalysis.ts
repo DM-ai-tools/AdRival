@@ -1,5 +1,5 @@
 import * as cheerio from "cheerio";
-import OpenAI from "openai";
+
 import { z } from "zod";
 import type {
   CompetitorRecord,
@@ -20,7 +20,10 @@ import {
   hasOpenRouterKey,
   OPENROUTER_PERPLEXITY_MODEL,
 } from "../openrouter/client";
-import { OPENROUTER_OPENAI_MODEL } from "../openrouter/openaiCompat";
+import {
+  getDirectOpenAIClient,
+  OPENROUTER_OPENAI_MODEL,
+} from "../openrouter/openaiCompat";
 import {
   getAnthropicClient,
   getAnthropicModel,
@@ -511,7 +514,7 @@ async function analyzeWithLlm(input: {
   // Offers / page offer extraction: prefer direct OpenAI API
   if (process.env.OPENAI_API_KEY) {
     try {
-      const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+      const client = getDirectOpenAIClient();
       const completion = await client.chat.completions.create({
         model: process.env.OFFERS_OPENAI_MODEL?.trim() || "gpt-4o",
         temperature: 0.15,
