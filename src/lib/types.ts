@@ -951,6 +951,10 @@ export interface RecreatedLandingPage {
   /** Publish readiness from last design fit */
   publishReady?: boolean | null;
   publishBlockers?: string[] | null;
+  /** Canonical evidence-backed content. Design builds load approvedSnapshot only. */
+  contentPack?: import("./pipeline/content/model").ContentPack | null;
+  /** Approved revision used by the current HTML, if a design exists. */
+  designContentRevision?: number | null;
   /** Live progress while content/design is running (polled by UI) */
   progress?: {
     phase: string;

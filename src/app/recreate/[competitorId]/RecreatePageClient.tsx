@@ -12,6 +12,7 @@ import type {
 import { stripDraftBanner } from "@/lib/pipeline/stripDraftBanner";
 import { synthesizeDocumentFromBlocks } from "@/lib/pipeline/synthesizeDocumentFromBlocks";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { ContentReviewWorkspace } from "./ContentReviewWorkspace";
 
 export function RecreatePageClient({ competitorId }: { competitorId: string }) {
   const [competitor, setCompetitor] = useState<CompetitorRecord | null>(null);
@@ -38,6 +39,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
   const [imageFeedback, setImageFeedback] = useState<Record<string, string>>(
     {},
   );
+  const [canEdit, setCanEdit] = useState(true);
   const [confirmRedesignOpen, setConfirmRedesignOpen] = useState(false);
 
   const syncFromPage = useCallback((nextPage: RecreatedLandingPage | null) => {
@@ -57,6 +59,9 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
       setContentFeedback(nextPage.contentDraft.userFeedback);
     }
     if (nextPage?.userFeedback) setDesignFeedback(nextPage.userFeedback);
+    if (nextPage?.error?.startsWith("SOURCE_INCOMPLETE")) {
+      setError(`${nextPage.error.replace(/^SOURCE_INCOMPLETE:\s*/, "")} Retry capture from Recreate content. A replacement draft was not generated.`);
+    }
     if (nextPage?.status === "completed" && nextPage.html) {
       setView("design");
     } else if (
@@ -74,6 +79,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Failed to load");
     setCompetitor(data.competitor as CompetitorRecord);
+    setCanEdit(data.access?.canEdit !== false);
     syncFromPage((data.recreatedPage as RecreatedLandingPage | null) ?? null);
     return data as {
       competitor: CompetitorRecord;
@@ -477,9 +483,10 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
       page?.contentDraft?.status === "approved");
   const showContentReview =
     view === "content" &&
-    blocks.length > 0 &&
+    (Boolean(page?.contentPack) || blocks.length > 0) &&
     (page?.status === "content_ready" ||
       page?.status === "completed" ||
+      page?.status === "failed" ||
       page?.contentDraft?.status === "ready" ||
       page?.contentDraft?.status === "approved");
 
@@ -806,7 +813,19 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
         </div>
       )}
 
-      {showContentReview && (
+      {showContentReview && page?.contentPack && !page.contentPack.legacy && (
+        <ContentReviewWorkspace
+          competitorId={competitorId}
+          page={page}
+          canEdit={canEdit}
+          onUpdated={(next) => {
+            setCompetitor(next);
+            syncFromPage(next.recreatedPage || null);
+          }}
+        />
+      )}
+
+      {showContentReview && !page?.contentPack ? (
         <section className="recreate-content-review">
           <div className="recreate-content-toolbar panel">
             <div>
@@ -999,14 +1018,14 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
             </p>
           )}
         </section>
-      )}
+      ) : null}
 
       {view === "design" && srcDoc && (
         <div className="recreate-frame-wrap">
           <iframe
             title="Recreated landing page preview"
             className="recreate-frame"
-            sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-forms"
+            sandbox="allow-scripts allow-popups allow-forms"
             srcDoc={srcDoc}
           />
         </div>

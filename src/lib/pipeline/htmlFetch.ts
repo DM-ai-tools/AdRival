@@ -1,3 +1,4 @@
+import { assertPublicHttpUrl } from "./content/safeUrl";
 import {
   firecrawlScrapeHtml,
   hasFirecrawlKey,
@@ -147,12 +148,20 @@ function markdownToBasicHtml(markdown: string, title?: string | null): string {
   return `<!doctype html><html><head><meta charset="utf-8"/><title>${safeTitle}</title></head><body>${withBreaks}</body></html>`;
 }
 
-async function tryFetch(url: string): Promise<Response> {
-  return fetch(url, {
-    redirect: "follow",
+async function tryFetch(url: string, hops = 0): Promise<Response> {
+  await assertPublicHttpUrl(url);
+  const res = await fetch(url, {
+    redirect: "manual",
     headers: BROWSER_HEADERS,
     signal: AbortSignal.timeout(30000),
   });
+  if (res.status >= 300 && res.status < 400) {
+    if (hops >= 4) throw new Error("Too many redirects while fetching the page.");
+    const location = res.headers.get("location");
+    if (!location) throw new Error("Redirect had no location.");
+    return tryFetch(new URL(location, url).toString(), hops + 1);
+  }
+  return res;
 }
 
 async function fetchViaFirecrawl(url: string): Promise<{
@@ -213,6 +222,7 @@ async function fetchViaPlaywright(url: string): Promise<{
     });
     const page = await context.newPage();
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
+    await assertPublicHttpUrl(page.url() || url);
     try {
       await page.waitForLoadState("networkidle", { timeout: 15_000 });
     } catch {
@@ -251,6 +261,7 @@ export async function fetchRawLandingHtml(url: string): Promise<{
   if (candidates.length === 0) {
     throw new Error(`Could not normalize landing URL: ${url}`);
   }
+  await assertPublicHttpUrl(candidates[0]);
 
   let lastError: Error | null = null;
   let blockedByProtection = false;

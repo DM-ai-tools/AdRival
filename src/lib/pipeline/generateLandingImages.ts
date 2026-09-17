@@ -468,14 +468,14 @@ function fallbackPrompt(
     slot.kind === "hero"
       ? `wide welcoming ${industry} interior or exterior hero photograph`
       : slot.kind === "team"
-        ? `friendly professional team portrait in a modern ${industry} setting`
+        ? `conceptual illustration of the service, with no faces presented as real employees or customers`
         : slot.kind === "product"
           ? `clean close-up of ${industry} treatment or service in use`
           : `lifestyle photograph supporting ${input.keyword} for a modern ${industry} brand`;
   const logoBit = input.hasLogoReference
     ? ` If any wall signage or logo appears, use the exact @brandlogo mark for ${input.brandName}.`
     : ` Do not invent logos or wordmarks.`;
-  return `Photorealistic ${scene} for ${input.brandName}. Soft natural light, premium marketing photography, brand accents near ${input.brandColors.primary} and ${input.brandColors.accent}, uncluttered composition, no watermarks.${logoBit} Context: ${slot.sectionContext || slot.alt || slot.kind}.`;
+  return `Photorealistic ${scene} for ${input.brandName}. Soft natural light, premium marketing photography, brand accents near ${input.brandColors.primary} and ${input.brandColors.accent}, uncluttered composition, no watermarks, no readable headline text, no competitor branding, no fake awards or review screenshots.${logoBit} Context: ${slot.sectionContext || slot.alt || slot.kind}.`;
 }
 
 async function mapPool<T, R>(

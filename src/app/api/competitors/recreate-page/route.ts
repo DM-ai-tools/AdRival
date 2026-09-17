@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { getCompetitor } from "@/lib/db";
+import { getCompetitor, updateCompetitor } from "@/lib/db";
+import { repairPackEvidence } from "@/lib/pipeline/content/evidenceIds";
 import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
 import { runBillable } from "@/lib/accounting/run";
 import { isCreditError } from "@/lib/accounting/errors";
@@ -8,12 +9,23 @@ import type {
   LandingContentDocument,
 } from "@/lib/types";
 import {
+  acceptContentProposal,
+  approveRecreationContent,
   buildRecreationDesign,
+  confirmContentClaim,
+  discardContentProposal,
   generateRecreationContent,
   refreshBrandColorsForRecreation,
+  regenerateContentSection,
   regenerateGeneratedImageForRecreation,
   saveRecreationContentEdits,
+  undoContentRevision,
+  updateRecreationIntent,
 } from "@/lib/pipeline/recreateLandingPage";
+import { recreationActionPermission } from "@/lib/pipeline/content/permissions";
+import { draftIsCurrent } from "@/lib/pipeline/content/pageIntent";
+import type { CanonicalContent } from "@/lib/pipeline/content/model";
+import { ContentRevisionError } from "@/lib/pipeline/content/revisions";
 import { sanitizeClientFacingText } from "@/lib/clientFacing";
 
 export const runtime = "nodejs";
@@ -51,7 +63,7 @@ export async function POST(request: Request) {
       "search",
       existing.runId,
       user,
-      action === "save_content" ? "edit" : "run",
+      recreationActionPermission(action),
     );
 
     // Every remaining branch reaches an LLM, Firecrawl, Brandfetch or Runway.
@@ -79,25 +91,22 @@ export async function POST(request: Request) {
       action === "generate_content" &&
       !body.force &&
       !userFeedback &&
-      existing.recreatedPage?.status === "completed" &&
-      existing.recreatedPage.html &&
-      existing.recreatedPage.contentDraft?.status === "approved"
-    ) {
-      return NextResponse.json({ competitor: existing, cached: true });
-    }
-
-    if (
-      action === "generate_content" &&
-      !body.force &&
-      !userFeedback &&
-      existing.recreatedPage?.status === "content_ready" &&
-      existing.recreatedPage.contentDraft?.blocks?.length
+      existing.recreatedPage?.contentPack &&
+      !existing.recreatedPage.contentPack.legacy &&
+      existing.recreatedPage.contentPack.canonical.sections.length > 0 &&
+      draftIsCurrent(existing.recreatedPage.contentPack)
     ) {
       return NextResponse.json({ competitor: existing, cached: true });
     }
 
     if (action === "save_content") {
-      if (!blocks?.length && !document?.sections?.length) {
+      const canonical =
+        body.canonical && typeof body.canonical === "object"
+          ? (body.canonical as CanonicalContent)
+          : null;
+      const expectedRevision =
+        typeof body.expectedRevision === "number" ? body.expectedRevision : null;
+      if (!canonical && !blocks?.length && !document?.sections?.length) {
         return NextResponse.json(
           { error: "document or blocks are required to save content edits" },
           { status: 400 },
@@ -107,6 +116,68 @@ export async function POST(request: Request) {
         competitorId,
         blocks || existing.recreatedPage?.contentDraft?.blocks || [],
         document,
+        canonical,
+        expectedRevision,
+      );
+      return NextResponse.json({ competitor, cached: false });
+    }
+
+    if (action === "update_intent") {
+      const confirmed = Array.isArray(body.confirmedTerms)
+        ? body.confirmedTerms.map((item: unknown) => String(item)).filter(Boolean)
+        : undefined;
+      const competitor = updateRecreationIntent(
+        competitorId,
+        {
+          primaryService: typeof body.primaryService === "string" ? body.primaryService : undefined,
+          offerConcept: typeof body.offerConcept === "string" ? body.offerConcept : undefined,
+          confirmedTerms: confirmed,
+        },
+        Number(body.expectedRevision),
+      );
+      return NextResponse.json({ competitor, cached: false });
+    }
+
+    if (action === "approve_content") {
+      const expectedRevision = Number(body.expectedRevision);
+      if (!Number.isFinite(expectedRevision)) {
+        return NextResponse.json({ error: "expectedRevision is required" }, { status: 400 });
+      }
+      const competitor = approveRecreationContent(competitorId, expectedRevision);
+      return NextResponse.json({ competitor, cached: false });
+    }
+
+    if (action === "accept_proposal") {
+      return NextResponse.json({ competitor: acceptContentProposal(competitorId), cached: false });
+    }
+    if (action === "discard_proposal") {
+      return NextResponse.json({ competitor: discardContentProposal(competitorId), cached: false });
+    }
+    if (action === "undo_content") {
+      const expectedRevision = Number(body.expectedRevision);
+      return NextResponse.json({
+        competitor: undoContentRevision(competitorId, expectedRevision),
+        cached: false,
+      });
+    }
+    if (action === "confirm_fact") {
+      const competitor = confirmContentClaim(
+        competitorId,
+        String(body.sectionId || ""),
+        String(body.value || ""),
+        user.username,
+      );
+      return NextResponse.json({ competitor, cached: false });
+    }
+
+    if (action === "regenerate_section") {
+      const competitor = await billed("recreate.generate_content", () =>
+        regenerateContentSection(
+          competitorId,
+          String(body.sectionId || ""),
+          userFeedback,
+          Number(body.expectedRevision),
+        ),
       );
       return NextResponse.json({ competitor, cached: false });
     }
@@ -147,8 +218,6 @@ export async function POST(request: Request) {
     ) {
       const competitor = await billed("recreate.build_design", () =>
         buildRecreationDesign(competitorId, {
-          blocks,
-          document,
           userFeedback: userFeedback || undefined,
         }),
       );
@@ -172,6 +241,9 @@ export async function POST(request: Request) {
         { error: (err as Error).message, code: (err as { code?: string }).code },
         { status: 402 },
       );
+    }
+    if (err instanceof ContentRevisionError) {
+      return NextResponse.json({ error: err.message, code: err.code }, { status: 409 });
     }
     if (err instanceof Error && err.name === "HttpError") {
       return errorResponse(err);
@@ -199,18 +271,33 @@ export async function GET(request: Request) {
         { status: 400 },
       );
     }
-    const competitor = getCompetitor(competitorId);
+    let competitor = getCompetitor(competitorId);
     if (!competitor) {
       return NextResponse.json(
         { error: "Competitor not found" },
         { status: 404 },
       );
     }
-    resolveProjectAccess("search", competitor.runId, user, "view");
+    const access = resolveProjectAccess("search", competitor.runId, user, "view");
+    const pack = competitor.recreatedPage?.contentPack;
+    if (pack) {
+      const repaired = repairPackEvidence(pack);
+      if (repaired && access.role !== "viewer") {
+        competitor = updateCompetitor(competitorId, {
+          recreatedPage: { ...competitor.recreatedPage!, contentPack: repaired },
+        }) || competitor;
+      } else if (repaired) {
+        competitor = {
+          ...competitor,
+          recreatedPage: { ...competitor.recreatedPage!, contentPack: repaired },
+        };
+      }
+    }
     return NextResponse.json({
       competitor,
       recreatedPage: competitor.recreatedPage ?? null,
       pageAnalysis: competitor.pageAnalysis ?? null,
+      access: { role: access.role, canEdit: access.role !== "viewer" },
     });
   } catch (err) {
     return errorResponse(err);

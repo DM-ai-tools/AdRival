@@ -212,26 +212,25 @@ export async function recreateFromArchive(input: {
   let brand = brandTokensFromDesignSpec(designSpec, brandRaw);
 
   // Ensure footer/nav inventory comes from the brand website (Firecrawl), not competitor
-  try {
-    const linkPack = await extractBrandLinksWithFirecrawl(input.businessUrl);
-    brand.siteAssets = mergeFirecrawlIntoBrandAssets(
-      brand.siteAssets,
-      linkPack,
-      input.businessUrl,
-    );
-    if (linkPack.socialLinks.length) {
-      brand.socialLinks = linkPack.socialLinks;
+  const alreadyHaveLinks = Boolean(brand.siteAssets?.navLinks?.length || brand.siteAssets?.footerLinks?.length);
+  if (!alreadyHaveLinks) {
+    try {
+      const linkPack = await extractBrandLinksWithFirecrawl(input.businessUrl);
+      brand.siteAssets = mergeFirecrawlIntoBrandAssets(
+        brand.siteAssets,
+        linkPack,
+        input.businessUrl,
+      );
+      if (linkPack.socialLinks.length) {
+        brand.socialLinks = linkPack.socialLinks;
+      }
+    } catch (err) {
+      console.warn("[archive] brand link refresh failed", err);
     }
-  } catch (err) {
-    console.warn("[archive] brand link refresh failed", err);
   }
 
   if (!brand.logoUrl && !brand.siteAssets?.logoUrl) {
-    const cdn = await firstReachableImage(logoCdnFallbacks(input.businessUrl));
-    if (cdn) {
-      brand.logoUrl = cdn;
-      if (brand.siteAssets) brand.siteAssets.logoUrl = cdn;
-    }
+    brand.warnings = [...(brand.warnings || []), "No first-party client logo was found. A favicon was not used as the header logo."];
   }
 
   const approvedEarly =

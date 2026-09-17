@@ -1,4 +1,4 @@
-import { chromium, type Browser, type Page } from "playwright";
+import type { Browser, Page } from "playwright";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
@@ -284,10 +284,8 @@ export async function captureArchivedPage(
   let browser: Browser | null = null;
   try {
     try {
-      browser = await chromium.launch({
-        headless: true,
-        args: ["--disable-blink-features=AutomationControlled"],
-      });
+      const { launchChromium } = await import("../content/playwrightRuntime");
+      browser = await launchChromium();
     } catch (launchErr) {
       const msg = launchErr instanceof Error ? launchErr.message : String(launchErr);
       if (/Executable doesn't exist|browserType\.launch/i.test(msg)) {
