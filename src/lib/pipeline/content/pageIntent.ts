@@ -1,4 +1,4 @@
-import { looksLikeSlogan } from "./evidenceIds";
+import { looksLikeSlogan } from "./slogan";
 import type { ClientEvidenceRecord, CompetitorReference, CompetitorSectionRef } from "./model";
 
 export const PROMPT_VERSION = 3;

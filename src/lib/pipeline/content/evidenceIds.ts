@@ -1,13 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ContentPack, EvidenceFact, ValidationIssue } from "./model";
-
-export function looksLikeSlogan(value: string): boolean {
-  const text = value.trim();
-  if (/^(your|get|grow|boost|supercharge|unlock|transform|scale)\b/i.test(text)) return true;
-  if (/\byour (growth|business|brand|results|leads)\b/i.test(text)) return true;
-  if (/[!]$/.test(text) && text.split(/\s+/).length <= 8) return true;
-  return false;
-}
+export { looksLikeSlogan } from "./slogan";
 
 /** Server-owned id for one fact inside one workspace evidence collection. */
 export function persistentEvidenceId(input: {
