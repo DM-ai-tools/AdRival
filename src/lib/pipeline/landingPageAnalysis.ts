@@ -35,6 +35,10 @@ import {
   collectSameLandingPageAds,
   collectSameLandingPageAdsFromLookup,
 } from "./sameLandingPageAds";
+import {
+  captureCompetitorScreenshotTiles,
+  type CompetitorScreenshotTile,
+} from "./competitorScreenshots";
 
 const MAX_TEXT_CHARS = 22_000;
 
@@ -147,6 +151,60 @@ function looksLikeNavJunk(text: string): boolean {
   );
 }
 
+/** Brand + product + tagline mashed into one run-on title (common in <title>/OG). */
+export function looksLikeMashedHeadline(text: string): boolean {
+  const t = normalizeText(text);
+  if (!t) return false;
+  const parts = t.split(/\s*[|·•\/—–]\s*/).map((p) => p.trim()).filter(Boolean);
+  if (parts.length >= 3) return true;
+  const words = t.split(/\s+/);
+  if (words.length < 8) return false;
+  if (/[.?!]/.test(t) && words.length <= 18) return false;
+  const titleCase = words.filter((w) =>
+    /^[A-Z][a-z0-9'’]*$/.test(w) || /^[A-Z]{2,}$/.test(w) || /^[A-Z][a-z]+[A-Z]/.test(w),
+  ).length;
+  // "Billy Polsons Campaign Brain Actual Intelligence X AI Turbocharged"
+  if (titleCase >= 6 && words.length >= 8 && !/[,:;]/.test(t)) return true;
+  if (words.length > 16 && !/[.?!]/.test(t)) return true;
+  return false;
+}
+
+/** Prefer a single clear phrase when titles use | / · separators. */
+export function demashHeadline(text: string): string {
+  const t = normalizeText(text);
+  const parts = t
+    .split(/\s*[|·•\/—–]\s*/)
+    .map((p) => p.trim())
+    .filter((p) => p.length >= 8 && !looksLikeNavJunk(p));
+  if (parts.length < 2) return t;
+  const scored = parts.map((p) => {
+    let score = Math.min(p.length, 72) / 12;
+    if (/\b(your|hate|stop|get|free|how|why|save|grow|book|ads|agency)\b/i.test(p)) {
+      score += 8;
+    }
+    if (looksLikeMashedHeadline(p)) score -= 6;
+    if (/^[A-Z][a-z]+(\s+[A-Z][a-z]+){0,2}$/.test(p) && p.split(/\s+/).length <= 3) {
+      score -= 2; // brand-only fragment
+    }
+    return { p, score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0]?.p || t;
+}
+
+function scoreHeroCandidate(text: string): number {
+  const t = normalizeText(text);
+  if (!t) return -100;
+  let score = 10;
+  if (looksLikeMashedHeadline(t)) score -= 25;
+  const words = t.split(/\s+/).length;
+  if (words >= 4 && words <= 16) score += 8;
+  if (words > 18) score -= 10;
+  if (/\b(your|hate|stop|get|free|how|why|agency|ads|save|grow)\b/i.test(t)) score += 6;
+  if (/campaign brain|actual intelligence|turbocharged/i.test(t) && words >= 8) score -= 8;
+  return score;
+}
+
 /**
  * Build a structured outline from HTML so the LLM sees real H1/H2 order
  * instead of a noisy flattened text blob.
@@ -218,22 +276,49 @@ export function extractPageOutline(html: string, fallbackTitle: string | null): 
     normalizeText($("title").first().text()) || fallbackTitle || null;
 
   const heroCandidates: string[] = [];
-  const pushHero = (raw: string) => {
-    const t = normalizeText(raw);
+  const pushHero = (raw: string, opts?: { allowMashed?: boolean }) => {
+    let t = normalizeText(raw);
     if (!t || t.length < 8 || t.length > 180) return;
     if (looksLikeNavJunk(t)) return;
+    if (looksLikeMashedHeadline(t)) {
+      const demashed = demashHeadline(t);
+      if (demashed !== t && demashed.length >= 8) {
+        t = demashed;
+      } else if (!opts?.allowMashed) {
+        return;
+      }
+    }
     if (heroCandidates.some((h) => h.toLowerCase() === t.toLowerCase())) return;
     heroCandidates.push(t);
   };
 
   $("h1").each((_, el) => pushHero($(el).text()));
   $(
-    "[class*='hero'] h2, [class*='Hero'] h2, [class*='banner'] h2, [class*='jumbotron'] h2, header h2, [class*='hero'] [class*='title'], [class*='Hero'] [class*='title']",
-  ).each((_, el) => pushHero($(el).text()));
-  if (ogTitle) pushHero(ogTitle);
-  if (title && title.length >= 8 && title.length <= 120) pushHero(title);
+    "[class*='hero'] h2, [class*='Hero'] h2, [class*='banner'] h2, [class*='jumbotron'] h2, header h2, [class*='hero'] [class*='title'], [class*='Hero'] [class*='title'], [class*='headline'], [data-testid*='headline'], [class*='Hero'] p, [class*='hero'] p",
+  ).each((_, el) => {
+    const t = normalizeText($(el).text());
+    // Only treat short hero paragraphs as headline candidates
+    if (t.split(/\s+/).length <= 18) pushHero(t);
+  });
+  // Meta titles last — often mashed brand strings; demash or skip
+  if (ogTitle) pushHero(ogTitle, { allowMashed: true });
+  if (title && title.length >= 8 && title.length <= 140) {
+    pushHero(title, { allowMashed: true });
+  }
+  heroCandidates.sort((a, b) => scoreHeroCandidate(b) - scoreHeroCandidate(a));
 
   const headingOutline: PageOutline["headingOutline"] = [];
+  const pushHeading = (level: number, textRaw: string, snippetRaw = "") => {
+    const text = normalizeText(textRaw);
+    if (!text || text.length < 3 || looksLikeNavJunk(text)) return;
+    if (headingOutline.some((h) => h.text.toLowerCase() === text.toLowerCase())) return;
+    headingOutline.push({
+      level,
+      text,
+      snippet: normalizeText(snippetRaw).slice(0, 360),
+    });
+  };
+
   $("h1, h2, h3").each((_, el) => {
     const $el = $(el);
     if ($el.closest("nav, footer, [role='navigation'], [role='contentinfo']").length) {
@@ -264,11 +349,20 @@ export function extractPageOutline(html: string, fallbackTitle: string | null): 
       guard += 1;
     }
 
-    headingOutline.push({
-      level,
-      text,
-      snippet: bits.slice(0, 2).join(" ").slice(0, 360),
-    });
+    pushHeading(level, text, bits.slice(0, 2).join(" "));
+  });
+
+  // Landmark / section blocks without semantic headings (Webflow / funnels)
+  $("main section, [role='main'] section, section[class], [class*='section']").each((_, el) => {
+    if (headingOutline.length >= 24) return false;
+    const $el = $(el);
+    if ($el.closest("nav, footer").length) return;
+    const heading = normalizeText(
+      $el.find("h1, h2, h3, [class*='heading'], [class*='title']").first().text(),
+    );
+    if (!heading || heading.length < 4) return;
+    const snippet = normalizeText($el.find("p, li").first().text());
+    pushHeading(2, heading, snippet);
   });
 
   const ctas: string[] = [];
@@ -319,6 +413,16 @@ export function extractPageOutline(html: string, fallbackTitle: string | null): 
       .replace(/&amp;/gi, "&")
       .replace(/\s+/g, " ")
       .trim();
+  }
+
+  // Recover outline from marked plain text when DOM headings were sparse
+  if (headingOutline.length < 4) {
+    const markerRe = /\[(H[1-3])\]\s*([^\n]+)/gi;
+    let match: RegExpExecArray | null;
+    while ((match = markerRe.exec(plain)) && headingOutline.length < 30) {
+      const level = Number(match[1].replace(/\D/g, "")) || 2;
+      pushHeading(level, match[2]);
+    }
   }
 
   const metaBlock = [
@@ -404,78 +508,158 @@ Extract:
 3) Audience, trust signals, conversion elements, tech/UX notes
 
 Hard rules for accuracy:
-- offer.headline MUST be the main hero promise — prefer the first clear H1 / heroCandidate. Copy it closely (fix typos only). NEVER concatenate brand name + product name + tagline into one run-on string. One sentence or short phrase only.
+- offer.headline MUST be the main on-page hero promise — prefer the first clear H1 / best heroCandidate. Copy it closely (fix typos only). NEVER concatenate brand name + product name + tagline into one run-on string. NEVER use the adHeadline as offer.headline when page hero candidates exist. One sentence or short phrase only (ideally ≤16 words).
+- adHeadline/adBody are ad creatives for context only — they are NOT the landing-page headline unless the page truly has no hero text.
 - offer.primaryOffer = what the visitor gets (product/service), not the headline restated awkwardly.
 - offer.cta = the primary button label from ctas[] when possible.
-- pageArchitecture.sections MUST cover the full page top-to-bottom using headingOutline as the map. Include typically: Hero, Problem/Agitation (if present), Solution/Features, Social proof, Offer/Pricing, How it works, FAQ, Final CTA, Footer (if meaningful). Aim for 5–12 sections when the page has that much content. Do NOT stop after Hero.
+- pageArchitecture.sections MUST cover the full page top-to-bottom using headingOutline as the map. Include typically: Hero, Problem/Agitation (if present), Solution/Features, Social proof, Offer/Pricing, How it works, FAQ, Final CTA, Footer (if meaningful). Aim for 5–12 sections when the page has that much content. Do NOT stop after Hero. If headingOutline is short, still infer distinct blocks from pageText (problem, benefits, proof, CTA).
 - Each section name should be human (e.g. "Hero", "Features", "Testimonials") — not raw H1 text dumped as the only section.
 - Be evidence-based. If pricing/CTA is unclear, use null. Do not invent.
 - Return a single JSON object only.`;
 }
 
-function pickBestHeadline(
+export function pickBestHeadline(
   llmHeadline: string | null | undefined,
   outline: PageOutline,
+  adHeadline?: string | null,
 ): string | null {
-  const candidates = [
-    ...outline.heroCandidates,
-    outline.ogTitle,
-    outline.title,
-  ].filter((s): s is string => Boolean(s && s.trim()));
+  const ranked = [...outline.heroCandidates]
+    .map((c) => demashHeadline(c))
+    .filter((c) => c.length >= 8 && !looksLikeNavJunk(c))
+    .sort((a, b) => scoreHeroCandidate(b) - scoreHeroCandidate(a));
 
-  const llm = (llmHeadline || "").replace(/\s+/g, " ").trim();
-  if (llm) {
-    // Reject run-on concatenations that mash many title fragments
-    const words = llm.split(/\s+/).length;
-    const looksConcat =
-      words > 18 &&
-      candidates.some(
-        (c) =>
-          c.length >= 8 &&
-          llm.toLowerCase().includes(c.toLowerCase()) &&
-          llm.length > c.length * 1.6,
-      );
-    if (!looksConcat && words <= 22) return llm;
+  const llm = demashHeadline((llmHeadline || "").replace(/\s+/g, " ").trim());
+  const ad = demashHeadline((adHeadline || "").replace(/\s+/g, " ").trim());
 
-    // If LLM mashed titles, prefer first real H1/hero
-    if (outline.heroCandidates[0]) return outline.heroCandidates[0];
+  const usable = (value: string) => {
+    if (!value || value.length < 8) return false;
+    if (looksLikeMashedHeadline(value)) return false;
+    const words = value.split(/\s+/).length;
+    if (words > 22) return false;
+    // Reject LLM mash that embeds multiple outline fragments
+    const hits = outline.heroCandidates.filter(
+      (c) =>
+        c.length >= 8 &&
+        value.toLowerCase().includes(c.toLowerCase()) &&
+        value.length > c.length * 1.35,
+    ).length;
+    if (hits >= 2) return false;
+    return true;
+  };
+
+  if (llm && usable(llm)) {
+    // Prefer page hero over LLM when LLM mostly restates a weaker mashed title
+    if (ranked[0] && scoreHeroCandidate(ranked[0]) > scoreHeroCandidate(llm) + 4) {
+      return ranked[0];
+    }
+    return llm;
   }
 
-  return outline.heroCandidates[0] || outline.ogTitle || null;
+  if (ranked[0] && usable(ranked[0])) return ranked[0];
+
+  // Prefer a clean meta-description lead over a mashed <title> string
+  const metaLead = (outline.metaDescription || "")
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .find((s) => s.length >= 12 && s.length <= 120);
+  if (metaLead && usable(metaLead)) return metaLead;
+
+  if (ranked[0] && !looksLikeMashedHeadline(ranked[0])) return ranked[0];
+
+  // Ad creative only as last resort when the page had no hero text
+  if (ad && usable(ad) && outline.heroCandidates.length === 0) return ad;
+
+  const og = outline.ogTitle ? demashHeadline(outline.ogTitle) : null;
+  if (og && usable(og)) return og;
+  // Still better to show a demashed/mashed page title than invent nothing when that is all we have
+  if (ranked[0]) return ranked[0];
+  return null;
 }
 
-function ensureArchitectureSections(
+export function ensureArchitectureSections(
   sections: z.infer<typeof analysisSchema>["pageArchitecture"]["sections"],
   outline: PageOutline,
 ): z.infer<typeof analysisSchema>["pageArchitecture"]["sections"] {
-  if (sections.length >= 4) return sections;
+  if (sections.length >= 5) return sections;
 
-  // Fallback: synthesize architecture from heading outline when LLM truncated
-  const synthesized = outline.headingOutline
-    .filter((h) => h.level <= 2)
-    .slice(0, 12)
-    .map((h, i) => {
-      const name =
-        i === 0
-          ? "Hero"
-          : /faq|question/i.test(h.text)
-            ? "FAQ"
-            : /price|pricing|plan/i.test(h.text)
-              ? "Pricing"
-              : /testimonial|review|client|customer/i.test(h.text)
-                ? "Social proof"
-                : /how|step|process/i.test(h.text)
-                  ? "How it works"
-                  : /feature|benefit|why/i.test(h.text)
-                    ? "Features"
-                    : h.text.slice(0, 48);
-      return {
-        name,
-        purpose: `Present: ${h.text}`,
-        summary: h.snippet || h.text,
-        keyElements: [h.text].filter(Boolean),
-      };
-    });
+  const nameFor = (text: string, index: number) => {
+    if (index === 0) return "Hero";
+    if (/faq|question/i.test(text)) return "FAQ";
+    if (/price|pricing|plan|cost/i.test(text)) return "Pricing";
+    if (/testimonial|review|client|customer|proof|logo/i.test(text)) return "Social proof";
+    if (/how|step|process|work/i.test(text)) return "How it works";
+    if (/feature|benefit|why|solution|system/i.test(text)) return "Features";
+    if (/problem|pain|struggle|without|hate/i.test(text)) return "Problem";
+    if (/cta|get started|book|demo|call|sign/i.test(text)) return "Final CTA";
+    return text.slice(0, 48);
+  };
+
+  // Prefer h1/h2; include h3 when the outline is sparse
+  let headings = outline.headingOutline.filter((h) => h.level <= 2);
+  if (headings.length < 4) {
+    headings = outline.headingOutline.slice(0, 14);
+  }
+
+  const synthesized = headings.slice(0, 12).map((h, i) => ({
+    name: nameFor(h.text, i),
+    purpose: `Present: ${h.text}`,
+    summary: h.snippet || h.text,
+    keyElements: [h.text].filter(Boolean),
+  }));
+
+  // Infer extra blocks from plain text when still Hero-only
+  if (synthesized.length < 4 && outline.plainText.length > 400) {
+    const extras: Array<{ name: string; purpose: string; summary: string; keyElements: string[] }> = [];
+    const text = outline.plainText;
+    if (/testimonial|review|client|customer|"[^"]{20,}"/i.test(text)) {
+      extras.push({
+        name: "Social proof",
+        purpose: "Build trust with proof",
+        summary: "Page includes social proof or customer language.",
+        keyElements: ["Social proof"],
+      });
+    }
+    if (/faq|frequently asked|questions?/i.test(text)) {
+      extras.push({
+        name: "FAQ",
+        purpose: "Answer objections",
+        summary: "Page includes FAQ-style content.",
+        keyElements: ["FAQ"],
+      });
+    }
+    if (outline.ctas.length) {
+      extras.push({
+        name: "Final CTA",
+        purpose: "Convert the visitor",
+        summary: `Primary CTA candidates: ${outline.ctas.slice(0, 3).join(", ")}`,
+        keyElements: outline.ctas.slice(0, 3),
+      });
+    }
+    if (/feature|benefit|how it works|24\/7|ai-|system/i.test(text)) {
+      extras.push({
+        name: "Features",
+        purpose: "Explain the solution",
+        summary: "Page describes product capabilities or benefits.",
+        keyElements: ["Features"],
+      });
+    }
+    const base =
+      synthesized.length > 0
+        ? synthesized
+        : [
+            {
+              name: "Hero",
+              purpose: "Introduce the offer and capture attention",
+              summary: outline.heroCandidates[0] || outline.metaDescription || "Hero",
+              keyElements: outline.heroCandidates.slice(0, 2),
+            },
+          ];
+    const merged = [...base];
+    for (const extra of extras) {
+      if (!merged.some((s) => s.name === extra.name)) merged.push(extra);
+    }
+    if (merged.length > sections.length) return merged.slice(0, 12);
+  }
 
   if (synthesized.length > sections.length) return synthesized;
   return sections;
@@ -487,6 +671,7 @@ async function analyzeWithLlm(input: {
   adTitle?: string;
   adBody?: string;
   platform?: string;
+  screenshots?: CompetitorScreenshotTile[];
 }): Promise<z.infer<typeof analysisSchema>> {
   const system = `${buildSystemPrompt()}\n\nRespond with a single JSON object matching: ${schemaHint()}`;
 
@@ -503,20 +688,36 @@ async function analyzeWithLlm(input: {
     adBody: input.adBody || null,
     // Cap body text; outline already carries structure
     pageText: input.outline.plainText.slice(0, 14_000),
+    hasScreenshots: Boolean(input.screenshots?.length),
     instructions: {
-      headline: "Use heroCandidates[0] or first H1 unless clearly wrong",
+      headline:
+        "Prefer the H1 / hero text visible in the screenshot and heroCandidates. Do NOT concatenate brand+product+tagline. Do NOT copy adHeadline unless the page has no hero text.",
+      cta: "primaryOffer.cta must match the primary CTA button text visible in the fold screenshot / primaryCtas (e.g. Book a strategy call) — not a different lead magnet.",
       architecture:
-        "Map EVERY major headingOutline entry into sections (5–12 typical). Never return only Hero.",
+        "Map EVERY major visible band from the screenshots + headingOutline into sections (5–12 typical). Never return only Hero. Use screenshot section rhythm when headings are sparse.",
     },
   };
-  const user = JSON.stringify(userPayload, null, 2);
+  const userText = JSON.stringify(userPayload, null, 2);
+  const shots = (input.screenshots || []).slice(0, 2);
 
   let raw: string | null = null;
 
-  // Offers / page offer extraction: prefer direct OpenAI API
+  // Offers / page offer extraction: prefer direct OpenAI API (vision when screenshots exist)
   if (process.env.OPENAI_API_KEY) {
     try {
       const client = getDirectOpenAIClient();
+      const userContent: Array<
+        | { type: "text"; text: string }
+        | { type: "image_url"; image_url: { url: string } }
+      > = [{ type: "text", text: userText }];
+      for (const shot of shots) {
+        userContent.push({
+          type: "image_url",
+          image_url: {
+            url: `data:${shot.mediaType};base64,${shot.data}`,
+          },
+        });
+      }
       const completion = await client.chat.completions.create({
         model: process.env.OFFERS_OPENAI_MODEL?.trim() || "gpt-4o",
         temperature: 0.15,
@@ -524,7 +725,7 @@ async function analyzeWithLlm(input: {
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: system },
-          { role: "user", content: user },
+          { role: "user", content: userContent },
         ],
       });
       raw = completion.choices[0]?.message?.content || null;
@@ -534,16 +735,43 @@ async function analyzeWithLlm(input: {
     }
   }
 
-  // Prefer Claude when available — stronger at long structured extraction
+  // Prefer Claude when available — stronger at long structured extraction + vision
   if (!raw && process.env.ANTHROPIC_API_KEY) {
     try {
       const client = getAnthropicClient();
+      const content: Array<
+        | { type: "text"; text: string }
+        | {
+            type: "image";
+            source: {
+              type: "base64";
+              media_type: "image/jpeg" | "image/png" | "image/webp" | "image/gif";
+              data: string;
+            };
+          }
+      > = [];
+      for (const shot of shots) {
+        content.push({
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: shot.mediaType,
+            data: shot.data,
+          },
+        });
+      }
+      content.push({
+        type: "text",
+        text: shots.length
+          ? `${userText}\n\nUse the attached Firecrawl screenshots to verify headline, primary CTA, and section architecture.`
+          : userText,
+      });
       const completion = await client.messages.create({
         model: getAnthropicModel(),
         max_tokens: 6000,
         temperature: 0.15,
         system,
-        messages: [{ role: "user", content: user }],
+        messages: [{ role: "user", content }],
       });
       raw = completion.content
         .map((b) => (b.type === "text" ? b.text : ""))
@@ -558,6 +786,16 @@ async function analyzeWithLlm(input: {
   if (!raw && hasOpenRouterKey()) {
     try {
       const client = getOpenRouterClient();
+      const userContent: Array<
+        | { type: "text"; text: string }
+        | { type: "image_url"; image_url: { url: string } }
+      > = [{ type: "text", text: userText }];
+      for (const shot of shots) {
+        userContent.push({
+          type: "image_url",
+          image_url: { url: `data:${shot.mediaType};base64,${shot.data}` },
+        });
+      }
       const completion = await client.chat.completions.create({
         model: OPENROUTER_OPENAI_MODEL,
         temperature: 0.15,
@@ -565,7 +803,7 @@ async function analyzeWithLlm(input: {
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: system },
-          { role: "user", content: user },
+          { role: "user", content: userContent },
         ],
       });
       raw = completion.choices[0]?.message?.content?.trim() || null;
@@ -587,7 +825,7 @@ async function analyzeWithLlm(input: {
         max_tokens: 6000,
         messages: [
           { role: "system", content: system },
-          { role: "user", content: user },
+          { role: "user", content: userText },
         ],
       });
       raw = completion.choices[0]?.message?.content?.trim() || "";
@@ -620,13 +858,17 @@ async function analyzeWithLlm(input: {
 
   // If architecture is still thin, ask once more for sections only
   if (
-    data.pageArchitecture.sections.length < 4 &&
-    input.outline.headingOutline.length >= 4
+    data.pageArchitecture.sections.length < 5 &&
+    (input.outline.headingOutline.length >= 2 ||
+      input.outline.plainText.length >= 500)
   ) {
-    const expandSystem = `Expand landing-page architecture into 5–12 ordered sections from the heading outline. Return ONLY JSON: { "sections": [{ "name", "purpose", "summary", "keyElements": string[] }] }`;
+    const expandSystem = `Expand landing-page architecture into 5–12 ordered sections from the heading outline and page evidence. Never return only Hero. Return ONLY JSON: { "sections": [{ "name", "purpose", "summary", "keyElements": string[] }] }`;
     const expandUser = JSON.stringify(
       {
         headingOutline: input.outline.headingOutline,
+        heroCandidates: input.outline.heroCandidates,
+        primaryCtas: input.outline.ctas,
+        pageTextExcerpt: input.outline.plainText.slice(0, 8_000),
         existingSections: data.pageArchitecture.sections,
       },
       null,
@@ -681,7 +923,11 @@ async function analyzeWithLlm(input: {
     }
   }
 
-  const headline = pickBestHeadline(data.offer.headline, input.outline);
+  const headline = pickBestHeadline(
+    data.offer.headline,
+    input.outline,
+    input.adTitle,
+  );
   const sections = ensureArchitectureSections(
     data.pageArchitecture.sections,
     input.outline,
@@ -736,19 +982,16 @@ export async function analyzeLookupAdLandingPage(
     const page = await fetchLandingPage(url);
     let outline = page.outline;
 
-    // Enrich thin/JS-rendered pages with ad creative so analysis can still run
+    // Enrich thin/JS-rendered pages with ad creative for offer context only.
+    // Do NOT seed heroCandidates from the ad — that caused headline mismatches.
     const adBits = [ad.title, ad.body].filter(Boolean).join("\n");
     if (outlineSignalLength(outline) < 120 && adBits.length >= 40) {
       outline = {
         ...outline,
-        plainText: `${outline.plainText}\n\nAd creative context:\n${adBits}`.slice(
+        plainText: `${outline.plainText}\n\nAd creative context (not the page headline):\n${adBits}`.slice(
           0,
           MAX_TEXT_CHARS,
         ),
-        heroCandidates:
-          outline.heroCandidates.length > 0
-            ? outline.heroCandidates
-            : [ad.title].filter((t): t is string => Boolean(t && t.length >= 8)),
       };
     }
 
@@ -758,12 +1001,17 @@ export async function analyzeLookupAdLandingPage(
       );
     }
 
+    const screenshots = await captureCompetitorScreenshotTiles(page.finalUrl);
     const llm = await analyzeWithLlm({
       url: page.finalUrl,
       outline,
       adTitle: ad.title,
       adBody: ad.body,
+      screenshots: screenshots.tiles,
     });
+    if (screenshots.warnings.length) {
+      console.warn("[page-analysis] screenshot warnings", screenshots.warnings.slice(0, 3));
+    }
 
     let sameLandingPageAds = null;
     try {
@@ -861,16 +1109,10 @@ export async function analyzeCompetitorLandingPage(
     if (outlineSignalLength(outline) < 120 && adBits.length >= 40) {
       outline = {
         ...outline,
-        plainText: `${outline.plainText}\n\nAd creative context:\n${adBits}`.slice(
+        plainText: `${outline.plainText}\n\nAd creative context (not the page headline):\n${adBits}`.slice(
           0,
           MAX_TEXT_CHARS,
         ),
-        heroCandidates:
-          outline.heroCandidates.length > 0
-            ? outline.heroCandidates
-            : [competitor.sampleAd?.title].filter(
-                (t): t is string => Boolean(t && t.length >= 8),
-              ),
       };
     }
 
@@ -880,13 +1122,18 @@ export async function analyzeCompetitorLandingPage(
       );
     }
 
+    const screenshots = await captureCompetitorScreenshotTiles(page.finalUrl);
     const llm = await analyzeWithLlm({
       url: page.finalUrl,
       outline,
       adTitle: competitor.sampleAd?.title,
       adBody: competitor.sampleAd?.body,
       platform: String(competitor.platform || "facebook"),
+      screenshots: screenshots.tiles,
     });
+    if (screenshots.warnings.length) {
+      console.warn("[page-analysis] screenshot warnings", screenshots.warnings.slice(0, 3));
+    }
 
     let sameLandingPageAds = null;
     try {

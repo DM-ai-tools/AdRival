@@ -31,6 +31,8 @@ export interface PageInventory {
   visionUsed: boolean;
   overlays?: string[];
   tiles?: Array<{ id: string; viewport: string; path: string; y: number }>;
+  /** Measured architecture. Absent or incomplete means design must recapture, not invent a template. */
+  layout?: import("../design/layoutEvidence").PageLayoutEvidence | null;
 }
 
 export interface RenderedBlock {
@@ -108,6 +110,205 @@ export function inventoryFromBlocks(input: {
     coverage: { visualRegions: sections.length, mapped: sections.length - unresolved, unresolved },
     visionUsed: false,
   };
+}
+
+type OfferSection = {
+  name?: string | null;
+  purpose?: string | null;
+  summary?: string | null;
+  keyElements?: string[] | null;
+};
+
+/**
+ * Build competitor structure from the same HTML outline used by offer analysis,
+ * enriched with the saved page-architecture sections when present.
+ */
+export function inventoryFromLandingOutline(input: {
+  sourceUrl: string;
+  finalUrl: string;
+  heroCandidates?: string[];
+  headings?: Array<{ level: number; text: string; snippet?: string }>;
+  ctas?: string[];
+  architecture?: OfferSection[] | null;
+  /** From completed page analysis — keeps hero CTA/offer aligned with the competitor. */
+  campaignOffer?: {
+    headline?: string | null;
+    primaryOffer?: string | null;
+    cta?: string | null;
+    uniqueValueProps?: string[];
+  } | null;
+}): PageInventory {
+  const headings = input.headings || [];
+  const architecture = (input.architecture || []).filter(
+    (section) => (section.name || section.summary || section.purpose || "").trim(),
+  );
+  const offerCtas = [
+    ...(input.campaignOffer?.cta ? [input.campaignOffer.cta] : []),
+    ...(input.ctas || []),
+  ]
+    .map((cta) => cta.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const seenCta = new Set<string>();
+  const ctas = offerCtas.filter((cta) => {
+    const key = cta.toLowerCase();
+    if (seenCta.has(key)) return false;
+    seenCta.add(key);
+    return true;
+  });
+  const count = Math.max(architecture.length, headings.length, input.heroCandidates?.length ? 1 : 0);
+  const sections: InventorySection[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const arch = architecture[index];
+    const heading = headings[index];
+    const hero =
+      index === 0
+        ? input.heroCandidates?.[0] || input.campaignOffer?.headline || null
+        : null;
+    const sourceHeading = heading?.text || hero || arch?.name || null;
+    const snippet = (heading?.snippet || "").trim();
+    const summary = [arch?.summary, ...(arch?.keyElements || [])].filter(Boolean).join(" ").trim();
+    const offerLine =
+      index === 0 && input.campaignOffer?.primaryOffer
+        ? `Primary offer: ${input.campaignOffer.primaryOffer}`
+        : "";
+    const body = snippet.length >= 20 ? snippet : [summary, offerLine].filter(Boolean).join(" ").trim();
+    const rendered = snippet.length >= 20;
+    const components: InventoryComponent[] = [];
+    if (sourceHeading) {
+      components.push({
+        id: `src-${index + 1}-headline`,
+        kind: "headline",
+        text: sourceHeading,
+        items: [],
+      });
+    }
+    if (body) {
+      components.push({
+        id: `src-${index + 1}-body`,
+        kind: "paragraph",
+        text: body.slice(0, 700),
+        items: [],
+      });
+    } else if (index === 0 && input.campaignOffer?.primaryOffer) {
+      components.push({
+        id: `src-${index + 1}-offer`,
+        kind: "paragraph",
+        text: input.campaignOffer.primaryOffer.slice(0, 700),
+        items: [],
+      });
+    }
+    if (index === 0 && (input.campaignOffer?.uniqueValueProps || []).length) {
+      components.push({
+        id: `src-${index + 1}-uvp`,
+        kind: "list",
+        text: "",
+        items: (input.campaignOffer!.uniqueValueProps || []).slice(0, 5).map((item) => item.slice(0, 160)),
+      });
+    }
+    if (index === 0 && ctas.length) {
+      for (const [ctaIndex, cta] of ctas.slice(0, 3).entries()) {
+        components.push({
+          id: `src-${index + 1}-cta-${ctaIndex + 1}`,
+          kind: "cta",
+          text: cta,
+          items: [],
+        });
+      }
+    }
+    if (!components.length) continue;
+    sections.push({
+      id: `src-${sections.length + 1}`,
+      order: sections.length,
+      sourceHeading,
+      internalLabel: arch?.name || sourceHeading || `Section ${sections.length + 1}`,
+      purpose:
+        index === 0 && input.campaignOffer?.primaryOffer
+          ? `Present the campaign offer: ${input.campaignOffer.primaryOffer}`
+          : arch?.purpose || "Present this part of the competitor page",
+      textKind: rendered ? "rendered" : "summary",
+      components,
+      gaps: rendered
+        ? []
+        : ["Section body came from the completed offer analysis because rendered DOM text was thin."],
+      box: null,
+    });
+  }
+  const unresolved = sections.filter((section) => section.textKind !== "rendered").length;
+  return {
+    captureId: `offer-${Date.now()}`,
+    sourceUrl: input.sourceUrl,
+    finalUrl: input.finalUrl,
+    capturedAt: new Date().toISOString(),
+    viewports: VIEWPORTS,
+    sections,
+    gaps: [
+      architecture.length
+        ? "Competitor structure reused the completed offer & page architecture, plus the same HTML fetch used by that analysis."
+        : "Competitor structure was built from the offer-analysis HTML fetch because browser capture did not return usable text.",
+    ],
+    coverage: {
+      visualRegions: sections.length,
+      mapped: sections.length - unresolved,
+      unresolved,
+    },
+    visionUsed: false,
+  };
+}
+
+/** Offer analysis or HTML outline is enough to continue recreation when browser capture fails. */
+export function hasUsableCompetitorReference(inventory: PageInventory | null | undefined): boolean {
+  if (!inventory || inventory.sections.length === 0) return false;
+  if (hasUsableRenderedSource(inventory)) return true;
+  return inventory.sections.some((section) =>
+    section.components.some((component) => component.text.trim().length >= 12),
+  );
+}
+
+/** Ensure hero CTA/offer from page analysis survive when inventory was captured earlier. */
+export function enrichInventoryWithCampaignOffer(
+  inventory: PageInventory,
+  campaignOffer?: {
+    headline?: string | null;
+    primaryOffer?: string | null;
+    cta?: string | null;
+    uniqueValueProps?: string[];
+  } | null,
+): PageInventory {
+  if (!campaignOffer || !inventory.sections.length) return inventory;
+  const sections = inventory.sections.map((section, index) => {
+    if (index !== 0) return section;
+    const components = [...section.components];
+    const hasCta = components.some((component) => component.kind === "cta");
+    if (campaignOffer.cta && !hasCta) {
+      components.push({
+        id: `${section.id}-campaign-cta`,
+        kind: "cta",
+        text: campaignOffer.cta,
+        items: [],
+      });
+    }
+    if (
+      campaignOffer.primaryOffer &&
+      !components.some((component) =>
+        /primary offer|google ads|strategy call/i.test(component.text),
+      )
+    ) {
+      components.push({
+        id: `${section.id}-campaign-offer`,
+        kind: "paragraph",
+        text: `Primary offer: ${campaignOffer.primaryOffer}`.slice(0, 700),
+        items: [],
+      });
+    }
+    return {
+      ...section,
+      purpose: campaignOffer.primaryOffer
+        ? `Present the campaign offer: ${campaignOffer.primaryOffer}`
+        : section.purpose,
+      components,
+    };
+  });
+  return { ...inventory, sections };
 }
 
 export function inventoryFromAnalysisSummaries(input: {

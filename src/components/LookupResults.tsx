@@ -483,6 +483,10 @@ export function LookupResults({
   useEffect(() => {
     setBrandUrlDraft(job.businessUrl || job.businessProfile?.url || "");
   }, [job.businessUrl, job.businessProfile?.url]);
+
+  useEffect(() => {
+    if (!running && !analyzingOffers) setStopping(false);
+  }, [running, analyzingOffers]);
   const isLinkedIn = platform === "linkedin";
   const liFollowers =
     page?.raw?.linkedinFollowers != null
@@ -508,7 +512,7 @@ export function LookupResults({
         body: JSON.stringify({ lookupId: job.id }),
       });
       onStop?.();
-    } finally {
+    } catch {
       setStopping(false);
     }
   }

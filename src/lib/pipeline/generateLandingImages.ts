@@ -627,8 +627,14 @@ export function replaceGeneratedImageInHtml(
   image: GeneratedLandingImage,
 ): string {
   const $ = cheerio.load(html);
-  $(`[data-adrival-gen-id="${image.id}"]`).each((_, el) => {
+  $(`[data-adrival-gen-id="${image.id}"], [data-adrival-slot="${image.id}"]`).each((_, el) => {
     const $el = $(el);
+    if ($el.is("figure") || $el.attr("data-image-state") === "placeholder") {
+      $el.replaceWith(
+        `<img class="adr-visual" data-adrival-gen-id="${image.id}" src="${image.publicUrl}" alt="">`,
+      );
+      return;
+    }
     if ($el.is("img")) {
       $el.attr("src", image.publicUrl);
       $el.removeAttr("srcset");

@@ -20,17 +20,21 @@ export function packagePortableHtml(html: string): { html: string; embedded: num
   let embedded = 0;
   const external: string[] = [];
   const rewrite = (value: string): string => {
+    if (!value || value.startsWith("data:")) return value;
     const data = dataUriForPublicPath(value);
     if (data) {
       embedded += 1;
       return data;
     }
-    if (/^https?:/i.test(value) && !value.startsWith("data:")) external.push(value.split("?")[0]);
+    if (/^https?:/i.test(value)) external.push(value.split("?")[0]);
     return value;
   };
   $("img[src]").each((_, el) => {
     const src = $(el).attr("src") || "";
-    if (src) $(el).attr("src", rewrite(src));
+    if (src) {
+      $(el).attr("src", rewrite(src));
+      if (($(el).attr("src") || "").startsWith("data:")) $(el).removeAttr("loading");
+    }
   });
   $("[srcset]").each((_, el) => {
     const next = ($(el).attr("srcset") || "")
@@ -50,4 +54,65 @@ export function packagePortableHtml(html: string): { html: string; embedded: num
     $("head").append('<meta name="viewport" content="width=device-width, initial-scale=1">');
   }
   return { html: $.html(), embedded, external: [...new Set(external)].slice(0, 12) };
+}
+
+/** Fetch remote http(s) images and rewrite them to data URIs for portable HTML. */
+export async function embedRemoteImagesInHtml(
+  html: string,
+  options?: { maxImages?: number; timeoutMs?: number; maxBytes?: number },
+): Promise<{ html: string; embedded: number }> {
+  const maxImages = options?.maxImages ?? 12;
+  const timeoutMs = options?.timeoutMs ?? 8000;
+  const maxBytes = options?.maxBytes ?? 1_500_000;
+  const $ = cheerio.load(html);
+  const cache = new Map<string, string | null>();
+  let embedded = 0;
+
+  const fetchOne = async (url: string): Promise<string | null> => {
+    if (cache.has(url)) return cache.get(url) || null;
+    try {
+      const response = await fetch(url, {
+        signal: AbortSignal.timeout(timeoutMs),
+        headers: { Accept: "image/*,*/*;q=0.8" },
+      });
+      if (!response.ok) {
+        cache.set(url, null);
+        return null;
+      }
+      const mime = (response.headers.get("content-type") || "image/png").split(";")[0].trim();
+      if (!mime.startsWith("image/")) {
+        cache.set(url, null);
+        return null;
+      }
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (bytes.length < 32 || bytes.length > maxBytes) {
+        cache.set(url, null);
+        return null;
+      }
+      const data = `data:${mime};base64,${bytes.toString("base64")}`;
+      cache.set(url, data);
+      return data;
+    } catch {
+      cache.set(url, null);
+      return null;
+    }
+  };
+
+  const jobs: Array<Promise<void>> = [];
+  $("img[src]").each((_, el) => {
+    const src = ($(el).attr("src") || "").trim();
+    if (!/^https?:/i.test(src)) return;
+    if (jobs.length >= maxImages) return;
+    jobs.push(
+      (async () => {
+        const data = await fetchOne(src);
+        if (data) {
+          $(el).attr("src", data).removeAttr("loading").removeAttr("srcset");
+          embedded += 1;
+        }
+      })(),
+    );
+  });
+  await Promise.all(jobs);
+  return { html: $.html(), embedded };
 }

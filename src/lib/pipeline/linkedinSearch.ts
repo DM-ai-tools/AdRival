@@ -536,6 +536,7 @@ export async function runLinkedInLookup(
         countries: "US,AU",
         paginationToken: token,
       });
+      if (isLookupJobSuppressed(job.id)) return;
       const ads = extractLinkedInAds(res);
       const pageInfo = extractLinkedInPagination(res);
       token = pageInfo.isLastPage ? null : pageInfo.token;

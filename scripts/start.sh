@@ -8,4 +8,7 @@ mkdir -p /app/data
 chown -R nextjs:nodejs /app/data 2>/dev/null || true
 chmod -R u+rwX,g+rwX /app/data 2>/dev/null || true
 
+if command -v gosu >/dev/null 2>&1; then
+  exec gosu nextjs node server.js
+fi
 exec su-exec nextjs node server.js

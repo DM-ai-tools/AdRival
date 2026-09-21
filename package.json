@@ -11,7 +11,7 @@
     "start": "next start --hostname 0.0.0.0 --port ${PORT:-3000}",
     "start:standalone": "HOSTNAME=0.0.0.0 node server.js",
     "lint": "next lint",
-    "test": "tsx --test tests/accounting.test.ts tests/authorization.test.ts tests/runGating.test.ts tests/migration.test.ts tests/apiSurface.test.ts tests/contentContract.test.ts tests/contentAccess.test.ts tests/contentInventory.test.ts tests/serviceIntent.test.ts tests/pipelineRepair.test.ts tests/designStage.test.ts",
+    "test": "tsx --test tests/accounting.test.ts tests/authorization.test.ts tests/runGating.test.ts tests/migration.test.ts tests/apiSurface.test.ts tests/contentContract.test.ts tests/contentAccess.test.ts tests/contentInventory.test.ts tests/serviceIntent.test.ts tests/pipelineRepair.test.ts tests/designStage.test.ts tests/designConstruct.test.ts tests/designArchitecture.test.ts tests/unifiedPipeline.test.ts tests/landingPageAnalysis.test.ts",
     "test:e2e": "next build && tsx --test tests/e2e.test.ts",
     "test:all": "npm run test && npm run test:e2e",
     "postinstall": "node scripts/install-playwright.mjs",
@@ -30,6 +30,7 @@
     "pngjs": "^7.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "sharp": "^0.35.4",
     "uuid": "^11.1.0",
     "zod": "^3.24.2"
   },

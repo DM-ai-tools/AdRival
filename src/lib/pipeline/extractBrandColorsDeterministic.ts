@@ -359,13 +359,13 @@ async function extractDeclaredViaPlaywright(
     ? urlInput.trim()
     : `https://${urlInput.trim()}`;
 
+  const { chromiumLaunchOptions } = await import("./content/playwrightRuntime");
   const { chromium } = await import("playwright");
   let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
   try {
-    browser = await chromium.launch({
-      headless: true,
-      args: ["--disable-blink-features=AutomationControlled"],
-    });
+    browser = await chromium.launch(
+      chromiumLaunchOptions(["--disable-blink-features=AutomationControlled"]),
+    );
     const context = await browser.newContext({
       viewport: { width: 1440, height: 900 },
       userAgent: BROWSER_UA,

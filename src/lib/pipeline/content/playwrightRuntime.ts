@@ -8,27 +8,42 @@ export function playwrightBrowsersPath(): string {
   return path.join(process.cwd(), "data", "playwright-browsers");
 }
 
+function chromiumInstalled(dir: string): boolean {
+  try {
+    return fs.readdirSync(dir).some((name) => name.startsWith("chromium"));
+  } catch {
+    return false;
+  }
+}
+
 export function configurePlaywrightBrowsers(): string {
-  const stable = playwrightBrowsersPath();
-  const current = process.env.PLAYWRIGHT_BROWSERS_PATH || "";
-  const ephemeral = /cursor|sandbox|\\temp\\|\/tmp\/|appdata\\local\\temp/i.test(current);
-  const home = path.join(os.homedir(), "AppData", "Local", "ms-playwright");
-  const chosen = fs.existsSync(stable)
-    ? stable
-    : !ephemeral && current && fs.existsSync(current)
-      ? current
-      : fs.existsSync(home)
-        ? home
-        : stable;
+  const explicit = process.env.PLAYWRIGHT_BROWSERS_PATH || "";
+  const ephemeral = /cursor|sandbox|\\temp\\|\/tmp\/|appdata\\local\\temp/i.test(explicit);
+  const candidates = [
+    !ephemeral && explicit ? explicit : "",
+    playwrightBrowsersPath(),
+    path.join(os.homedir(), "AppData", "Local", "ms-playwright"),
+    path.join(os.homedir(), ".cache", "ms-playwright"),
+  ].filter(Boolean);
+  const chosen = candidates.find((dir) => chromiumInstalled(dir)) || playwrightBrowsersPath();
   process.env.PLAYWRIGHT_BROWSERS_PATH = chosen;
   return chosen;
 }
 
-export async function launchChromium(): Promise<Browser> {
+/** Shared launch options so local and container Chromium use the installed browser. */
+export function chromiumLaunchOptions(extraArgs: string[] = []): { headless: true; args: string[] } {
   configurePlaywrightBrowsers();
+  const args = [...extraArgs];
+  if (process.platform === "linux") {
+    args.push("--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage");
+  }
+  return { headless: true, args };
+}
+
+export async function launchChromium(): Promise<Browser> {
   const { chromium } = await import("playwright");
   try {
-    return await chromium.launch({ headless: true });
+    return await chromium.launch(chromiumLaunchOptions());
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (/Executable doesn't exist|browserType\.launch/i.test(msg)) {

@@ -2,6 +2,9 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { assertPublicHttpUrl } from "./safeUrl";
 import { applyVisionGroups, inventoryFromBlocks, type PageInventory, type RenderedBlock } from "./inventory";
+import { architectureFromProbe, alignLayoutEvidence } from "../design/layoutEvidence";
+import { probePage } from "../design/captureLayout";
+import type { LayoutProbe } from "../design/layoutEvidence";
 import { analyzeScreenshotTiles } from "./vision";
 
 export interface CaptureFrame {
@@ -10,6 +13,7 @@ export interface CaptureFrame {
   gaps: string[];
   overlays?: string[];
   tiles?: Array<{ id: string; viewport: string; path: string; y: number }>;
+  layout?: LayoutProbe;
 }
 
 export interface CaptureDeps {
@@ -116,7 +120,8 @@ async function openWithPlaywright(url: string, viewport: { width: number; height
     await page.screenshot({ path: path.join(dir, `${viewport.width < 500 ? "mobile" : "desktop"}-full.jpg`), type: "jpeg", quality: 40, fullPage: true }).catch(() => undefined);
     const gaps = [...interactionNotes];
     if (blocks.length === 0) gaps.push("Rendered DOM returned no text.");
-    return { finalUrl, blocks, gaps, overlays, tiles };
+    const layout = await page.evaluate(probePage).catch(() => undefined);
+    return { finalUrl, blocks, gaps, overlays, tiles, layout };
   } finally {
     await browser.close();
   }
@@ -152,6 +157,17 @@ export async function captureRenderedInventory(sourceUrl: string, deps: CaptureD
   });
   inventory.tiles = desktop.tiles || [];
   inventory.overlays = desktop.overlays || [];
+  if (desktop.layout) {
+    inventory.layout = alignLayoutEvidence(
+      architectureFromProbe(desktop.layout, inventory.finalUrl),
+      inventory.sections.map((section) => section.id),
+    );
+    if (inventory.layout.incomplete) {
+      inventory.gaps.push("Layout measurements did not cover every captured section. Design must repair capture before building.");
+    }
+  } else {
+    inventory.gaps.push("Layout measurements were not returned. Section-purpose summaries are not design evidence.");
+  }
   if (!inventory.sections.some((section) => section.components.some((item) => item.kind === "paragraph"))) {
     inventory.gaps.push("Rendered capture did not include body paragraphs. Drafting must not treat an analysis summary as source text.");
   }

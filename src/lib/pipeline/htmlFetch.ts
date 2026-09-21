@@ -126,6 +126,37 @@ function looksBlocked(html: string): boolean {
   return false;
 }
 
+/**
+ * Direct HTTP often returns an SPA shell or funnel stub with almost no
+ * headings/copy. Those must not short-circuit Firecrawl/Playwright.
+ */
+export function looksLikeThinShell(html: string): boolean {
+  const stripped = html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const headings = (html.match(/<h[1-3]\b/gi) || []).length;
+  const paragraphs = (html.match(/<p\b/gi) || []).length;
+  if (stripped.length < 500) return true;
+  if (headings < 2 && stripped.length < 3_500) return true;
+  if (headings < 3 && paragraphs < 3 && stripped.length < 6_000) return true;
+  if (
+    /id=["']__(?:next|nuxt)["']|id=["']root["']|data-reactroot|ng-version=/i.test(
+      html,
+    ) &&
+    headings < 3 &&
+    stripped.length < 5_000
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function markdownToBasicHtml(markdown: string, title?: string | null): string {
   const escaped = markdown
     .replace(/&/g, "&amp;")
@@ -208,13 +239,13 @@ async function fetchViaPlaywright(url: string): Promise<{
   html: string;
   source: "playwright";
 }> {
+  const { chromiumLaunchOptions } = await import("./content/playwrightRuntime");
   const { chromium } = await import("playwright");
   let browser = null as Awaited<ReturnType<typeof chromium.launch>> | null;
   try {
-    browser = await chromium.launch({
-      headless: true,
-      args: ["--disable-blink-features=AutomationControlled"],
-    });
+    browser = await chromium.launch(
+      chromiumLaunchOptions(["--disable-blink-features=AutomationControlled"]),
+    );
     const context = await browser.newContext({
       viewport: { width: 1440, height: 900 },
       userAgent: BROWSER_HEADERS["User-Agent"],
@@ -265,6 +296,12 @@ export async function fetchRawLandingHtml(url: string): Promise<{
 
   let lastError: Error | null = null;
   let blockedByProtection = false;
+  let thinDirect: {
+    finalUrl: string;
+    title: string | null;
+    html: string;
+    source: "direct";
+  } | null = null;
 
   for (const candidate of candidates) {
     try {
@@ -305,12 +342,27 @@ export async function fetchRawLandingHtml(url: string): Promise<{
         continue;
       }
 
-      return {
+      const direct = {
         finalUrl: res.url || candidate,
         title: extractTitle(html),
         html,
         source: "direct" as const,
       };
+
+      // SPA / funnel shells look "successful" but lack architecture — keep as
+      // fallback and continue to rendered scrapers.
+      if (looksLikeThinShell(html)) {
+        thinDirect = thinDirect || direct;
+        lastError = new Error(
+          `Landing page HTML looks like a thin JS shell for ${candidate}`,
+        );
+        console.warn(
+          `[htmlFetch] thin shell from direct fetch for ${candidate}; trying rendered fallbacks`,
+        );
+        break;
+      }
+
+      return direct;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
     }
@@ -322,9 +374,16 @@ export async function fetchRawLandingHtml(url: string): Promise<{
   if (hasFirecrawlKey()) {
     try {
       console.warn(
-        `[htmlFetch] direct fetch blocked for ${primary}; trying Firecrawl`,
+        `[htmlFetch] ${thinDirect ? "thin shell" : "direct fetch blocked"} for ${primary}; trying Firecrawl`,
       );
-      return await fetchViaFirecrawl(primary);
+      const viaFirecrawl = await fetchViaFirecrawl(primary);
+      if (
+        !looksLikeThinShell(viaFirecrawl.html) ||
+        !thinDirect ||
+        viaFirecrawl.html.length >= thinDirect.html.length
+      ) {
+        return viaFirecrawl;
+      }
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
       console.warn("[htmlFetch] Firecrawl fallback failed", lastError.message);
@@ -340,11 +399,20 @@ export async function fetchRawLandingHtml(url: string): Promise<{
     console.warn(
       `[htmlFetch] trying Playwright fallback for ${primary}`,
     );
-    return await fetchViaPlaywright(primary);
+    const viaPlaywright = await fetchViaPlaywright(primary);
+    if (
+      !looksLikeThinShell(viaPlaywright.html) ||
+      !thinDirect ||
+      viaPlaywright.html.length >= thinDirect.html.length
+    ) {
+      return viaPlaywright;
+    }
   } catch (err) {
     lastError = err instanceof Error ? err : new Error(String(err));
     console.warn("[htmlFetch] Playwright fallback failed", lastError.message);
   }
+
+  if (thinDirect) return thinDirect;
 
   throw (
     lastError ||

@@ -1,4 +1,5 @@
 import { chromium, type Browser, type Page } from "playwright";
+import { chromiumLaunchOptions } from "./content/playwrightRuntime";
 import { PNG } from "pngjs";
 import type { BrandColors } from "../types";
 import {
@@ -273,10 +274,9 @@ export async function extractBrandColorsViaPlaywright(
   let browser: Browser | null = null;
   try {
     try {
-      browser = await chromium.launch({
-        headless: true,
-        args: ["--disable-blink-features=AutomationControlled"],
-      });
+      browser = await chromium.launch(
+        chromiumLaunchOptions(["--disable-blink-features=AutomationControlled"]),
+      );
     } catch (launchErr) {
       const msg =
         launchErr instanceof Error ? launchErr.message : String(launchErr);

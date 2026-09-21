@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { chromiumLaunchOptions } from "../content/playwrightRuntime";
 import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
 
@@ -42,7 +43,7 @@ export async function runVisualGate(input: {
   const notes: string[] = [];
   const results: VisualGateResult["results"] = [];
 
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch(chromiumLaunchOptions());
   try {
     for (const vp of viewports) {
       const context = await browser.newContext({

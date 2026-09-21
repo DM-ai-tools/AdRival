@@ -47,6 +47,12 @@ function setProgress(job: LookupJob, progress: Partial<LookupJobProgress>) {
   saveLookupJob(job);
 }
 
+function haltIfStopped(job: LookupJob): boolean {
+  if (!isLookupJobSuppressed(job.id)) return false;
+  // Leave durable stopRequested / terminal status from stopLookupJob intact.
+  return true;
+}
+
 function toCandidate(
   raw: Record<string, unknown>,
 ): LookupPageCandidate | null {
@@ -108,10 +114,11 @@ export async function runCompetitorLookup(
   };
   saveLookupJob(job);
 
-  if (isLookupJobSuppressed(lookupId)) return;
+  if (haltIfStopped(job)) return;
 
   try {
     const companyRes = await searchCompanies(queryName);
+    if (haltIfStopped(job)) return;
     const rawCompanies = extractCompanies(companyRes);
     const candidates = rawCompanies
       .map((c) => toCandidate(c as Record<string, unknown>))
@@ -149,7 +156,7 @@ export async function runCompetitorLookup(
       return;
     }
 
-    if (isLookupJobSuppressed(job.id)) return;
+    if (haltIfStopped(job)) return;
 
     let selected: LookupPageCandidate | null = null;
     let pickReason = "";
@@ -221,7 +228,7 @@ export async function runCompetitorLookup(
       let pages = 0;
 
       do {
-        if (isLookupJobSuppressed(job.id)) return;
+        if (haltIfStopped(job)) return;
         setProgress(job, {
           message: `Fetching ads for ${selected.name} (${country}) — page ${pages + 1}…`,
         });
@@ -258,12 +265,15 @@ export async function runCompetitorLookup(
           }
         }
 
+        if (haltIfStopped(job)) return;
+
         pages += 1;
         job.progress.pagesScanned += 1;
         const ads = extractAds(response);
         cursor = extractCursor(response);
 
         for (const ad of ads) {
+          if (haltIfStopped(job)) return;
           if (platform === "instagram" && !adRunsOnInstagram(ad)) continue;
           if (platform === "facebook" && !adRunsOnFacebook(ad)) continue;
           const adArchiveId = ad.ad_archive_id
@@ -306,6 +316,8 @@ export async function runCompetitorLookup(
         });
       } while (cursor && pages < MAX_AD_PAGES_PER_COUNTRY);
     }
+
+    if (haltIfStopped(job)) return;
 
     if (stored.length > 0) {
       updateLookup(job, {

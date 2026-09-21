@@ -64,6 +64,8 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     }
     if (nextPage?.status === "completed" && nextPage.html) {
       setView("design");
+    } else if (nextPage?.pipelineVersion?.startsWith("unified")) {
+      setView("design");
     } else if (
       nextPage?.status === "content_ready" ||
       nextPage?.contentDraft?.status === "ready"
@@ -92,30 +94,33 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     async (force = false) => {
       setError(null);
       setGenerating(true);
-      setView("content");
+      setView("design");
       try {
         const res = await fetch("/api/competitors/recreate-page", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             competitorId,
-            action: force ? "regenerate_content" : "generate_content",
+            action: force ? "regenerate_page" : "generate_page",
             force,
-            userFeedback: contentFeedback.trim() || undefined,
+            userFeedback:
+              [contentFeedback.trim(), designFeedback.trim()].filter(Boolean).join("\n") ||
+              undefined,
           }),
         });
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Content generation failed");
+        if (!res.ok) throw new Error(data.error || "Page generation failed");
         const next = data.competitor as CompetitorRecord;
         setCompetitor(next);
         syncFromPage(next.recreatedPage ?? null);
+        setView("design");
       } catch (err) {
         setError((err as Error).message);
       } finally {
         setGenerating(false);
       }
     },
-    [competitorId, contentFeedback, syncFromPage],
+    [competitorId, contentFeedback, designFeedback, syncFromPage],
   );
 
   const saveEdits = useCallback(async () => {
@@ -281,6 +286,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
   );
 
   const downloadImage = useCallback(async (image: GeneratedLandingImage) => {
+    if (!image.publicUrl) return;
     try {
       const res = await fetch(image.publicUrl);
       if (!res.ok) throw new Error("Failed to fetch image");
@@ -299,7 +305,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
   }, []);
 
   const downloadAllImages = useCallback(async () => {
-    const images = page?.generatedImages || [];
+    const images = (page?.generatedImages || []).filter((image) => image.publicUrl);
     for (const image of images) {
       await downloadImage(image);
     }
@@ -314,23 +320,29 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
         const data = await load();
         if (cancelled) return;
         const rp = data.recreatedPage;
-        const hasContent =
-          rp?.contentDraft &&
-          rp.contentDraft.blocks.length > 0 &&
-          (rp.status === "content_ready" ||
-            rp.status === "completed" ||
-            rp.contentDraft.status === "ready" ||
-            rp.contentDraft.status === "approved");
-        const hasHtml = rp?.status === "completed" && Boolean(rp.html);
+        const hasHtml = Boolean(rp?.html);
+        const unifiedDone =
+          rp?.pipelineVersion?.startsWith("unified") &&
+          rp.status === "completed" &&
+          hasHtml;
+        const inFlight =
+          rp?.status === "pending" ||
+          rp?.status === "design_pending" ||
+          (rp?.progress?.pct != null && rp.progress.pct > 0 && rp.progress.pct < 100 && rp.status !== "failed" && rp.status !== "completed");
 
-        if (!hasContent && !hasHtml) {
+        if (!hasHtml && !unifiedDone) {
           if (data.pageAnalysis?.status !== "completed") {
             setError(
               "Analyze this competitor’s landing page first (Get offer & page details), then come back here.",
             );
-          } else {
+          } else if (!inFlight) {
             await generateContent(false);
+          } else {
+            setGenerating(true);
+            setView("design");
           }
+        } else if (hasHtml) {
+          setView("design");
         }
       } catch (err) {
         if (!cancelled) setError((err as Error).message);
@@ -346,7 +358,12 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
 
   // Poll live progress while content/design work is running
   useEffect(() => {
-    if (!generating && !building) return;
+    const inFlight =
+      generating ||
+      building ||
+      page?.status === "pending" ||
+      page?.status === "design_pending";
+    if (!inFlight) return;
     let cancelled = false;
     const tick = async () => {
       try {
@@ -356,12 +373,25 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
         const data = await res.json();
         if (cancelled || !res.ok) return;
         const next = data.recreatedPage as RecreatedLandingPage | null;
-        if (next?.progress) {
+        if (next) {
           setPage((prev) =>
             prev
-              ? { ...prev, progress: next.progress, status: next.status }
+              ? {
+                  ...prev,
+                  ...next,
+                  progress: next.progress,
+                  status: next.status,
+                  html: next.html ?? prev.html,
+                  publishBlockers: next.publishBlockers,
+                  generatedImages: next.generatedImages ?? prev.generatedImages,
+                }
               : next,
           );
+          if (next.status === "completed" || next.status === "failed") {
+            setGenerating(false);
+            setBuilding(false);
+            if (next.html) setView("design");
+          }
         }
       } catch {
         // ignore poll errors
@@ -373,9 +403,9 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [building, competitorId, generating]);
+  }, [building, competitorId, generating, page?.status]);
 
-  const srcDoc = useMemo(() => page?.html || "", [page?.html]);
+  const srcDoc = useMemo(() => (page?.html ? stripDraftBanner(page.html) : ""), [page?.html]);
 
   function updateDocMeta(field: "title" | "description", value: string) {
     setContentDoc((prev) => {
@@ -437,17 +467,17 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
   );
   const progressMessage =
     page?.progress?.message ||
-    (building
-      ? "Fitting approved content into the page design…"
-      : generating
-        ? "Drafting full-page content for your brand…"
-        : loading
-          ? "Loading…"
-          : null);
+    (building || generating
+      ? "Creating content and design together…"
+      : loading
+        ? "Loading…"
+        : null);
+  const stages = page?.progress?.stages || [];
+  const details = page?.progress?.details;
 
   async function copyHtml() {
     if (!page?.html) return;
-    await navigator.clipboard.writeText(page.html);
+    await navigator.clipboard.writeText(stripDraftBanner(page.html));
     setCopied(true);
     setTimeout(() => setCopied(false), 1600);
   }
@@ -462,8 +492,10 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     a.download = `${(page.businessName || "landing-page")
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")}-recreated.html`;
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 2000);
   }
 
   const colors = page?.brandColors;
@@ -474,14 +506,16 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     loading ||
     refreshingColors ||
     regeneratingImageId !== null;
+  const isUnified = Boolean(page?.pipelineVersion?.startsWith("unified"));
   const canRegenerateDesign =
-    blocks.length > 0 &&
-    (page?.status === "content_ready" ||
-      page?.status === "completed" ||
-      page?.status === "failed" ||
-      page?.contentDraft?.status === "ready" ||
-      page?.contentDraft?.status === "approved");
+    Boolean(page?.html) ||
+    page?.status === "completed" ||
+    page?.status === "failed" ||
+    page?.status === "content_ready" ||
+    page?.status === "design_pending" ||
+    Boolean(page?.contentDraft?.status === "ready" || page?.contentDraft?.status === "approved");
   const showContentReview =
+    !isUnified &&
     view === "content" &&
     (Boolean(page?.contentPack) || blocks.length > 0) &&
     (page?.status === "content_ready" ||
@@ -537,7 +571,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
               </button>
             </>
           ) : null}
-          {page?.html ? (
+          {page?.html && !isUnified ? (
             <button
               type="button"
               className="ghost-btn"
@@ -556,11 +590,45 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
             onClick={() => void generateContent(true)}
           >
             {generating
-              ? "Writing content…"
-              : contentFeedback.trim()
-                ? "Regenerate content with feedback"
-                : "Regenerate content"}
+              ? "Creating page…"
+              : contentFeedback.trim() || designFeedback.trim()
+                ? "Regenerate page with feedback"
+                : "Regenerate page"}
           </button>
+          {(page?.generatedImages || []).some((image) => image.slotState === "failed") ? (
+            <button
+              type="button"
+              className="ghost-btn"
+              disabled={busy}
+              onClick={() => {
+                void (async () => {
+                  setError(null);
+                  setBuilding(true);
+                  try {
+                    const res = await fetch("/api/competitors/recreate-page", {
+                      method: "POST",
+                      headers: { "content-type": "application/json" },
+                      body: JSON.stringify({
+                        competitorId,
+                        action: "generate_missing_images",
+                      }),
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error || "Image generation failed");
+                    const next = data.competitor as CompetitorRecord;
+                    setCompetitor(next);
+                    syncFromPage(next.recreatedPage ?? null);
+                  } catch (err) {
+                    setError((err as Error).message);
+                  } finally {
+                    setBuilding(false);
+                  }
+                })();
+              }}
+            >
+              Generate missing images
+            </button>
+          ) : null}
           {canRegenerateDesign ? (
             <button
               type="button"
@@ -569,40 +637,70 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
               onClick={() => requestRegenerateDesign()}
             >
               {building
-                ? "Building design + images…"
+                ? "Updating page…"
                 : designFeedback.trim()
-                  ? "Regenerate design with feedback"
+                  ? "Apply design feedback"
                   : page?.html
-                    ? "Regenerate design"
-                    : "Build design"}
+                    ? "Request design changes"
+                    : "Create page"}
             </button>
           ) : null}
         </div>
       </header>
 
-      <div className="recreate-phases" aria-label="Recreation phases">
-        <span
-          className={
-            page?.status === "content_ready" ||
-            page?.contentDraft?.status === "ready" ||
-            blocks.length > 0
-              ? "recreate-phase is-active"
-              : "recreate-phase"
-          }
-        >
-          1 · Content
-        </span>
-        <span className="recreate-phase-sep" />
-        <span
-          className={
-            page?.status === "completed" && page.html
-              ? "recreate-phase is-active"
-              : "recreate-phase"
-          }
-        >
-          2 · Design fit
-        </span>
+      <div className="recreate-phases" aria-label="Recreation progress">
+        {stages.length ? (
+          stages.map((stage) => (
+            <span
+              key={stage.id}
+              className={
+                stage.status === "done" || stage.status === "active" || stage.status === "indeterminate"
+                  ? "recreate-phase is-active"
+                  : stage.status === "blocked"
+                    ? "recreate-phase is-blocked"
+                    : "recreate-phase"
+              }
+              title={stage.detail || undefined}
+            >
+              {stage.label}
+              {stage.status === "indeterminate" ? "…" : ""}
+            </span>
+          ))
+        ) : (
+          <>
+            <span className={page?.html ? "recreate-phase is-active" : "recreate-phase"}>
+              Content and design
+            </span>
+            <span className="recreate-phase-sep" />
+            <span
+              className={
+                page?.status === "completed" && page.html
+                  ? "recreate-phase is-active"
+                  : "recreate-phase"
+              }
+            >
+              Preview
+            </span>
+          </>
+        )}
       </div>
+      {details && (generating || building || page?.status === "design_pending") ? (
+        <p className="muted" style={{ margin: "0 0 12px" }}>
+          {[
+            details.sectionsIdentified != null ? `${details.sectionsIdentified} sections identified` : null,
+            details.brandAssetsCollected != null ? `${details.brandAssetsCollected} brand assets collected` : null,
+            details.imagesPlanned != null
+              ? `${details.imagesCompleted || 0}/${details.imagesPlanned} images`
+              : null,
+            details.imagesSkippedCredits
+              ? `${details.imagesSkippedCredits} skipped (credits)`
+              : null,
+            details.captureRetry ? "Capture required a retry" : null,
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+        </p>
+      ) : null}
 
       <section className="recreate-feedback panel">
         <div className="recreate-feedback-grid">
@@ -624,7 +722,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
               onChange={(e) => setContentFeedback(e.target.value)}
             />
             <p className="muted recreate-feedback-hint">
-              Used only when regenerating content.
+              Combined with design notes when regenerating the full page.
               {contentFeedback.trim()
                 ? ` · ${contentFeedback.trim().length}/4000`
                 : null}
@@ -648,8 +746,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
               onChange={(e) => setDesignFeedback(e.target.value)}
             />
             <p className="muted recreate-feedback-hint">
-              Used when approving or regenerating design — keeps approved content,
-              refits the layout.
+              Combined with content notes for a unified regenerate. Layout-only changes keep copy where possible.
               {designFeedback.trim()
                 ? ` · ${designFeedback.trim().length}/4000`
                 : null}
@@ -742,20 +839,22 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
         >
           {page.publishReady ? (
             <p>
-              Publish-ready — Download HTML strips the draft banner. CID coverage{" "}
-              {page.contentDraft?.cidCoverage != null
-                ? `${Math.round(page.contentDraft.cidCoverage * 100)}%`
-                : "n/a"}
-              .
+              {isUnified
+                ? "Ready — preview, Copy HTML, and Download HTML use the same packaged artifact."
+                : `Publish-ready — Download HTML strips the draft banner. CID coverage ${
+                    page.contentDraft?.cidCoverage != null
+                      ? `${Math.round(page.contentDraft.cidCoverage * 100)}%`
+                      : "n/a"
+                  }.`}
             </p>
           ) : (
             <p>
-              Publish checklist:{" "}
+              {isUnified ? "Review notes: " : "Publish checklist: "}
               {(page.publishBlockers || ["Review recommended"]).join(" · ")}
-              {page.contentDraft?.cidCoverage != null
+              {!isUnified && page.contentDraft?.cidCoverage != null
                 ? ` · CID ${Math.round(page.contentDraft.cidCoverage * 100)}%`
                 : ""}
-              {page.contentDraft?.unmatchedCidCount
+              {!isUnified && page.contentDraft?.unmatchedCidCount
                 ? ` · ${page.contentDraft.unmatchedCidCount} unmatched slots kept`
                 : ""}
             </p>
@@ -764,8 +863,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
       ) : null}
       {page?.sourceArchive && view === "content" ? (
         <p className="muted recreate-palette-note">
-          Design will reuse the locked archive ({page.sourceArchive.source},{" "}
-          {page.sourceArchive.nodeCount} CIDs) so content placements match.
+          Approved content stays locked. Design measures this competitor’s layout instead of pasting copy into its HTML.
         </p>
       ) : null}
 
@@ -789,8 +887,16 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
           </div>
           <div className="progress-bar-track offers-analysis-bar">
             <div
-              className="progress-bar-fill progress-bar-offers"
-              style={{ width: `${progressPct}%` }}
+              className={
+                page?.progress?.indeterminate
+                  ? "progress-bar-fill progress-bar-offers is-indeterminate"
+                  : "progress-bar-fill progress-bar-offers"
+              }
+              style={
+                page?.progress?.indeterminate
+                  ? undefined
+                  : { width: `${progressPct}%` }
+              }
             />
           </div>
           {progressMessage ? (
@@ -1056,8 +1162,12 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
               return (
                 <article key={image.id} className="recreate-image-card">
                   <div className="recreate-image-thumb">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={image.publicUrl} alt={image.label} />
+                    {image.publicUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={image.publicUrl} alt={image.label} />
+                    ) : (
+                      <p className="muted">{image.prompt}</p>
+                    )}
                   </div>
                   <div className="recreate-image-meta">
                     <strong>{image.label}</strong>

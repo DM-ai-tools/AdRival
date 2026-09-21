@@ -333,6 +333,8 @@ export interface JobProgress {
   target: number;
   rejected: number;
   message: string;
+  /** Set by Stop — durable across Next.js module duplicates; pipelines must halt. */
+  stopRequested?: boolean;
   /** Batch brand-review progress (set while stage === brand_review) */
   brandReviewDone?: number;
   brandReviewTotal?: number;
@@ -444,6 +446,8 @@ export interface LookupJobProgress {
   candidatesFound: number;
   adsFetched: number;
   pagesScanned: number;
+  /** Set by Stop — durable across Next.js module duplicates; pipelines must halt. */
+  stopRequested?: boolean;
   /** Offers analysis progress when stage === "analyzing_offers" */
   offersPhase?: string | null;
   offersDone?: number;
@@ -902,14 +906,40 @@ export interface GeneratedLandingImage {
   height?: number | null;
   createdAt: string;
   updatedAt: string;
+  /** Construction pipeline: planned → generating → validating → ready / failed / reused */
+  slotState?: "planned" | "generating" | "validating" | "ready" | "failed" | "reused";
+  provider?: string | null;
+  model?: string | null;
+  reused?: boolean;
+  validation?: string | null;
 }
+
+export type RecreationProgressDetails = {
+  sectionsIdentified?: number;
+  brandAssetsCollected?: number;
+  imagesCompleted?: number;
+  imagesPlanned?: number;
+  imagesSkippedCredits?: number;
+  captureRetry?: boolean;
+  logoEmbedded?: boolean;
+  logoWarnings?: string[];
+  screenshotWarnings?: string[];
+};
+
+export type RecreationProgressStage = {
+  id: string;
+  label: string;
+  status: "pending" | "active" | "done" | "skipped" | "blocked" | "indeterminate";
+  detail?: string | null;
+  weight?: number;
+};
 
 /** Generated HTML landing page for the user's brand, inspired by a competitor. */
 export interface RecreatedLandingPage {
   /**
    * pending — job started
-   * content_ready — OpenAI content draft ready for review
-   * design_pending — fitting approved content into layout
+   * content_ready — legacy content draft ready for review
+   * design_pending — unified generation or design in flight
    * completed — HTML ready
    * failed — error
    */
@@ -955,11 +985,19 @@ export interface RecreatedLandingPage {
   contentPack?: import("./pipeline/content/model").ContentPack | null;
   /** Approved revision used by the current HTML, if a design exists. */
   designContentRevision?: number | null;
+  /** Token for the in-flight or completed construction build. Older jobs must not overwrite a newer token. */
+  designBuildId?: string | null;
+  designRendererVersion?: string | null;
+  /** unified-1 = content+HTML in one Anthropic call; absent/legacy = older split pipeline */
+  pipelineVersion?: string | null;
   /** Live progress while content/design is running (polled by UI) */
   progress?: {
     phase: string;
     message: string;
     pct: number;
+    stages?: RecreationProgressStage[] | null;
+    indeterminate?: boolean;
+    details?: RecreationProgressDetails | null;
   } | null;
   error?: string | null;
 }

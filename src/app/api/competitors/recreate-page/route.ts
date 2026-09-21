@@ -11,10 +11,8 @@ import type {
 import {
   acceptContentProposal,
   approveRecreationContent,
-  buildRecreationDesign,
   confirmContentClaim,
   discardContentProposal,
-  generateRecreationContent,
   refreshBrandColorsForRecreation,
   regenerateContentSection,
   regenerateGeneratedImageForRecreation,
@@ -22,6 +20,11 @@ import {
   undoContentRevision,
   updateRecreationIntent,
 } from "@/lib/pipeline/recreateLandingPage";
+import {
+  generateMissingUnifiedImages,
+  isUnifiedRunActive,
+  runUnifiedRecreation,
+} from "@/lib/pipeline/unified/run";
 import { recreationActionPermission } from "@/lib/pipeline/content/permissions";
 import { draftIsCurrent } from "@/lib/pipeline/content/pageIntent";
 import type { CanonicalContent } from "@/lib/pipeline/content/model";
@@ -29,7 +32,7 @@ import { ContentRevisionError } from "@/lib/pipeline/content/revisions";
 import { sanitizeClientFacingText } from "@/lib/clientFacing";
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
+export const maxDuration = 600;
 
 export async function POST(request: Request) {
   try {
@@ -86,7 +89,27 @@ export async function POST(request: Request) {
         ? (body.document as LandingContentDocument)
         : undefined;
 
-    // Cached completed page with approved content
+    // Cached completed unified page
+    if (
+      (action === "generate_content" || action === "generate_page") &&
+      !body.force &&
+      !userFeedback &&
+      existing.recreatedPage?.pipelineVersion?.startsWith("unified") &&
+      existing.recreatedPage.status === "completed" &&
+      existing.recreatedPage.html
+    ) {
+      return NextResponse.json({ competitor: existing, cached: true });
+    }
+    if (
+      (action === "generate_content" || action === "generate_page") &&
+      !body.force &&
+      isUnifiedRunActive(existing.recreatedPage) &&
+      existing.recreatedPage?.pipelineVersion?.startsWith("unified")
+    ) {
+      return NextResponse.json({ competitor: existing, cached: true, inFlight: true });
+    }
+
+    // Cached completed page with approved content (legacy)
     if (
       action === "generate_content" &&
       !body.force &&
@@ -94,6 +117,7 @@ export async function POST(request: Request) {
       existing.recreatedPage?.contentPack &&
       !existing.recreatedPage.contentPack.legacy &&
       existing.recreatedPage.contentPack.canonical.sections.length > 0 &&
+      existing.recreatedPage.pipelineVersion !== "unified-1" &&
       draftIsCurrent(existing.recreatedPage.contentPack)
     ) {
       return NextResponse.json({ competitor: existing, cached: true });
@@ -211,26 +235,36 @@ export async function POST(request: Request) {
       return NextResponse.json({ competitor, cached: false });
     }
 
+    if (action === "generate_missing_images") {
+      const competitor = await billed("recreate.regenerate_image", () =>
+        generateMissingUnifiedImages(competitorId),
+      );
+      return NextResponse.json({ competitor, cached: false });
+    }
+
     if (
       action === "approve_and_build" ||
       action === "build_design" ||
-      action === "regenerate_design"
+      action === "regenerate_design" ||
+      action === "revise_page"
     ) {
-      const competitor = await billed("recreate.build_design", () =>
-        buildRecreationDesign(competitorId, {
+      const competitor = await billed("recreate.generate_page", () =>
+        runUnifiedRecreation(competitorId, {
+          force: true,
           userFeedback: userFeedback || undefined,
         }),
       );
       return NextResponse.json({ competitor, cached: false });
     }
 
-    // Default / regenerate_content / generate_content
-    const competitor = await billed("recreate.generate_content", () =>
-      generateRecreationContent(competitorId, {
+    // Default / regenerate_content / generate_content / generate_page → unified
+    const competitor = await billed("recreate.generate_page", () =>
+      runUnifiedRecreation(competitorId, {
         force:
           Boolean(body.force) ||
           Boolean(userFeedback) ||
-          action === "regenerate_content",
+          action === "regenerate_content" ||
+          action === "regenerate_page",
         userFeedback: userFeedback || undefined,
       }),
     );

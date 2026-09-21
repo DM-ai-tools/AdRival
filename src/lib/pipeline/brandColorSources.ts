@@ -629,6 +629,8 @@ export type FirecrawlBrandExtract = {
 
 /**
  * Firecrawl branding + links — primary brand identity source.
+ * Branding Format v2 improves logo extraction (Wix/Framer/background logos).
+ * @see https://www.firecrawl.dev/blog/branding-format-v2
  * @see https://docs.firecrawl.dev/features/scrape#extract-brand-identity
  */
 export async function extractColorsViaFirecrawl(

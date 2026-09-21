@@ -222,13 +222,17 @@ export async function generateGptImage2(input: {
           providerRequestId: task?.id ?? null,
         }),
       },
-      () =>
-        client.textToImage
-          .create({
-            ...basePayload,
-            ...(refs.length ? { referenceImages: refs as any } : {}),
-          })
-          .waitForTaskOutput({ timeout: 5 * 60 * 1000 }),
+      async () => {
+        const pending = client.textToImage.create({
+          ...basePayload,
+          ...(refs.length ? { referenceImages: refs as any } : {}),
+        });
+        const waiting = pending.waitForTaskOutput({ timeout: 5 * 60 * 1000 });
+        // The SDK can surface the same rejection on both handles. Attach a
+        // sink so a credit or validation failure stays on the awaited promise.
+        void Promise.resolve(pending).catch(() => undefined);
+        return waiting;
+      },
     );
   }
 
@@ -294,12 +298,16 @@ export async function generateGptImage2(input: {
       buffer,
     };
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/not have enough credits|insufficient credits/i.test(message)) {
+      throw new Error("Image generation is unavailable because the image account has no remaining credits.");
+    }
     if (err instanceof TaskFailedError) {
       const details = err.taskDetails as { failure?: string; failureCode?: string } | undefined;
       throw new Error(
-        `Runway image generation failed: ${details?.failure || details?.failureCode || err.message}`,
+        `Image generation failed: ${details?.failure || details?.failureCode || err.message}`,
       );
     }
-    throw err;
+    throw err instanceof Error ? err : new Error(message);
   }
 }

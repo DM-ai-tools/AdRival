@@ -2427,10 +2427,28 @@ a.lp-recreate-link {
   color: var(--accent, #0f7a6c);
 }
 
+.recreate-phase.is-blocked {
+  color: #b45309;
+}
+
 .recreate-phase-sep {
   width: 28px;
   height: 1px;
   background: var(--line);
+}
+
+.progress-bar-fill.is-indeterminate {
+  width: 36%;
+  animation: adrival-progress-indeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes adrival-progress-indeterminate {
+  0% {
+    transform: translateX(-40%);
+  }
+  100% {
+    transform: translateX(220%);
+  }
 }
 
 .recreate-content-review {

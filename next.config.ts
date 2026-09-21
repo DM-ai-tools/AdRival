@@ -3,7 +3,7 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   // Required for production Docker / Railway standalone image
   output: "standalone",
-  serverExternalPackages: ["exceljs"],
+  serverExternalPackages: ["exceljs", "playwright", "playwright-core"],
   eslint: {
     // Lint errors in the pipeline code should not block production builds.
     // Run `npm run lint` separately in CI to catch these.

@@ -160,27 +160,39 @@ export type FirecrawlScrapeResult = {
 };
 
 /**
- * Full-page screenshot of a URL via Firecrawl scrape screenshot format.
+ * Screenshot of a URL via Firecrawl scrape screenshot format.
+ * Prefer this over local Playwright when available — no browser process to manage.
+ * @see https://www.firecrawl.dev/glossary/web-scraping-apis/firecrawl-screenshot-instead-of-playwright
  * Returns a temporary HTTPS URL (or null when Firecrawl/key unavailable).
  */
 export async function firecrawlScrapeScreenshot(
   url: string,
-  options?: { fullPage?: boolean; quality?: number },
+  options?: {
+    fullPage?: boolean;
+    quality?: number;
+    /** Viewport for above-the-fold captures */
+    viewport?: { width: number; height: number };
+  },
 ): Promise<{ screenshotUrl: string | null; finalUrl: string | null }> {
   if (!hasFirecrawlKey()) {
     return { screenshotUrl: null, finalUrl: null };
   }
   const fullPage = options?.fullPage !== false;
   const quality = Math.min(100, Math.max(40, options?.quality ?? 72));
+  const screenshotFormat: Record<string, unknown> = {
+    type: "screenshot",
+    fullPage,
+    quality,
+  };
+  if (options?.viewport?.width && options?.viewport?.height) {
+    screenshotFormat.viewport = {
+      width: options.viewport.width,
+      height: options.viewport.height,
+    };
+  }
   const result = await firecrawlPost<FirecrawlScrapeResult>("/scrape", {
     url,
-    formats: [
-      {
-        type: "screenshot",
-        fullPage,
-        quality,
-      },
-    ],
+    formats: [screenshotFormat],
     onlyMainContent: false,
     waitFor: 2500,
     blockAds: true,
@@ -216,7 +228,9 @@ export async function firecrawlMapSite(
 
 /**
  * Brand identity scrape: branding + links + html + markdown.
+ * Uses Firecrawl Branding Format v2 for improved logo extraction.
  * Falls back to html/markdown/links when branding script crashes on the page.
+ * @see https://www.firecrawl.dev/blog/branding-format-v2
  * @see https://docs.firecrawl.dev/features/scrape#extract-brand-identity
  */
 export async function firecrawlScrapeBranding(
@@ -227,7 +241,7 @@ export async function firecrawlScrapeBranding(
       url,
       formats: ["branding", "links", "html", "markdown"],
       onlyMainContent: false,
-      waitFor: 2000,
+      waitFor: 2500,
       blockAds: true,
       proxy: "auto",
     });
@@ -253,7 +267,7 @@ export async function firecrawlScrapeBranding(
           url,
           formats: ["branding"],
           onlyMainContent: false,
-          waitFor: 2000,
+          waitFor: 2500,
           blockAds: true,
           proxy: "auto",
         });

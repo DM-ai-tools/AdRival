@@ -8,7 +8,10 @@ import type {
   SearchJob,
 } from "../types";
 import { getCompetitor, getJob, updateCompetitor, updateJob } from "../db";
-import { recreateFromArchive } from "./archive/recreateFromArchive";
+import { randomUUID } from "node:crypto";
+import { CONSTRUCT_RENDERER_VERSION, constructLandingPage, isStaleDesignWrite } from "./design/constructPage";
+import { captureLayoutEvidence } from "./design/captureLayout";
+import { alignLayoutEvidence, evidenceCoversSections } from "./design/layoutEvidence";
 import { resolveBrandBundle } from "./resolveBrandBundle";
 import { normalizeEditedContentDraft } from "./contentDraft";
 import { syncDocumentIntoBlocks } from "./markdownContentDraft";
@@ -59,11 +62,8 @@ import {
 } from "./content/revisions";
 import {
   assertDesignFeedbackIsLayoutOnly,
-  auditBuiltHtml,
   requireApprovedSnapshot,
 } from "./content/designGate";
-import { bindApprovedSnapshot } from "./design/bindApproved";
-import { packagePortableHtml } from "./design/packageHtml";
 
 function resolveBusinessUrl(job: SearchJob): string | null {
   const fromJob = (job.businessUrl || "").trim();
@@ -802,8 +802,16 @@ export function undoContentRevision(competitorId: string, expectedRevision: numb
   return updated;
 }
 
+class StaleDesignBuildError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StaleDesignBuildError";
+  }
+}
+
 /**
- * Phase 2 — fit approved content into the archived page design.
+ * Design stage — construct a new page from the approved revision.
+ * Competitor HTML is reference only and is not the output shell.
  */
 export async function buildRecreationDesign(
   competitorId: string,
@@ -830,6 +838,15 @@ export async function buildRecreationDesign(
   const draft = canonicalToDraft(snapshot, existing.contentDraft?.model || "approved");
   const previousHtml = existing.html || null;
   const previousStatus = existing.status;
+  const buildToken = randomUUID();
+  const fontFamily = ctx.job.businessProfile?.brandDesign?.typography?.fontFamilies?.heading
+    || ctx.job.businessProfile?.brandDesign?.fonts?.[0]
+    || null;
+  const bodyFont = ctx.job.businessProfile?.brandDesign?.typography?.fontFamilies?.primary
+    || fontFamily;
+  const radius = ctx.job.businessProfile?.brandDesign?.components?.buttonPrimary?.borderRadius
+    || ctx.job.businessProfile?.brandDesign?.spacing?.borderRadius
+    || null;
 
   const pending: RecreatedLandingPage = {
     ...existing,
@@ -837,9 +854,11 @@ export async function buildRecreationDesign(
     updatedAt: new Date().toISOString(),
     html: previousHtml,
     userFeedback: userFeedback || existing.userFeedback || null,
+    designBuildId: buildToken,
+    designRendererVersion: CONSTRUCT_RENDERER_VERSION,
     progress: {
       phase: "design",
-      message: "Fitting the approved content revision into the page design…",
+      message: "Constructing a new page from the approved revision…",
       pct: 20,
     },
     error: null,
@@ -847,66 +866,129 @@ export async function buildRecreationDesign(
   updateCompetitor(competitorId, { recreatedPage: pending });
 
   try {
-    const archived = await recreateFromArchive({
-      sourceUrl: ctx.sourceUrl,
-      businessUrl: ctx.businessUrl,
-      competitorName: ctx.competitor.pageName,
-      brandName: ctx.brandName,
-      keyword: existing.contentPack.intent?.primaryService || ctx.keyword,
-      profile: ctx.job.businessProfile || null,
-      userFeedback: null,
-      approvedContent: draft,
-      preferredColors:
-        ctx.job.businessProfile?.brandColors || existing.brandColors || null,
-      storedArchive: existing.sourceArchive || null,
-      forceRecapture: false,
-      allowLowCoverageFit: false,
+    const includedIds = snapshot.sections
+      .filter((section) => section.decision !== "omit" && section.decision !== "needs_input")
+      .map((section) => section.competitorSectionId)
+      .filter((id): id is string => Boolean(id));
+    let layoutEvidence = existing.contentPack.inventory?.layout || null;
+    if (!evidenceCoversSections(layoutEvidence, includedIds)) {
+      const measured = await captureLayoutEvidence(competitorRef.sourceUrl);
+      const hints = [
+        ...(existing.contentPack.inventory?.sections || []).map((section) => ({
+          id: section.id,
+          heading: section.sourceHeading,
+        })),
+        ...competitorRef.sections.map((section) => ({ id: section.id, heading: section.heading })),
+      ];
+      layoutEvidence = alignLayoutEvidence(measured, includedIds, hints);
+      if (existing.contentPack.inventory) {
+        existing.contentPack.inventory = { ...existing.contentPack.inventory, layout: layoutEvidence };
+      }
+    }
+    if (!layoutEvidence || layoutEvidence.incomplete || layoutEvidence.sections.length === 0) {
+      const reason = layoutEvidence?.gaps?.slice(-3).join(" ") || "No visual bands were measured.";
+      throw new Error(`Design is blocked because the competitor layout was not measured. ${reason}`);
+    }
+    const constructed = await constructLandingPage({
+      snapshot,
+      competitor: competitorRef,
+      inventory: existing.contentPack.inventory,
+      layoutEvidence,
+      colors: ctx.job.businessProfile?.brandColors || existing.brandColors,
+      assets: ctx.job.businessProfile?.brandAssets || null,
       competitorId,
+      keyword: existing.contentPack.intent?.primaryService || ctx.keyword || snapshot.serviceContext || "",
+      previousImages: existing.generatedImages || [],
+      fontFamily,
+      bodyFont,
+      radius,
+      browserValidate: true,
     });
-    const bound = bindApprovedSnapshot(archived.html, snapshot, competitorRef);
-    const packaged = packagePortableHtml(bound.html);
-    const html = packaged.html;
-    const mappingErrors = [
-      ...bound.blockers,
-      ...auditBuiltHtml(html, snapshot, competitorRef),
-      ...packaged.external
-        .filter((url) => url.includes(competitorRef.host))
-        .map((url) => `Competitor asset is still referenced: ${url}`),
-    ];
-    if (mappingErrors.length) {
+    if (constructed.blockers.length && !constructed.html) {
+      const ready = constructed.images.filter((image) => image.slotState === "ready" || image.slotState === "reused");
+      const kept = (existing.generatedImages || []).filter((image) => !ready.some((next) => next.id === image.id));
+      const current = getCompetitor(competitorId);
+      if (!isStaleDesignWrite(current?.recreatedPage?.designBuildId, buildToken)) {
+        updateCompetitor(competitorId, {
+          recreatedPage: {
+            ...existing,
+            status: previousHtml ? previousStatus : "failed",
+            html: previousHtml,
+            generatedImages: [...kept, ...ready],
+            contentPack: existing.contentPack,
+            error: `Design construction blocked. The last successful design was kept. ${constructed.blockers.slice(0, 6).join(" ")}`,
+            updatedAt: new Date().toISOString(),
+            progress: { phase: "failed", message: "Design was not exported.", pct: 0 },
+          },
+        });
+      }
       throw new Error(
-        `Design mapping blocked. The last successful design was kept. ${mappingErrors.join(" ")}`,
+        `Design construction blocked. The last successful design was kept. ${constructed.blockers.slice(0, 8).join(" ")}`,
       );
     }
+    if (constructed.blockers.length && constructed.html) {
+      const current = getCompetitor(competitorId);
+      if (isStaleDesignWrite(current?.recreatedPage?.designBuildId, buildToken)) {
+        throw new StaleDesignBuildError("A newer design build replaced this one. This result was discarded.");
+      }
+      const preview = updateCompetitor(competitorId, {
+        recreatedPage: {
+          ...pending,
+          status: "completed",
+          updatedAt: new Date().toISOString(),
+          html: constructed.html,
+          generatedImages: constructed.images,
+          contentPack: existing.contentPack,
+          differentiationNotes: constructed.notes.join(" "),
+          designBuildId: buildToken,
+          designRendererVersion: CONSTRUCT_RENDERER_VERSION,
+          publishReady: false,
+          publishBlockers: constructed.blockers,
+          error: null,
+          progress: { phase: "done", message: "Preview ready. Export is blocked until the listed issues are resolved.", pct: 100 },
+        },
+      });
+      if (!preview) throw new Error("Failed to save design preview");
+      return preview;
+    }
+    const html = constructed.html;
     const completed: RecreatedLandingPage = {
       ...pending,
       status: "completed",
       updatedAt: new Date().toISOString(),
-      brandColors: archived.brandColors,
+      brandColors: ctx.job.businessProfile?.brandColors || existing.brandColors,
       contentDraft: {
         ...draft,
         status: "approved",
         approvedAt: snapshot.approvedAt,
-        cidCoverage: archived.cidCoverage,
-        unmatchedCidCount: archived.unmatchedCidCount,
+        cidCoverage: null,
+        unmatchedCidCount: null,
       },
       contentPack: existing.contentPack,
+      sourceArchive: existing.sourceArchive || null,
       html,
-      generatedImages: archived.generatedImages,
-      differentiationNotes: `Design uses approved content revision ${snapshot.approvedRevision}. Layout colour and logo accuracy were not part of this content check.`,
-      designMd: archived.designMd || null,
+      generatedImages: constructed.images,
+      differentiationNotes: `Constructed page from approved revision ${snapshot.approvedRevision}. ${constructed.notes.join(" ")}`,
+      designMd: existing.designMd || null,
       designContentRevision: snapshot.approvedRevision,
-      publishReady: mappingErrors.length === 0 && archived.publishReady,
-      publishBlockers: mappingErrors.length
-        ? mappingErrors
-        : archived.publishBlockers,
+      designBuildId: buildToken,
+      designRendererVersion: CONSTRUCT_RENDERER_VERSION,
+      publishReady: true,
+      publishBlockers: [],
       progress: { phase: "done", message: "Design complete", pct: 100 },
       error: null,
     };
+    const current = getCompetitor(competitorId);
+    if (isStaleDesignWrite(current?.recreatedPage?.designBuildId, buildToken)) {
+      throw new StaleDesignBuildError("A newer design build replaced this one. This result was discarded.");
+    }
     const updated = updateCompetitor(competitorId, { recreatedPage: completed });
     if (!updated) throw new Error("Failed to save recreated page");
     return updated;
   } catch (err) {
+    if (err instanceof StaleDesignBuildError) throw err;
+    const current = getCompetitor(competitorId);
+    if (isStaleDesignWrite(current?.recreatedPage?.designBuildId, buildToken)) throw err;
     const message = err instanceof Error ? err.message : String(err);
     updateCompetitor(competitorId, {
       recreatedPage: {

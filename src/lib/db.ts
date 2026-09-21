@@ -127,7 +127,14 @@ export function readDb(): DatabaseShape {
 }
 
 export function isSearchJobSuppressed(jobId: string): boolean {
-  return suppressedSearchJobIds.has(jobId);
+  if (suppressedSearchJobIds.has(jobId)) return true;
+  // Durable across duplicate Next.js module instances (in-memory Set is not shared).
+  const job = ensureDb().jobs.find((j) => j.id === jobId);
+  if (job?.progress?.stopRequested) {
+    suppressedSearchJobIds.add(jobId);
+    return true;
+  }
+  return false;
 }
 
 /** Stop an in-flight keyword search (pipeline checks suppression each page). */
@@ -152,6 +159,7 @@ export function stopSearchJob(
           ...lj.progress,
           stage: "done",
           message: reason,
+          stopRequested: true,
           offersPhase: "failed",
           offersCurrentName: null,
         };
@@ -200,6 +208,7 @@ export function stopSearchJob(
         ...prev.progress,
         stage: hasRoster ? "done" : "failed",
         message: reason,
+        stopRequested: true,
         offersPhase: inOffers ? "failed" : prev.progress.offersPhase,
         offersCurrentName: null,
       },
@@ -211,7 +220,14 @@ export function stopSearchJob(
 }
 
 export function isLookupJobSuppressed(lookupId: string): boolean {
-  return suppressedLookupJobIds.has(lookupId);
+  if (suppressedLookupJobIds.has(lookupId)) return true;
+  // Durable across duplicate Next.js module instances (in-memory Set is not shared).
+  const job = ensureDb().lookupJobs?.find((j) => j.id === lookupId);
+  if (job?.progress?.stopRequested) {
+    suppressedLookupJobIds.add(lookupId);
+    return true;
+  }
+  return false;
 }
 
 export function listLookupJobs(limit = 200): LookupJob[] {
@@ -269,6 +285,7 @@ export function stopLookupJob(
         ...prev.progress,
         stage: hasAds ? "done" : "failed",
         message: reason,
+        stopRequested: true,
         offersPhase: inOffers ? "failed" : prev.progress.offersPhase,
         offersCurrentName: null,
       },
@@ -298,7 +315,7 @@ const LOOKUP_IN_FLIGHT_STAGES = new Set([
 ]);
 
 export function isSearchWorkInFlight(job: SearchJob): boolean {
-  if (suppressedSearchJobIds.has(job.id)) return false;
+  if (suppressedSearchJobIds.has(job.id) || job.progress?.stopRequested) return false;
   return (
     job.status === "running" ||
     SEARCH_IN_FLIGHT_STAGES.has(job.progress?.stage || "")
@@ -306,7 +323,7 @@ export function isSearchWorkInFlight(job: SearchJob): boolean {
 }
 
 export function isLookupWorkInFlight(job: LookupJob): boolean {
-  if (suppressedLookupJobIds.has(job.id)) return false;
+  if (suppressedLookupJobIds.has(job.id) || job.progress?.stopRequested) return false;
   return (
     job.status === "running" ||
     LOOKUP_IN_FLIGHT_STAGES.has(job.progress?.stage || "")
@@ -614,30 +631,36 @@ export function markPageSeen(pageId: string) {
 
 /** Persist a search job. Returns false if the run was deleted and must not resurrect. */
 export function saveJob(job: SearchJob): boolean {
-  if (suppressedSearchJobIds.has(job.id)) return false;
-  const db = ensureDb();
-  const idx = db.jobs.findIndex((j) => j.id === job.id);
-  if (idx >= 0) {
-    // Preserve competitorIds if a concurrent saveCompetitor already wrote them
-    const existing = db.jobs[idx];
-    const mergedIds = Array.from(
-      new Set([...(existing.competitorIds || []), ...(job.competitorIds || [])]),
-    );
-    db.jobs[idx] = {
-      ...job,
-      competitorIds: mergedIds,
-      // The API route stamps ownership before dispatching the pipeline; the
-      // pipeline's own writes don't carry it and must not erase it.
-      ownerUserId:
-        job.ownerUserId !== undefined ? job.ownerUserId : existing.ownerUserId,
-      spaceId: job.spaceId !== undefined ? job.spaceId : existing.spaceId,
-      archivedAt: job.archivedAt !== undefined ? job.archivedAt : existing.archivedAt,
-    };
-  } else {
-    db.jobs.unshift(job);
-  }
-  writeDb(db);
-  return true;
+  return withDbLock(() => {
+    const db = ensureDb();
+    const idx = db.jobs.findIndex((j) => j.id === job.id);
+    if (idx >= 0) {
+      const existing = db.jobs[idx];
+      if (suppressedSearchJobIds.has(job.id) || existing.progress?.stopRequested) {
+        suppressedSearchJobIds.add(job.id);
+        return false;
+      }
+      // Preserve competitorIds if a concurrent saveCompetitor already wrote them
+      const mergedIds = Array.from(
+        new Set([...(existing.competitorIds || []), ...(job.competitorIds || [])]),
+      );
+      db.jobs[idx] = {
+        ...job,
+        competitorIds: mergedIds,
+        // The API route stamps ownership before dispatching the pipeline; the
+        // pipeline's own writes don't carry it and must not erase it.
+        ownerUserId:
+          job.ownerUserId !== undefined ? job.ownerUserId : existing.ownerUserId,
+        spaceId: job.spaceId !== undefined ? job.spaceId : existing.spaceId,
+        archivedAt: job.archivedAt !== undefined ? job.archivedAt : existing.archivedAt,
+      };
+    } else {
+      if (suppressedSearchJobIds.has(job.id)) return false;
+      db.jobs.unshift(job);
+    }
+    writeDb(db);
+    return true;
+  });
 }
 
 export function getJob(id: string): SearchJob | null {
@@ -648,17 +671,23 @@ export function updateJob(
   id: string,
   patch: Partial<SearchJob>,
 ): SearchJob | null {
-  if (suppressedSearchJobIds.has(id)) return null;
-  const db = ensureDb();
-  const idx = db.jobs.findIndex((j) => j.id === id);
-  if (idx < 0) return null;
-  db.jobs[idx] = {
-    ...db.jobs[idx],
-    ...patch,
-    updatedAt: new Date().toISOString(),
-  };
-  writeDb(db);
-  return db.jobs[idx];
+  return withDbLock(() => {
+    const db = ensureDb();
+    const idx = db.jobs.findIndex((j) => j.id === id);
+    if (idx < 0) return null;
+    const existing = db.jobs[idx];
+    if (suppressedSearchJobIds.has(id) || existing.progress?.stopRequested) {
+      suppressedSearchJobIds.add(id);
+      return null;
+    }
+    db.jobs[idx] = {
+      ...existing,
+      ...patch,
+      updatedAt: new Date().toISOString(),
+    };
+    writeDb(db);
+    return db.jobs[idx];
+  });
 }
 
 export function listJobs(limit = 100): SearchJob[] {
@@ -775,13 +804,17 @@ export function clearAllHistory(): { removedRuns: number; removedCompetitors: nu
 /* ── Competitor name lookup (separate from keyword search history) ── */
 
 export function saveLookupJob(job: LookupJob): boolean {
-  if (suppressedLookupJobIds.has(job.id)) return false;
   return withDbLock(() => {
     const db = ensureDb();
     if (!db.lookupJobs) db.lookupJobs = [];
     const idx = db.lookupJobs.findIndex((j) => j.id === job.id);
     if (idx >= 0) {
       const existing = db.lookupJobs[idx];
+      // Refuse to revive a stopped run (in-memory Set alone is not cross-bundle safe).
+      if (suppressedLookupJobIds.has(job.id) || existing.progress?.stopRequested) {
+        suppressedLookupJobIds.add(job.id);
+        return false;
+      }
       const mergedIds = Array.from(
         new Set([...(existing.adIds || []), ...(job.adIds || [])]),
       );
@@ -796,6 +829,10 @@ export function saveLookupJob(job: LookupJob): boolean {
           job.archivedAt !== undefined ? job.archivedAt : existing.archivedAt,
       };
     } else {
+      if (suppressedLookupJobIds.has(job.id) || job.progress?.stopRequested) {
+        suppressedLookupJobIds.add(job.id);
+        return false;
+      }
       db.lookupJobs.unshift(job);
     }
     writeDb(db);
@@ -811,14 +848,18 @@ export function updateLookupJob(
   id: string,
   patch: Partial<LookupJob>,
 ): LookupJob | null {
-  if (suppressedLookupJobIds.has(id)) return null;
   return withDbLock(() => {
     const db = ensureDb();
     if (!db.lookupJobs) db.lookupJobs = [];
     const idx = db.lookupJobs.findIndex((j) => j.id === id);
     if (idx < 0) return null;
+    const existing = db.lookupJobs[idx];
+    if (suppressedLookupJobIds.has(id) || existing.progress?.stopRequested) {
+      suppressedLookupJobIds.add(id);
+      return null;
+    }
     db.lookupJobs[idx] = {
-      ...db.lookupJobs[idx],
+      ...existing,
       ...patch,
       updatedAt: new Date().toISOString(),
     };
@@ -851,20 +892,23 @@ export function saveLookupAd(ad: LookupAdRecord): boolean {
 export function saveLookupAds(ads: LookupAdRecord[]): boolean {
   if (!ads.length) return true;
   const lookupId = ads[0].lookupId;
-  if (suppressedLookupJobIds.has(lookupId)) return false;
   return withDbLock(() => {
     const db = ensureDb();
     if (!db.lookupAds) db.lookupAds = [];
     if (!db.lookupJobs) db.lookupJobs = [];
-    if (!db.lookupJobs.some((j) => j.id === lookupId)) return false;
     const job = db.lookupJobs.find((j) => j.id === lookupId);
+    if (!job) return false;
+    if (suppressedLookupJobIds.has(lookupId) || job.progress?.stopRequested) {
+      suppressedLookupJobIds.add(lookupId);
+      return false;
+    }
     for (const ad of ads) {
       const existing = db.lookupAds.findIndex((a) => a.id === ad.id);
       if (existing >= 0) db.lookupAds[existing] = ad;
       else db.lookupAds.unshift(ad);
-      if (job && !job.adIds.includes(ad.id)) job.adIds.push(ad.id);
+      if (!job.adIds.includes(ad.id)) job.adIds.push(ad.id);
     }
-    if (job) job.updatedAt = new Date().toISOString();
+    job.updatedAt = new Date().toISOString();
     writeDb(db);
     return true;
   });

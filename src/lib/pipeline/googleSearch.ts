@@ -98,12 +98,13 @@ async function fetchGoogleAdsPages(params: {
   domain?: string;
   region?: string;
   maxPages?: number;
+  /** Return false to abort further pages (e.g. user hit Stop). */
   onPage?: (info: {
     page: number;
     batch: number;
     total: number;
     estimate: number | null;
-  }) => void;
+  }) => void | boolean;
 }): Promise<{ ads: GoogleAdCreative[]; estimate: number | null }> {
   const out: GoogleAdCreative[] = [];
   const seen = new Set<string>();
@@ -129,12 +130,13 @@ async function fetchGoogleAdsPages(params: {
     }
     cursor = extractGoogleCursor(res);
     pages += 1;
-    params.onPage?.({
+    const cont = params.onPage?.({
       page: pages,
       batch: batch.length,
       total: out.length,
       estimate,
     });
+    if (cont === false) break;
   } while (cursor && pages < maxPages);
 
   return { ads: out, estimate };
@@ -1111,6 +1113,7 @@ export async function runGoogleFamilyLookup(
         domain,
         region: GOOGLE_ADS_REGION,
         onPage: ({ page, total, estimate: est }) => {
+          if (isLookupJobSuppressed(lookupId)) return false;
           job.progress.pagesScanned = page;
           job.progress.adsFetched = total;
           estimate = est ?? estimate;
@@ -1118,6 +1121,7 @@ export async function runGoogleFamilyLookup(
           saveLookupJob(job);
         },
       });
+      if (isLookupJobSuppressed(lookupId)) return;
       creatives = byDomain.ads;
       estimate = byDomain.estimate ?? estimate;
     } else if (!isDomain) {
@@ -1125,6 +1129,7 @@ export async function runGoogleFamilyLookup(
         advertiser_id: selected.pageId,
         region: GOOGLE_ADS_REGION,
         onPage: ({ page, total, estimate: est }) => {
+          if (isLookupJobSuppressed(lookupId)) return false;
           job.progress.pagesScanned = page;
           job.progress.adsFetched = total;
           estimate = est ?? estimate;
@@ -1132,6 +1137,7 @@ export async function runGoogleFamilyLookup(
           saveLookupJob(job);
         },
       });
+      if (isLookupJobSuppressed(lookupId)) return;
       creatives = byAdv.ads;
       estimate = byAdv.estimate ?? estimate;
     }
@@ -1156,12 +1162,14 @@ export async function runGoogleFamilyLookup(
           advertiser_id: advertiserId,
           region: GOOGLE_ADS_REGION,
           onPage: ({ page, total, estimate: est }) => {
+            if (isLookupJobSuppressed(lookupId)) return false;
             job.progress.pagesScanned += 1;
             estimate = est ?? estimate;
             job.progress.message = `Advertiser ${advertiserId}: page ${page}, ${total} ads${est != null ? ` (est. ${est})` : ""}…`;
             saveLookupJob(job);
           },
         });
+        if (isLookupJobSuppressed(lookupId)) return;
         for (const ad of byAdv.ads) merged.set(creativeKey(ad), ad);
         estimate = byAdv.estimate ?? estimate;
       }
