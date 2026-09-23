@@ -3,6 +3,7 @@ import { getDirectOpenAIClient } from "../openrouter/openaiCompat";
 import type { BusinessProfile, LookupCoreOfferLadder } from "../types";
 import {
   INDUSTRY_SOPS,
+  detectAgencySopRejectReason,
   resolveIndustrySop,
   type IndustrySop,
 } from "./industrySops";
@@ -169,6 +170,19 @@ export function guardCompetitorHeuristic(
       source: "heuristic",
       sopId: sop.id,
     };
+  }
+
+  // Digital marketing agencies: also reject AI tools / workshops that dodge narrow regexes
+  if (sop.id === "digital_marketing_agency") {
+    const extra = detectAgencySopRejectReason(text);
+    if (extra) {
+      return {
+        ok: false,
+        reason: `Industry SOP (${sop.label}) rejected competitor: ${extra}`,
+        source: "heuristic",
+        sopId: sop.id,
+      };
+    }
   }
 
   return {

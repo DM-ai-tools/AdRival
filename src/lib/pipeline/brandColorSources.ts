@@ -399,11 +399,23 @@ function assetsFromFirecrawl(input: {
   const favicon = input.branding?.images?.favicon || base.faviconUrl || null;
   const ogImage = input.branding?.images?.ogImage || base.ogImageUrl || null;
 
+  const brandingImages: BrandSiteAssets["images"] = [];
   if (logo && !base.images.some((i) => i.src === logo)) {
-    base.images = [
-      { src: logo, alt: base.siteName || "Logo", kind: "logo" as const },
-      ...base.images,
-    ];
+    brandingImages.push({ src: logo, alt: base.siteName || "Logo", kind: "logo" as const });
+  }
+  // Pull any additional absolute image URLs Firecrawl branding exposes (icons map, etc.).
+  const brandingIconBag = input.branding?.icons;
+  if (brandingIconBag && typeof brandingIconBag === "object") {
+    for (const value of Object.values(brandingIconBag)) {
+      const src = typeof value === "string" ? value.trim() : "";
+      if (!/^https?:\/\//i.test(src)) continue;
+      if (/favicon|apple-touch/i.test(src)) continue;
+      if (logo && src === logo) continue;
+      if (base.images.some((i) => i.src === src) || brandingImages.some((i) => i.src === src)) {
+        continue;
+      }
+      brandingImages.push({ src, alt: "Brand mark", kind: "logo" as const });
+    }
   }
 
   return {
@@ -412,6 +424,7 @@ function assetsFromFirecrawl(input: {
     faviconUrl: favicon,
     ogImageUrl: ogImage,
     siteName: base.siteName || input.title,
+    images: brandingImages.length ? [...brandingImages, ...base.images] : base.images,
     socialLinks: base.socialLinks.length
       ? base.socialLinks
       : socialLinksFromUrls(input.links),

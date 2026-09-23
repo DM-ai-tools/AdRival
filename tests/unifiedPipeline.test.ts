@@ -19,7 +19,10 @@ test("unified stages never report 100% before ready", () => {
 });
 
 test("unified response rejects incomplete HTML", () => {
-  assert.throws(() => parseUnifiedResponse('{"html":"<div>nope</div>","imageSlots":[]}'), /complete HTML/);
+  assert.throws(
+    () => parseUnifiedResponse('{"html":"<div>nope</div>","imageSlots":[]}'),
+    /could not be parsed|complete HTML|missing CSS/i,
+  );
 });
 
 test("unified response accepts a full document and skips factual image slots", () => {
@@ -61,15 +64,16 @@ test("validation packages the preview artifact", () => {
   assert.match(result.html, /<!DOCTYPE html>/i);
 });
 
-test("validation blocks competitor domain leakage", () => {
+test("validation rewrites competitor domain leakage", () => {
   const result = validateAndPackageUnifiedPage({
     html: "<!DOCTYPE html><html><head><style></style></head><body><header></header><main><section><a href=\"https://rival.example/x\">x</a></section></main><footer></footer></body></html>",
     clientHost: "client.example",
     competitorHost: "rival.example",
     logoRequired: false,
   });
-  assert.equal(result.ok, false);
-  assert.match(result.blockers.join(" "), /Competitor domain/);
+  assert.equal(result.blockers.some((item) => /Competitor domain/.test(item)), false);
+  assert.doesNotMatch(result.html.toLowerCase(), /rival\.example/);
+  assert.match(result.html, /client\.example/);
 });
 
 test("preview and download packaging stay identical for embedded assets", () => {
@@ -96,7 +100,7 @@ test("duplicate in-flight unified jobs are treated as active", () => {
       background: "#fff",
       text: "#000",
     },
-    pipelineVersion: "unified-1",
+    pipelineVersion: "unified-2",
   } as RecreatedLandingPage;
   assert.equal(isUnifiedRunActive(page), true);
   assert.equal(

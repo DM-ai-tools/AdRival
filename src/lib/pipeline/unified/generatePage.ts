@@ -1,10 +1,24 @@
 import { getAnthropicClient, getAnthropicModel } from "../../anthropic/client";
-import { parseUnifiedResponse, type UnifiedGenerationResponse } from "./contract";
-import type { UnifiedBrief } from "./brief";
+import {
+  assembleUnifiedHtml,
+  parseBodyBatch,
+  parseHeroPass,
+  parseUnifiedResponse,
+  type BodySectionFragment,
+  type UnifiedGenerationResponse,
+} from "./contract";
+import {
+  buildBodyBatchBrief,
+  buildDeterministicSpine,
+  buildHeroBrief,
+  parseUnifiedBriefPayload,
+  splitBriefSections,
+  type UnifiedBrief,
+} from "./brief";
 
 const SYSTEM = `You are a senior front-end developer and conversion copywriter rebuilding landing pages.
 
-You CLONE the competitor's VISUAL STRUCTURE from any attached Firecrawl screenshots (section order, hero composition, media placement, CTA placement, density) AND their CAMPAIGN OFFER TYPE (primaryOffer + CTA concept from campaignOffer). You DISCARD their identity, colours, type, verbatim copy, claims, testimonials, and imagery — then restyle with the CLIENT brand tokens.
+You CLONE the competitor's VISUAL STRUCTURE from any attached screenshots (section order, hero composition, media placement, CTA placement, density) AND their CAMPAIGN OFFER TYPE (primaryOffer + CTA concept from campaignOffer). You DISCARD their identity, colours, type, verbatim copy, claims, testimonials, and imagery — then restyle with the CLIENT brand tokens.
 
 Hard limits:
 - Screenshots (when attached) are authoritative for layout. Do NOT invent a generic agency/SaaS landing-page template.
@@ -15,17 +29,29 @@ Hard limits:
 - clientFacts are supporting evidence only — they must not override campaignOffer.
 - Use ONLY the brand brief / asset registry for identity, claims, destinations, and logos.
 - Put colours, radii, shadows, and fonts in :root CSS variables; no scattered raw hex later.
-- Prefer compact CSS. Avoid huge utility dumps. Finish a complete </html> inside valid JSON.
-- Company logo must use identityLogo src with data-logo-role="company" and object-fit:contain.
+- Prefer compact CSS. Avoid huge utility dumps.
+- Company logo must use src="{{ADRIVAL_IDENTITY_LOGO}}" with data-logo-role="company".
 - Proof logos only from proofLogos with data-logo-role="proof".
 - Illustrative slots: empty img with data-adrival-slot and a transparent 1x1 data URI; prompts say "no logos, no readable text".
-- Return ONE JSON object matching the outputContract. The html string must be complete.`;
+- Return ONE JSON object matching the outputContract for the current pass. Keep responses short and complete.`;
 
-function maxOutputTokens(): number {
+export type UnifiedPassId = "spine" | "hero" | "body" | "assemble" | "polish" | "compact";
+
+export type UnifiedProgressInfo = {
+  chars: number;
+  pass: UnifiedPassId;
+  label: string;
+  batchIndex?: number;
+  batchCount?: number;
+};
+
+function clampTokens(desired: number): number {
   const fromEnv = Number(process.env.ANTHROPIC_MAX_OUTPUT_TOKENS || "");
-  // Claude Sonnet 4/5 support large outputs; default high enough for full landing HTML.
-  if (Number.isFinite(fromEnv) && fromEnv >= 8000) return Math.min(Math.floor(fromEnv), 64000);
-  return 64000;
+  const envCap =
+    Number.isFinite(fromEnv) && fromEnv >= 4000
+      ? Math.floor(fromEnv)
+      : 24_000;
+  return Math.min(desired, envCap);
 }
 
 type StreamedMessage = {
@@ -48,15 +74,46 @@ async function streamUnifiedMessage(input: {
   model: string;
   maxTokens: number;
   content: ContentPart[];
+  onProgress?: (info: { chars: number }) => void;
+  signal?: AbortSignal;
 }): Promise<StreamedMessage> {
+  if (input.signal?.aborted) {
+    const err = new Error("Recreation stopped");
+    err.name = "AbortError";
+    throw err;
+  }
   const client = getAnthropicClient();
-  const stream = client.messages.stream({
-    model: input.model,
-    max_tokens: input.maxTokens,
-    system: SYSTEM,
-    messages: [{ role: "user", content: input.content }],
+  const stream = client.messages.stream(
+    {
+      model: input.model,
+      max_tokens: input.maxTokens,
+      system: SYSTEM,
+      messages: [{ role: "user", content: input.content }],
+    },
+    input.signal ? { signal: input.signal } : undefined,
+  );
+  let chars = 0;
+  let lastEmit = 0;
+  stream.on("text", (delta: string) => {
+    chars += delta.length;
+    const now = Date.now();
+    if (now - lastEmit >= 8_000) {
+      lastEmit = now;
+      try {
+        input.onProgress?.({ chars });
+      } catch {
+        /* ignore */
+      }
+    }
   });
   const message = await stream.finalMessage();
+  if (chars > 0) {
+    try {
+      input.onProgress?.({ chars });
+    } catch {
+      /* ignore */
+    }
+  }
   return message as StreamedMessage;
 }
 
@@ -64,10 +121,10 @@ function textFromMessage(message: StreamedMessage): string {
   return message.content.map((block) => (block.type === "text" ? block.text || "" : "")).join("\n");
 }
 
-function buildUserContent(active: UnifiedBrief): ContentPart[] {
+function buildUserContent(active: UnifiedBrief, instruction: string): ContentPart[] {
   const content: ContentPart[] = [];
-  // One fold screenshot is enough for layout guidance and keeps generation fast.
-  for (const tile of active.imageTiles.slice(0, 1)) {
+  // Prefer fold + full-page when available for accurate section replication.
+  for (const tile of active.imageTiles.slice(0, 2)) {
     content.push({
       type: "image",
       source: {
@@ -79,21 +136,12 @@ function buildUserContent(active: UnifiedBrief): ContentPart[] {
   }
   content.push({
     type: "text",
-    text: `${active.text}
-
-${
-  active.imageTiles.length
-    ? "The image above is a Firecrawl above-the-fold screenshot. Clone its hero/CTA/nav rhythm — do not invent a generic template."
-    : "No screenshot attached; still clone competitorSections + campaignOffer and avoid a stock template."
-}
-Obey campaignOffer for the hero CTA and primary offer — rewrite for the client brand.
-Use :root tokens and the provided identity logo data URI when present.
-Max ${active.compact ? 2 : 3} imageSlots. Return valid JSON with a complete </html> before stopping.`,
+    text: `${active.text}\n\n${instruction}`,
   });
   return content;
 }
 
-function tryParse(raw: string): UnifiedGenerationResponse | null {
+function tryParseFull(raw: string): UnifiedGenerationResponse | null {
   try {
     return parseUnifiedResponse(raw);
   } catch {
@@ -101,107 +149,313 @@ function tryParse(raw: string): UnifiedGenerationResponse | null {
   }
 }
 
+function assertNotAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    const err = new Error("Recreation stopped");
+    err.name = "AbortError";
+    throw err;
+  }
+}
+
+/** Body sections in small batches so every inventory section is generated. */
+const BODY_BATCH_SIZE = 3;
+
 export async function generateUnifiedPage(
   brief: UnifiedBrief,
-  options?: { compactBrief?: UnifiedBrief | null },
+  options?: {
+    compactBrief?: UnifiedBrief | null;
+    onProgress?: (info: UnifiedProgressInfo) => void;
+    signal?: AbortSignal;
+  },
 ): Promise<{
   response: UnifiedGenerationResponse;
   rawLength: number;
   model: string;
 }> {
   if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error("Anthropic is not configured. Set ANTHROPIC_API_KEY to generate the page.");
+    throw new Error("Content generation is not configured. Contact your administrator.");
   }
   const model = getAnthropicModel();
-  const maxTokens = maxOutputTokens();
+  console.info(`[unified] lean multipass generate model=${model}`);
 
-  const runOnce = async (active: UnifiedBrief) =>
-    streamUnifiedMessage({
-      model,
-      maxTokens,
-      content: buildUserContent(active),
+  const emit = (info: UnifiedProgressInfo) => {
+    try {
+      options?.onProgress?.(info);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const runPass = async (input: {
+    brief: UnifiedBrief;
+    pass: UnifiedPassId;
+    label: string;
+    maxTokens: number;
+    instruction: string;
+    batchIndex?: number;
+    batchCount?: number;
+  }) => {
+    assertNotAborted(options?.signal);
+    emit({
+      chars: 0,
+      pass: input.pass,
+      label: input.label,
+      batchIndex: input.batchIndex,
+      batchCount: input.batchCount,
     });
-
-  let completion = await runOnce(brief);
-  let raw = textFromMessage(completion);
-  let parsed = tryParse(raw);
-
-  const needsCompact =
-    !parsed ||
-    completion.stop_reason === "max_tokens";
-
-  if (needsCompact) {
-    console.warn(
-      `[unified] ${
-        completion.stop_reason === "max_tokens"
-          ? "generation truncated"
-          : "JSON parse failed"
-      }; retrying with compact brief (no screenshots)`,
+    console.info(
+      `[unified] pass=${input.pass} max_tokens=${clampTokens(input.maxTokens)} briefChars=${input.brief.text.length} images=${input.brief.imageTiles.length}`,
     );
-    const compactBrief: UnifiedBrief =
-      options?.compactBrief || {
-        ...brief,
-        compact: true,
-        imageTiles: [],
-        text: `COMPACT MODE: fewer sections, shorter CSS, still clone campaignOffer + section order. Finish valid JSON with complete </html>.\n${brief.text.slice(0, 28_000)}`,
-      };
-    completion = await runOnce({
-      ...compactBrief,
-      compact: true,
-      imageTiles: [],
+    const completion = await streamUnifiedMessage({
+      model,
+      maxTokens: clampTokens(input.maxTokens),
+      content: buildUserContent(input.brief, input.instruction),
+      signal: options?.signal,
+      onProgress: ({ chars }) =>
+        emit({
+          chars,
+          pass: input.pass,
+          label: `${input.label}${chars ? ` · ${Math.max(1, Math.round(chars / 1000))}k chars` : ""}`,
+          batchIndex: input.batchIndex,
+          batchCount: input.batchCount,
+        }),
     });
-    raw = textFromMessage(completion);
-    parsed = tryParse(raw);
+    return { raw: textFromMessage(completion), stopReason: completion.stop_reason };
+  };
+
+  const payload = parseUnifiedBriefPayload(brief);
+  const imageBudget = Math.min(Number(payload.imageBudget) || 1, 1);
+  const { bodySections: bodyPlan } = splitBriefSections(payload);
+
+  // ——— Pass A: deterministic spine (no Claude call) ———
+  emit({ chars: 0, pass: "spine", label: "Design spine (local tokens)" });
+  const spine = buildDeterministicSpine(brief);
+
+  // ——— Pass B: Hero + chrome (screenshot) — single attempt ———
+  const heroBrief = buildHeroBrief(brief, spine.css);
+  const heroResult = await runPass({
+    brief: heroBrief,
+    pass: "hero",
+    label: "Hero + fold chrome",
+    maxTokens: 12_000,
+    instruction: heroBrief.imageTiles.length
+      ? "Pass B. Clone the attached competitor screenshot(s) for header + hero. REQUIRED JSON: { headerHtml, heroHtml, footerHtml, imageSlots, title, description }. headerHtml = logo + ONLY destinationRegistry.nav (short menu labels, never headlines/slogans) + one CTA. footerHtml = competitor-shaped multi-column footer with destinationRegistry.footer. Include the single lead form when competitorSections has kind=form."
+      : "Pass B. No screenshot — clone campaignOffer + hero. REQUIRED JSON: { headerHtml, heroHtml, footerHtml, imageSlots, title, description }. headerHtml = logo + destinationRegistry.nav + CTA. footerHtml = full multi-column footer.",
+  });
+  let hero = (() => {
+    try {
+      return parseHeroPass(heroResult.raw);
+    } catch (err) {
+      console.warn("[unified] hero parse failed", err);
+      return null;
+    }
+  })();
+  // One cheap retry only if completely unusable (no screenshot on retry to save vision cost).
+  if (!hero) {
+    const retryBrief = { ...heroBrief, imageTiles: [] as UnifiedBrief["imageTiles"] };
+    const retry = await runPass({
+      brief: retryBrief,
+      pass: "hero",
+      label: "Hero (text retry)",
+      maxTokens: 10_000,
+      instruction:
+        "RETRY Pass B. Return JSON with headerHtml (<header> logo+nav+CTA), heroHtml (<section>), REQUIRED footerHtml (<footer> multi-column), and at most 1 imageSlot. No invented ratings.",
+    });
+    hero = parseHeroPass(retry.raw);
+  }
+  if (!hero) {
+    throw new Error("Hero pass failed to produce usable header/hero HTML.");
   }
 
-  if (!parsed) {
-    if (completion.stop_reason === "max_tokens") {
-      throw new Error(
-        "The model response was truncated before the page was complete. Try regenerating, or set ANTHROPIC_MAX_OUTPUT_TOKENS higher.",
+  // ——— Pass C: body sections in batches covering the full inventory ———
+  const bodyFragments: BodySectionFragment[] = [];
+  const allWarnings = [...hero.warnings];
+  const allUnresolved = [...hero.unresolvedRequirements];
+  let usedSlots = hero.imageSlots.length;
+  let bodyRawChars = 0;
+
+  const runBodyBatch = async (
+    batch: typeof bodyPlan,
+    batchIndex: number,
+    batchCount: number,
+  ) => {
+    if (!batch.length) return;
+    const remaining = Math.max(0, imageBudget - usedSlots);
+    const batchBrief = buildBodyBatchBrief({
+      base: brief,
+      spineCss: spine.css,
+      batchSections: batch as Array<Record<string, unknown>>,
+      priorSectionSummaries: bodyFragments.map((s) => ({ id: s.id, heading: s.heading })),
+      heroHeading: hero!.title || null,
+      remainingImageBudget: remaining,
+      batchIndex,
+      batchCount,
+    });
+    // Attach full-page screenshot so body sections match competitor layout.
+    if (brief.imageTiles.length) {
+      batchBrief.imageTiles = brief.imageTiles.slice(0, 2);
+    }
+    const from = batchIndex * BODY_BATCH_SIZE + 1;
+    const to = batchIndex * BODY_BATCH_SIZE + batch.length;
+    const label = `Body sections (${from}–${to} of ${bodyPlan.length})`;
+    let batchRaw = await runPass({
+      brief: batchBrief,
+      pass: "body",
+      label,
+      maxTokens: 18_000,
+      instruction:
+        "Pass C. Use attached competitor screenshot(s) to clone each section's layout AND content density. Return JSON { sections: [{ id, html, heading, purpose, imageSlots }] }. One entry for EVERY competitorSections id — never omit. Each html is a <section> fragment only. Match columns/media/density from the screenshot. Keep card/list copy as long as the competitor (do not thin to one short line). Compact CSS. Use lockedCss variables only. Include the single form only for the section that has kind=form — build it from competitorForm fields, never a 3-field template.",
+      batchIndex,
+      batchCount,
+    });
+    bodyRawChars += batchRaw.raw.length;
+    let parsedBatch = (() => {
+      try {
+        return parseBodyBatch(batchRaw.raw);
+      } catch {
+        return null;
+      }
+    })();
+    if (!parsedBatch) {
+      console.warn(`[unified] body batch ${batchIndex + 1} parse failed; retrying once`);
+      batchRaw = await runPass({
+        brief: batchBrief,
+        pass: "body",
+        label: `${label} (retry)`,
+        maxTokens: 12_000,
+        instruction:
+          "RETRY Pass C. Return ONLY JSON { sections: [{ id, html, heading, purpose, imageSlots }] } with one compact <section> per requested id.",
+        batchIndex,
+        batchCount,
+      });
+      bodyRawChars += batchRaw.raw.length;
+      parsedBatch = parseBodyBatch(batchRaw.raw);
+    }
+    const returnedIds = new Set(parsedBatch.sections.map((s) => s.id));
+    for (const section of parsedBatch.sections) {
+      if (bodyFragments.some((existing) => existing.id === section.id)) continue;
+      bodyFragments.push(section);
+      usedSlots += section.imageSlots.length;
+    }
+    allWarnings.push(...parsedBatch.warnings);
+    allUnresolved.push(...parsedBatch.unresolvedRequirements);
+    const missingInBatch = batch
+      .map((s) => String((s as { id?: string }).id || ""))
+      .filter((id) => id && !returnedIds.has(id));
+    if (missingInBatch.length) {
+      allWarnings.push(
+        `Body batch ${batchIndex + 1} omitted section ids: ${missingInBatch.join(", ")}.`,
       );
     }
-    throw new Error("The model response JSON could not be parsed. The page was not marked complete.");
+  };
+
+  if (bodyPlan.length) {
+    const batchCount = Math.max(1, Math.ceil(bodyPlan.length / BODY_BATCH_SIZE));
+    for (let batchIndex = 0; batchIndex < batchCount; batchIndex += 1) {
+      const batch = bodyPlan.slice(
+        batchIndex * BODY_BATCH_SIZE,
+        (batchIndex + 1) * BODY_BATCH_SIZE,
+      );
+      await runBodyBatch(batch, batchIndex, batchCount);
+    }
+
+    // Fill-in pass for any sections still missing after the main batches.
+    const haveIds = new Set(bodyFragments.map((s) => s.id));
+    const missing = bodyPlan.filter(
+      (s) => String((s as { id?: string }).id || "") && !haveIds.has(String((s as { id?: string }).id)),
+    );
+    if (missing.length) {
+      allWarnings.push(
+        `Retrying ${missing.length} missing body section(s): ${missing
+          .map((s) => (s as { id?: string }).id)
+          .join(", ")}.`,
+      );
+      await runBodyBatch(missing, batchCount, batchCount + 1);
+    }
+  }
+
+  const finalHave = new Set(bodyFragments.map((s) => s.id));
+  const stillMissing = bodyPlan
+    .map((s) => String((s as { id?: string }).id || ""))
+    .filter((id) => id && !finalHave.has(id));
+  if (stillMissing.length) {
+    allUnresolved.push(
+      `Sections not generated after retries: ${stillMissing.join(", ")}.`,
+    );
+  }
+
+  // ——— Pass D: Deterministic assemble (no polish call) ———
+  emit({ chars: 0, pass: "assemble", label: "Assembling page" });
+  assertNotAborted(options?.signal);
+  let assembled = assembleUnifiedHtml({
+    spine,
+    hero,
+    bodySections: bodyFragments,
+    imageBudget,
+  });
+  assembled = {
+    ...assembled,
+    warnings: [
+      ...assembled.warnings,
+      ...allWarnings,
+      "Continuity polish skipped to conserve generation budget.",
+    ],
+    unresolvedRequirements: [...assembled.unresolvedRequirements, ...allUnresolved],
+  };
+
+  if (!assembled.html || !/<\/html>/i.test(assembled.html)) {
+    throw new Error("The page could not be assembled from the generated sections.");
   }
 
   return {
-    response: parsed,
-    rawLength: raw.length,
+    response: assembled,
+    rawLength: heroResult.raw.length + bodyRawChars,
     model,
   };
+}
+
+/** Thrown when a full-page repair hits the output limit. Callers should keep the assembled page. */
+export class UnifiedRepairIncompleteError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnifiedRepairIncompleteError";
+  }
 }
 
 export async function repairUnifiedPage(input: {
   html: string;
   defects: string[];
   briefText?: string;
+  signal?: AbortSignal;
 }): Promise<{ response: UnifiedGenerationResponse; model: string }> {
   if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error("Anthropic is not configured. Set ANTHROPIC_API_KEY to repair the page.");
+    throw new Error("Content generation is not configured. Contact your administrator.");
   }
   const model = getAnthropicModel();
   const completion = await streamUnifiedMessage({
     model,
-    maxTokens: maxOutputTokens(),
+    maxTokens: clampTokens(24_000),
+    signal: input.signal,
     content: [{
       type: "text",
-      text: `Repair this landing page. Keep correct content and unaffected sections. Preserve :root tokens, logo roles, and layout variety.
+      text: `Repair this landing page. Keep correct content and unaffected sections. Preserve :root tokens, logo roles, and layout variety. Return the complete document — do not stop mid-tag.
 Defects to fix:
-${input.defects.map((item, index) => `${index + 1}. ${item}`).join("\n")}
-${input.briefText ? `\nOriginal brief constraints (abridged):\n${input.briefText.slice(0, 6000)}` : ""}
+${input.defects.slice(0, 8).map((item, index) => `${index + 1}. ${item}`).join("\n")}
 
 Current HTML:
-${input.html.slice(0, 60000)}
+${input.html.slice(0, 28_000)}
 
-Return the same JSON outputContract with a complete repaired HTML document.`,
+Return JSON with a complete repaired HTML document ending in </html>.`,
     }],
   });
   const raw = textFromMessage(completion);
-  const parsed = tryParse(raw);
-  if (!parsed) {
-    if (completion.stop_reason === "max_tokens") {
-      throw new Error("The repair response was truncated before the page was complete.");
-    }
-    throw new Error("The model response JSON could not be parsed. The page was not marked complete.");
+  const parsed = tryParseFull(raw);
+  if (!parsed || !/<\/html>/i.test(parsed.html || "")) {
+    throw new UnifiedRepairIncompleteError(
+      completion.stop_reason === "max_tokens"
+        ? "The repair response was truncated before the page was complete."
+        : "The repair response could not be parsed as a complete page.",
+    );
   }
   return { response: parsed, model };
 }

@@ -36,6 +36,33 @@ export interface IndustrySop {
   llmGuidance: string;
 }
 
+export function detectAgencySopRejectReason(text: string): string | null {
+  const toolSignals = [
+    /alternative to .{0,40}(ad |marketing )?agency/i,
+    /replace(s| your)? .{0,20}(ad |marketing )?agency/i,
+    /smarter alternative to/i,
+    /\bAI\b.{0,60}\b(tool|platform|software|app|automation|suite)\b/i,
+    /\b(ad|ads|advertising)\s+(tool|software|platform|app)\b/i,
+    /\b(self[- ]?serve|self[- ]?service)\b/i,
+    /\b(free trial|start (a )?free trial)\b/i,
+    /\b(chrome|browser)\s+extension\b/i,
+    /\bdiy\b/i,
+  ];
+  const eduSignals = [
+    /\b(workshop|webinar|masterclass|bootcamp|cohort)\b/i,
+    /\b(online )?course\b/i,
+    /\b(training (day|program|session)|academy)\b/i,
+    /\bcoaching (program|community|group|call)\b/i,
+  ];
+  for (const re of toolSignals) {
+    if (re.test(text)) return `tool/product signal /${re.source}/`;
+  }
+  for (const re of eduSignals) {
+    if (re.test(text)) return `education/workshop signal /${re.source}/`;
+  }
+  return null;
+}
+
 export const INDUSTRY_SOPS: IndustrySop[] = [
   {
     id: "digital_marketing_agency",
@@ -59,34 +86,54 @@ export const INDUSTRY_SOPS: IndustrySop[] = [
     ],
     excludeCompetitorTypes: [
       "SaaS tools / software platforms",
+      "AI ad tools / automation products that replace agencies",
       "white-label / reseller platforms",
       "ad tech / automation tools",
-      "courses, academies, coaching",
+      "courses, academies, coaching, workshops, webinars",
       "podcasts / media brands",
       "freelancers posing as productized tools",
+      "DIY / self-serve ad platforms",
     ],
     excludeOfferTypes: [
-      "online courses / masterclasses",
+      "online courses / masterclasses / workshops / webinars",
       "podcasts / newsletters as the offer",
       "SaaS free trials for tools (not agency services)",
       "white-label partner programs",
       "job listings / hiring creatives",
+      "info-product / coaching funnels that are not agency retainers",
     ],
     competitorRejectPatterns: [
       "white[- ]?label",
       "whitelabel",
       "saas",
       "software platform",
+      "software (tool|product|app)",
+      "ad[- ]?tech",
       "ad tool",
+      "ads? (tool|software|platform|app)",
       "automation tool",
+      "ai[- ]?(powered[- ]?)?(ad|ads|advertising)?[- ]?(tool|platform|software|app|suite)",
+      "\\bai[- ]powered\\b",
+      "alternative to .{0,40}(ad |marketing )?agency",
+      "replace(s| your)? .{0,20}(ad |marketing )?agency",
+      "smarter alternative to",
       "chrome extension",
-      "free trial.*(tool|software|platform)",
-      "self[- ]?serve platform",
+      "browser extension",
+      "free trial.*(tool|software|platform|app)",
+      "self[- ]?serve",
+      "self[- ]?service (ads?|platform|tool)",
+      "diy (ad|ads|marketing|setup)",
       "podcast",
       "masterclass",
       "online course",
+      "\\bcourse\\b",
+      "workshop",
+      "webinar",
       "bootcamp",
+      "cohort",
       "certification program",
+      "training (day|program|session|course)",
+      "coaching (program|community|group)",
       "affiliate dashboard",
       "partner portal",
     ],
@@ -94,8 +141,11 @@ export const INDUSTRY_SOPS: IndustrySop[] = [
       "podcast",
       "masterclass",
       "online course",
+      "\\bcourse\\b",
+      "workshop",
+      "webinar",
       "course enrollment",
-      "join (our|the) course",
+      "join (our|the) (course|workshop|webinar|cohort)",
       "bootcamp",
       "white[- ]?label",
       "become a partner",
@@ -103,9 +153,12 @@ export const INDUSTRY_SOPS: IndustrySop[] = [
       "free (saas|software) trial",
       "download (our )?app",
       "subscribe to (our )?newsletter",
+      "diy (ad|ads|marketing)",
+      "self[- ]?serve",
+      "alternative to .{0,40}agency",
     ],
     llmGuidance:
-      "Accept only agencies that sell marketing services to businesses. Reject ad-tech tools, white-label platforms, course sellers, and podcast/media brands even if they mention Google Ads.",
+      "Accept only agencies that sell marketing services to businesses (done-for-you retainers / managed ads). Reject AI/SaaS ad tools, white-label platforms, workshops/webinars/courses/coaching, DIY self-serve products, and podcast/media brands — even if they mention Google Ads or Meta Ads.",
   },
   {
     id: "saas_b2b",

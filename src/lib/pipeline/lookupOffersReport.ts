@@ -34,6 +34,10 @@ import {
   buildGuardrailContext,
   filterOfferLaddersWithGuardrail,
 } from "../guardrails";
+import {
+  serviceKeywordOverlapScore,
+  type ServiceSignalOptions,
+} from "../openai/analyzer";
 
 function getOffersLlmClient(): {
   client: OpenAI;
@@ -79,23 +83,135 @@ function fingerprint(s: string): string {
   return s.slice(0, 160);
 }
 
+function extractPriceFromText(blob: string): string | null {
+  return (
+    blob.match(
+      /(?:\$|₹|£|€|AUD\s*|USD\s*)\s?\d[\d,]*(?:\.\d+)?(?:\s*\/\s*(?:mo|month|wk|week|yr|year))?/i,
+    )?.[0] || null
+  );
+}
+
+function isWeakOfferLabel(offer: string): boolean {
+  const t = offer.trim();
+  if (!t || t === "—" || t.length < 6) return true;
+  // "$99 · Get offer" / "$2 · Apply now"
+  if (
+    /^(?:\$|₹|£|€)\s?\d[\d,.]*(?:\s*\/\s*\w+)?\s*[·•|\-–—]\s*/i.test(t) &&
+    t.length < 48
+  ) {
+    return true;
+  }
+  if (
+    /^(get offer|learn more|see details|apply now|shop now|sign up|click here|get started|book now)$/i.test(
+      t,
+    )
+  ) {
+    return true;
+  }
+  // Price alone
+  if (/^(?:\$|₹|£|€)\s?\d[\d,.]*(?:\s*\/\s*\w+)?$/i.test(t)) return true;
+  return false;
+}
+
+function cleanOfferSentence(raw: string): string {
+  return raw
+    .replace(/\s+/g, " ")
+    .replace(/^[\s·•|\-–—]+|[\s·•|\-–—]+$/g, "")
+    .trim();
+}
+
+/**
+ * Build a human-readable offer promise (service/deal), not "price · CTA".
+ * Pricing is returned separately for the pricing field.
+ */
+function heuristicOfferParts(
+  title?: string | null,
+  body?: string | null,
+  cta?: string | null,
+): { offer: string; pricing: string | null } {
+  const titleClean = cleanOfferSentence(title || "");
+  const bodyClean = cleanOfferSentence(body || "");
+  const blob = `${titleClean} ${bodyClean}`.trim();
+  const pricing = extractPriceFromText(blob);
+  const free = /\b(free\s+(?:[a-z][a-z\s]{2,40}?))\b/i.exec(blob)?.[1] || null;
+  const service = heuristicService(titleClean, bodyClean, null);
+
+  const titleIsCtaOnly =
+    !titleClean ||
+    /^(learn more|get offer|see details|apply now|shop now|sign up|click here|get started)$/i.test(
+      titleClean,
+    ) ||
+    (Boolean(pricing) &&
+      titleClean.length < 28 &&
+      /^(?:\$|₹|£|€)/.test(titleClean));
+
+  let promise: string | null = null;
+  if (free) {
+    promise = cleanOfferSentence(free);
+  } else if (!titleIsCtaOnly && titleClean.length >= 12 && titleClean.length <= 120) {
+    promise = titleClean;
+  } else if (service && bodyClean) {
+    const clause =
+      bodyClean
+        .split(/[.!?\n]/)
+        .map((s) => s.trim())
+        .find((s) => s.length >= 20 && s.length <= 140) || null;
+    if (clause && !isWeakOfferLabel(clause)) {
+      promise = `${service}: ${clause.replace(new RegExp(pricing || "____", "i"), "").trim()}`.replace(
+        /:\s*$/,
+        "",
+      );
+      promise = cleanOfferSentence(promise).slice(0, 140);
+    } else {
+      promise = service;
+    }
+  } else if (service) {
+    promise = service;
+  } else if (bodyClean.length >= 24) {
+    promise = bodyClean.slice(0, 120) + (bodyClean.length > 120 ? "…" : "");
+  }
+
+  if (promise) {
+    promise = cleanOfferSentence(
+      promise
+        .replace(
+          /(?:\$|₹|£|€|AUD\s*|USD\s*)\s?\d[\d,]*(?:\.\d+)?(?:\s*\/\s*(?:mo|month|wk|week|yr|year))?/gi,
+          "",
+        )
+        .replace(/\s{2,}/g, " ")
+        .replace(/\s*[·•|\-–—]\s*$/g, ""),
+    );
+  }
+
+  if (!promise || isWeakOfferLabel(promise)) {
+    if (service && pricing) {
+      return { offer: `${service} from ${pricing}`, pricing };
+    }
+    if (service) return { offer: service, pricing };
+    if (pricing && cta && !isWeakOfferLabel(`${cta}`)) {
+      return { offer: `${cleanOfferSentence(cta)} (${pricing})`, pricing };
+    }
+    return {
+      offer: promise || cta || "See ad creative",
+      pricing,
+    };
+  }
+
+  if (pricing && !promise.toLowerCase().includes(pricing.toLowerCase())) {
+    // Keep promise clear; price lives in pricing field — optionally light touch:
+    if (promise.length < 50 && service) {
+      return { offer: promise, pricing };
+    }
+  }
+  return { offer: promise.slice(0, 140), pricing };
+}
+
 function heuristicOffer(
   title?: string | null,
   body?: string | null,
   cta?: string | null,
 ): string {
-  const blob = `${title || ""} ${body || ""}`.replace(/\s+/g, " ").trim();
-  const price =
-    blob.match(
-      /(?:\$|₹|£|€|AUD\s*|USD\s*)\s?\d[\d,]*(?:\.\d+)?(?:\s*\/\s*(?:mo|month|yr|year))?/i,
-    )?.[0] || null;
-  const free = /\b(free\s+(?:audit|consult|quote|trial|assessment)|complimentary)\b/i.exec(
-    blob,
-  )?.[0];
-  const bits = [free, price, cta].filter(Boolean);
-  if (bits.length) return bits.join(" · ");
-  if (blob.length >= 20) return blob.slice(0, 140) + (blob.length > 140 ? "…" : "");
-  return cta || "See ad creative";
+  return heuristicOfferParts(title, body, cta).offer;
 }
 
 function heuristicFunnelStage(
@@ -237,6 +353,7 @@ type CreativeEnrichment = {
   cta: string | null;
   serviceTargeted: string | null;
   funnelStage: FunnelStage;
+  pricing?: string | null;
 };
 
 const creativeLlmSchema = z.object({
@@ -245,6 +362,7 @@ const creativeLlmSchema = z.object({
       id: z.string(),
       hook: z.string(),
       offer: z.string(),
+      pricing: z.string().nullable().optional(),
       cta: z.string().nullable().optional(),
       serviceTargeted: z.string().nullable().optional(),
       funnelStage: z.enum(["TOFU", "MOFU", "BOFU", "unknown"]).optional(),
@@ -257,13 +375,14 @@ async function enrichCreativeClusters(
 ): Promise<Map<string, CreativeEnrichment>> {
   const map = new Map<string, CreativeEnrichment>();
   for (const c of clusters) {
-    const offer = heuristicOffer(c.title, c.body, c.cta);
+    const parts = heuristicOfferParts(c.title, c.body, c.cta);
     map.set(c.id, {
       hook: extractAdHook(c.title, c.body),
-      offer,
+      offer: parts.offer,
       cta: c.cta,
-      serviceTargeted: heuristicService(c.title, c.body, offer),
-      funnelStage: heuristicFunnelStage(c.title, c.body, c.cta, offer),
+      serviceTargeted: heuristicService(c.title, c.body, parts.offer),
+      funnelStage: heuristicFunnelStage(c.title, c.body, c.cta, parts.offer),
+      pricing: parts.pricing,
     });
   }
   const llm = getOffersLlmClient();
@@ -277,15 +396,16 @@ async function enrichCreativeClusters(
       messages: [
         {
           role: "system",
-          content: `You analyze advertising creatives for a competitor lookup report.
+          content: `You analyze advertising creatives for a competitor offers report.
 For each creative cluster extract:
 - hook: attention-grabbing opening / pain / curiosity (1 short sentence)
-- offer: what they promise or sell (deal, service, price, freebie) — 1 short phrase
+- offer: the CLEAR product/service/deal promise in ≤14 words. MUST say what the visitor gets (e.g. "Free Google Ads audit", "Car finance from $99/wk", "SEO retainer for local clinics"). NEVER return bare price+CTA like "$99 · Get offer" or "Learn more".
+- pricing: price string if present in copy, else null (keep price OUT of the offer when possible)
 - cta: call-to-action button/text if present (or null)
 - serviceTargeted: the product/service category being sold (short label)
 - funnelStage: TOFU (awareness), MOFU (consideration/lead magnet), BOFU (conversion), or unknown
 Keep wording concrete. Do not invent prices not in the copy.
-Return JSON: { "items": [{ "id", "hook", "offer", "cta", "serviceTargeted", "funnelStage" }] }`,
+Return JSON: { "items": [{ "id", "hook", "offer", "pricing", "cta", "serviceTargeted", "funnelStage" }] }`,
         },
         {
           role: "user",
@@ -309,7 +429,20 @@ Return JSON: { "items": [{ "id", "hook", "offer", "cta", "serviceTargeted", "fun
     for (const item of parsed.data.items) {
       if (!item.id) continue;
       const prev = map.get(item.id);
-      const offer = (item.offer || "").trim() || prev?.offer || "—";
+      const cluster = clusters.find((c) => c.id === item.id);
+      const fallback = cluster
+        ? heuristicOfferParts(cluster.title, cluster.body, cluster.cta)
+        : { offer: prev?.offer || "—", pricing: prev?.pricing || null };
+      let offer = (item.offer || "").trim() || fallback.offer;
+      let pricing =
+        (item.pricing || "").trim() ||
+        fallback.pricing ||
+        prev?.pricing ||
+        null;
+      if (isWeakOfferLabel(offer)) {
+        offer = fallback.offer;
+        pricing = pricing || fallback.pricing;
+      }
       map.set(item.id, {
         hook: (item.hook || "").trim() || prev?.hook || "—",
         offer,
@@ -317,6 +450,7 @@ Return JSON: { "items": [{ "id", "hook", "offer", "cta", "serviceTargeted", "fun
         serviceTargeted:
           (item.serviceTargeted || "").trim() || prev?.serviceTargeted || null,
         funnelStage: item.funnelStage || prev?.funnelStage || "unknown",
+        pricing,
       });
     }
   } catch (err) {
@@ -404,6 +538,7 @@ type LpBucket = {
   matchKey: string;
   url: string;
   ads: LookupAdRecord[];
+  relevanceScore?: number;
 };
 
 function mostCommonDestinationUrl(ads: LookupAdRecord[]): string {
@@ -423,7 +558,32 @@ function mostCommonDestinationUrl(ads: LookupAdRecord[]): string {
   );
 }
 
-function clusterLandingPages(ads: LookupAdRecord[]): LpBucket[] {
+function landingPageBucketText(bucket: LpBucket): string {
+  const adText = bucket.ads
+    .slice(0, 8)
+    .map((a) => `${a.title || ""} ${a.body || ""} ${a.ctaText || ""}`)
+    .join("\n");
+  return `${bucket.url}\n${adText}`.slice(0, 4000);
+}
+
+function scoreLandingPageBucket(
+  bucket: LpBucket,
+  signals?: ServiceSignalOptions | null,
+): number {
+  if (!signals) return 0;
+  const copyScore = serviceKeywordOverlapScore(
+    landingPageBucketText(bucket),
+    signals,
+  );
+  const urlScore = serviceKeywordOverlapScore(bucket.url, signals);
+  // Prefer path/keyword hits slightly; volume is applied later as a separate sort key.
+  return Math.min(1, copyScore * 0.75 + urlScore * 0.35);
+}
+
+function clusterLandingPages(
+  ads: LookupAdRecord[],
+  signals?: ServiceSignalOptions | null,
+): LpBucket[] {
   const buckets = new Map<string, LpBucket>();
   for (const ad of ads) {
     const url = ad.landingPageUrl || ad.youtubeUrl || null;
@@ -445,8 +605,19 @@ function clusterLandingPages(ads: LookupAdRecord[]): LpBucket[] {
     buckets.set(key, { matchKey: key, url, ads: [ad] });
   }
   return [...buckets.values()]
-    .map((b) => ({ ...b, url: mostCommonDestinationUrl(b.ads) || b.url }))
-    .sort((a, b) => b.ads.length - a.ads.length);
+    .map((b) => {
+      const url = mostCommonDestinationUrl(b.ads) || b.url;
+      const withUrl = { ...b, url };
+      return {
+        ...withUrl,
+        relevanceScore: scoreLandingPageBucket(withUrl, signals),
+      };
+    })
+    .sort(
+      (a, b) =>
+        (b.relevanceScore || 0) - (a.relevanceScore || 0) ||
+        b.ads.length - a.ads.length,
+    );
 }
 
 function creativeToLeaf(
@@ -666,12 +837,14 @@ const EMPTY_LADDER_MSG = "No value ladder found for this core offer";
 /**
  * Build one value ladder per unique landing-page (core) offer.
  * Map relevant ad-copy offers under each core; if none map, mark empty.
+ * When service signals exist, rank cores by keyword/service relevance first.
  */
 async function buildValueLadder(input: {
   adOffers: LookupUniqueOfferLine[];
   lpOffers: LookupUniqueOfferLine[];
   creatives: LookupUniqueAdCreative[];
   pages: LookupUniqueLandingPage[];
+  signals?: ServiceSignalOptions | null;
 }): Promise<{
   ladders: LookupCoreOfferLadder[];
   summary: string | null;
@@ -686,21 +859,34 @@ async function buildValueLadder(input: {
     ticketTier: OfferTicketTier;
     landingPageUrl: string | null;
     urls: string[];
+    relevanceScore: number;
   }> = [];
+
+  const scoreCoreText = (text: string) =>
+    input.signals ? serviceKeywordOverlapScore(text, input.signals) : 0;
 
   if (input.lpOffers.length > 0) {
     for (const o of input.lpOffers) {
       if (!normalizeOfferKey(o.offer)) continue;
+      if (isWeakOfferLabel(o.offer) && !o.pricing) continue;
+      const offerLabel = isWeakOfferLabel(o.offer)
+        ? o.sampleHooks?.[0] && !isWeakOfferLabel(o.sampleHooks[0])
+          ? o.sampleHooks[0]
+          : o.offer
+        : o.offer;
       coreSources.push({
-        offer: o.offer,
+        offer: offerLabel,
         adCount: o.adCount,
         cta: o.cta || null,
         pricing: o.pricing || null,
         funnelStage: o.funnelStage || "unknown",
         ticketTier:
-          o.ticketTier || heuristicTicketTier(o.offer, o.pricing, o.cta),
+          o.ticketTier || heuristicTicketTier(offerLabel, o.pricing, o.cta),
         landingPageUrl: o.urls?.[0] || null,
         urls: o.urls || [],
+        relevanceScore: scoreCoreText(
+          `${offerLabel} ${o.pricing || ""} ${(o.sampleHooks || []).join(" ")}`,
+        ),
       });
     }
   } else {
@@ -709,21 +895,36 @@ async function buildValueLadder(input: {
       if (p.status !== "completed" || !p.primaryOffer) continue;
       const key = normalizeOfferKey(p.primaryOffer);
       if (!key) continue;
+      const uvp = (p.uniqueValueProps || [])[0] || "";
+      const offerLabel =
+        isWeakOfferLabel(p.primaryOffer) && uvp
+          ? `${p.primaryOffer.replace(/[·•].*$/, "").trim()} — ${uvp}`.slice(
+              0,
+              140,
+            )
+          : p.primaryOffer;
       const prev = byKey.get(key);
       if (prev) {
         prev.adCount += p.adCount;
         if (p.url && !prev.urls.includes(p.url)) prev.urls.push(p.url);
+        prev.relevanceScore = Math.max(
+          prev.relevanceScore,
+          scoreCoreText(`${offerLabel} ${p.summary || ""} ${uvp}`),
+        );
         continue;
       }
       byKey.set(key, {
-        offer: p.primaryOffer,
+        offer: offerLabel,
         adCount: p.adCount,
         cta: p.cta || null,
         pricing: p.pricing || null,
         funnelStage: p.funnelStage || "unknown",
-        ticketTier: heuristicTicketTier(p.primaryOffer, p.pricing, p.cta),
+        ticketTier: heuristicTicketTier(offerLabel, p.pricing, p.cta),
         landingPageUrl: p.url,
         urls: [p.url],
+        relevanceScore: scoreCoreText(
+          `${offerLabel} ${p.headline || ""} ${p.summary || ""} ${uvp} ${p.serviceTargeted || ""}`,
+        ),
       });
     }
     coreSources.push(...byKey.values());
@@ -736,11 +937,32 @@ async function buildValueLadder(input: {
     unknown: 2,
   };
 
-  const cores = [...coreSources].sort(
+  const hasSignals = Boolean(
+    input.signals &&
+      ((input.signals.searchKeywords || []).length > 0 ||
+        input.signals.selectedCategory ||
+        input.signals.businessProfile),
+  );
+
+  let cores = [...coreSources].sort(
     (a, b) =>
+      b.relevanceScore - a.relevanceScore ||
       (tierRank[a.ticketTier] || 2) - (tierRank[b.ticketTier] || 2) ||
       b.adCount - a.adCount,
   );
+
+  // When we know the service, drop cores with zero relevance if stronger ones exist.
+  if (hasSignals) {
+    const relevant = cores.filter((c) => c.relevanceScore > 0);
+    if (relevant.length > 0) {
+      cores = [
+        ...relevant,
+        ...cores.filter((c) => c.relevanceScore === 0).slice(0, 2),
+      ];
+    }
+  }
+  // Cap ladders so the dashboard stays focused
+  cores = cores.slice(0, 12);
 
   const pageMatchKeysForCore = (coreKey: string, urls: string[]) => {
     const keys = new Set<string>();
@@ -810,14 +1032,16 @@ async function buildValueLadder(input: {
       }
     }
 
-    // 3) Ad-copy unique offers that semantically relate to this core
-    //    (and are not already stronger matches for another core — assigned here if overlap ≥ 0.35)
+    // 3) Ad-copy unique offers that relate to this core (+ keyword boost)
     for (const line of input.adOffers) {
-      const score = overlapScore(core.offer, line.offer);
+      const semantic = overlapScore(core.offer, line.offer);
+      const kwBoost = input.signals
+        ? serviceKeywordOverlapScore(line.offer, input.signals) * 0.25
+        : 0;
+      const score = semantic + kwBoost;
       if (score < 0.35) continue;
       const id = `line:${normalizeOfferKey(line.offer)}`;
       if (seen.has(id)) continue;
-      // Prefer URL overlap when available
       const urlHit = (line.urls || []).some((u) => {
         const k = landingPageMatchKey(u);
         return Boolean(k && matchKeys.has(k));
@@ -837,7 +1061,15 @@ async function buildValueLadder(input: {
       });
     }
 
-    const adOffers = [...seen.values()].sort((a, b) => b.adCount - a.adCount);
+    const adOffers = [...seen.values()].sort((a, b) => {
+      const ra = input.signals
+        ? serviceKeywordOverlapScore(a.offer, input.signals)
+        : 0;
+      const rb = input.signals
+        ? serviceKeywordOverlapScore(b.offer, input.signals)
+        : 0;
+      return rb - ra || b.adCount - a.adCount;
+    });
     const empty = adOffers.length === 0;
 
     return {
@@ -862,7 +1094,7 @@ async function buildValueLadder(input: {
   let summary: string | null =
     ladders.length === 0
       ? "No value ladder found — analyze landing pages to extract core offers."
-      : `${ladders.length} core landing-page offer${ladders.length === 1 ? "" : "s"} with mapped ad-copy ladders.`;
+      : `${ladders.length} core landing-page offer${ladders.length === 1 ? "" : "s"} ranked by service relevance.`;
 
   const ladderLlm = getOffersLlmClient();
   if (ladderLlm && ladders.length > 0) {
@@ -876,15 +1108,25 @@ async function buildValueLadder(input: {
             role: "system",
             content: `You write short summaries for competitive offer value ladders.
 Each ladder already has a fixed coreOffer (landing-page offer) and mapped adOffers.
+Write details that name the product/service clearly (not just price or CTA).
 Return JSON: { "summary": string, "detailsByCoreId": { "<id>": "one sentence" } }.
 Do not invent new cores. For cores with empty adOffers, details must say they have no mapped ad-copy ladder.`,
           },
           {
             role: "user",
             content: JSON.stringify({
+              serviceContext: input.signals
+                ? {
+                    keywords: input.signals.searchKeywords || [],
+                    category: input.signals.selectedCategory?.label || null,
+                    offerings:
+                      input.signals.businessProfile?.offerings || [],
+                  }
+                : null,
               ladders: ladders.map((l) => ({
                 id: l.id,
                 coreOffer: l.coreOffer,
+                pricing: l.pricing,
                 ticketTier: l.ticketTier,
                 adOfferCount: l.adOffers.length,
                 sampleAdOffers: l.adOffers.slice(0, 4).map((a) => a.offer),
@@ -936,9 +1178,12 @@ export async function buildLookupOffersReport(
     forceReanalyzePages?: boolean;
     maxLandingPages?: number;
     maxCreativeClusters?: number;
+    /** Keyword / service signals for LP + ladder relevance ranking */
+    relevance?: ServiceSignalOptions | null;
   },
 ): Promise<LookupOffersReport> {
   const now = new Date().toISOString();
+  const signals = options?.relevance || null;
   const ads = getLookupAds(lookupId);
   if (ads.length === 0) {
     return {
@@ -963,7 +1208,7 @@ export async function buildLookupOffersReport(
   // Progress units: creatives(1) + each LP analyzed + ladder(1)
   const lpCap = options?.maxLandingPages ?? MAX_LP_TO_ANALYZE;
   const creativeCap = options?.maxCreativeClusters ?? MAX_CREATIVE_CLUSTERS;
-  const lpBucketsPreview = clusterLandingPages(ads);
+  const lpBucketsPreview = clusterLandingPages(ads, signals);
   const lpWorkCount = Math.min(lpBucketsPreview.length, lpCap);
   const totalUnits = 2 + lpWorkCount; // creatives + LPs + ladder
   let doneUnits = 0;
@@ -1047,10 +1292,13 @@ export async function buildLookupOffersReport(
   );
   const creatives: LookupUniqueAdCreative[] = clusters.map((c) => {
     const hit = enriched.get(c.id);
+    const parts = heuristicOfferParts(c.title, c.body, c.cta);
+    let offer = hit?.offer || parts.offer;
+    if (isWeakOfferLabel(offer)) offer = parts.offer;
     return {
       id: c.id,
       hook: hit?.hook || extractAdHook(c.title, c.body),
-      offer: hit?.offer || heuristicOffer(c.title, c.body, c.cta),
+      offer,
       sampleCopy: `${c.title}${c.body ? ` — ${c.body.slice(0, 160)}` : ""}`.slice(
         0,
         220,
@@ -1065,17 +1313,38 @@ export async function buildLookupOffersReport(
   });
 
   const adCopyOffers = dedupeOfferLines(
-    creatives.map((c) => ({
-      offer: c.offer,
-      source: "ad_copy" as const,
-      adCount: c.adCount,
-      sampleHooks: [c.hook],
-      urls: c.landingPageUrl ? [c.landingPageUrl] : undefined,
-      funnelStage: c.funnelStage,
-      ticketTier: heuristicTicketTier(c.offer, null, c.cta),
-      cta: c.cta ?? null,
-    })),
-  );
+    creatives.map((c) => {
+      const cluster = clusters.find((x) => x.id === c.id);
+      const pricing =
+        enriched.get(c.id)?.pricing ||
+        (cluster
+          ? heuristicOfferParts(cluster.title, cluster.body, cluster.cta)
+              .pricing
+          : null);
+      return {
+        offer: c.offer,
+        source: "ad_copy" as const,
+        adCount: c.adCount,
+        sampleHooks: [c.hook],
+        urls: c.landingPageUrl ? [c.landingPageUrl] : undefined,
+        funnelStage: c.funnelStage,
+        ticketTier: heuristicTicketTier(c.offer, pricing, c.cta),
+        cta: c.cta ?? null,
+        pricing,
+      };
+    }),
+  ).sort((a, b) => {
+    if (!signals) return b.adCount - a.adCount;
+    const ra = serviceKeywordOverlapScore(
+      `${a.offer} ${a.pricing || ""} ${(a.sampleHooks || []).join(" ")}`,
+      signals,
+    );
+    const rb = serviceKeywordOverlapScore(
+      `${b.offer} ${b.pricing || ""} ${(b.sampleHooks || []).join(" ")}`,
+      signals,
+    );
+    return rb - ra || b.adCount - a.adCount;
+  });
 
   // —— Unique landing pages ——
   const lpBuckets = lpBucketsPreview;
@@ -1152,6 +1421,12 @@ export async function buildLookupOffersReport(
           o.cta,
           o.primaryOffer,
         ),
+        relevanceScore: bucket.relevanceScore ?? null,
+        serviceTargeted: heuristicService(
+          o.headline,
+          o.primaryOffer,
+          o.primaryOffer,
+        ),
       } satisfies LookupUniqueLandingPage);
     }
 
@@ -1169,6 +1444,7 @@ export async function buildLookupOffersReport(
           error:
             analysis?.error || "Landing page analysis returned no offer",
           sampleAdId: representative.id,
+          relevanceScore: bucket.relevanceScore ?? null,
         } satisfies LookupUniqueLandingPage);
       }
       return finishOne({
@@ -1190,6 +1466,12 @@ export async function buildLookupOffersReport(
           o.cta,
           o.primaryOffer,
         ),
+        relevanceScore: bucket.relevanceScore ?? null,
+        serviceTargeted: heuristicService(
+          o.headline,
+          o.primaryOffer,
+          o.primaryOffer,
+        ),
       } satisfies LookupUniqueLandingPage);
     } catch (err) {
       return finishOne({
@@ -1200,6 +1482,7 @@ export async function buildLookupOffersReport(
         primaryOffer: null,
         error: err instanceof Error ? err.message : String(err),
         sampleAdId: representative.id,
+        relevanceScore: bucket.relevanceScore ?? null,
       } satisfies LookupUniqueLandingPage);
     }
   });
@@ -1210,14 +1493,19 @@ export async function buildLookupOffersReport(
     adCount: b.ads.length,
     status: "skipped",
     primaryOffer: null,
-    error: `Skipped (analyzed top ${lpCap} destinations by ad volume)`,
+    error: `Skipped (analyzed top ${lpCap} destinations by service relevance, then ad volume)`,
     sampleAdId: b.ads[0]?.id || null,
+    relevanceScore: b.relevanceScore ?? null,
   }));
 
   const pages = attachAdsToPages(
     [...analyzedPages, ...skippedPages],
     creatives,
     lpBuckets,
+  ).sort(
+    (a, b) =>
+      (b.relevanceScore || 0) - (a.relevanceScore || 0) ||
+      b.adCount - a.adCount,
   );
   const lpOffers = dedupeOfferLines(
     pages
@@ -1248,11 +1536,14 @@ export async function buildLookupOffersReport(
     lpOffers,
     creatives,
     pages,
+    signals,
   });
   const lookupJob = getLookupJob(lookupId);
   const guardCtx = buildGuardrailContext({
-    businessProfile: lookupJob?.businessProfile || null,
-    searchKeywords: null,
+    businessProfile:
+      signals?.businessProfile || lookupJob?.businessProfile || null,
+    selectedCategoryLabel: signals?.selectedCategory?.label || null,
+    searchKeywords: signals?.searchKeywords || null,
     skipGuardrails: false,
   });
   const filteredLadders = filterOfferLaddersWithGuardrail(
@@ -1368,6 +1659,7 @@ export async function runLookupOffersReportPhase(
     finalStatus?: "completed" | "partial";
     maxLandingPages?: number;
     maxCreativeClusters?: number;
+    relevance?: ServiceSignalOptions | null;
     onProgress?: OffersProgressHook;
   },
 ): Promise<LookupJob | null> {
@@ -1416,6 +1708,16 @@ export async function runLookupOffersReportPhase(
       },
     };
 
+    const relevance: ServiceSignalOptions | null =
+      options?.relevance ||
+      (job.businessProfile
+        ? {
+            businessProfile: job.businessProfile,
+            searchKeywords: null,
+            selectedCategory: null,
+          }
+        : null);
+
     const lpCap = options?.maxLandingPages ?? MAX_LP_TO_ANALYZE;
     patchLookupJob(job, {
       status: "running",
@@ -1429,7 +1731,7 @@ export async function runLookupOffersReportPhase(
         offersDone: 0,
         offersTotal: Math.max(
           3,
-          Math.min(clusterLandingPages(ads).length, lpCap) + 2,
+          Math.min(clusterLandingPages(ads, relevance).length, lpCap) + 2,
         ),
         offersCurrentName: null,
         offersPct: 2,
@@ -1441,6 +1743,7 @@ export async function runLookupOffersReportPhase(
         forceReanalyzePages: Boolean(options?.force),
         maxLandingPages: options?.maxLandingPages,
         maxCreativeClusters: options?.maxCreativeClusters,
+        relevance,
       });
       const offerCount =
         report.adCopy.uniqueOffers.length +

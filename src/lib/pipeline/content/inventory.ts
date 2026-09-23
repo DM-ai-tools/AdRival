@@ -1,6 +1,6 @@
 export interface InventoryComponent {
   id: string;
-  kind: "headline" | "paragraph" | "list" | "cta" | "card" | "proof" | "faq" | "image";
+  kind: "headline" | "paragraph" | "list" | "cta" | "card" | "proof" | "faq" | "image" | "form";
   text: string;
   items: string[];
   nodeId?: string | null;
@@ -93,11 +93,46 @@ export function inventoryFromBlocks(input: {
       else current.components.push({ id, kind: "list", text: "", items: [text] });
     } else if (block.tag.toLowerCase() === "button" || (block.tag.toLowerCase() === "a" && text.length < 48)) {
       current.components.push({ id, kind: "cta", text, items: block.href ? [block.href] : [] });
+    } else if (/^(form|input|textarea|select|label)$/i.test(block.tag)) {
+      const form = current.components.find((item) => item.kind === "form");
+      const field = text || block.alt || block.tag;
+      if (form) {
+        if (field && !form.items.includes(field)) form.items.push(field.slice(0, 80));
+      } else {
+        current.components.push({
+          id,
+          kind: "form",
+          text: "Lead capture form",
+          items: field ? [field.slice(0, 80)] : [],
+        });
+      }
     } else if (block.alt) {
       current.components.push({ id, kind: "image", text: block.alt, items: [] });
     }
   }
   if (current) sections.push(current);
+  // Collapse multiple form field hits into a single form component on one section.
+  let formSection: InventorySection | null = null;
+  for (const section of sections) {
+    const forms = section.components.filter((c) => c.kind === "form");
+    if (!forms.length) continue;
+    const mergedItems = [...new Set(forms.flatMap((f) => f.items))].slice(0, 8);
+    section.components = section.components.filter((c) => c.kind !== "form");
+    if (!formSection) {
+      formSection = section;
+      section.components.push({
+        id: `${section.id}-form`,
+        kind: "form",
+        text: "Lead capture form matching the competitor page (use exactly once)",
+        items: mergedItems,
+      });
+    } else if (mergedItems.length) {
+      const existing = formSection.components.find((c) => c.kind === "form");
+      if (existing) {
+        existing.items = [...new Set([...existing.items, ...mergedItems])].slice(0, 8);
+      }
+    }
+  }
   const unresolved = sections.filter((section) => section.components.length < 2).length;
   return {
     captureId: `cap-${Date.now()}`,
@@ -137,6 +172,9 @@ export function inventoryFromLandingOutline(input: {
     cta?: string | null;
     uniqueValueProps?: string[];
   } | null;
+  /** When the competitor HTML includes a lead form, mirror it in the rebuild. */
+  hasForm?: boolean;
+  formFields?: string[];
 }): PageInventory {
   const headings = input.headings || [];
   const architecture = (input.architecture || []).filter(
@@ -206,15 +244,15 @@ export function inventoryFromLandingOutline(input: {
       });
     }
     if (index === 0 && ctas.length) {
-      for (const [ctaIndex, cta] of ctas.slice(0, 3).entries()) {
-        components.push({
-          id: `src-${index + 1}-cta-${ctaIndex + 1}`,
-          kind: "cta",
-          text: cta,
-          items: [],
-        });
-      }
+      // One primary CTA in the fold — extra CTAs inflate buttons on the rebuild.
+      components.push({
+        id: `src-${index + 1}-cta-1`,
+        kind: "cta",
+        text: ctas[0],
+        items: [],
+      });
     }
+    // Form placement deferred — only one section gets a form (see after loop).
     if (!components.length) continue;
     sections.push({
       id: `src-${sections.length + 1}`,
@@ -232,6 +270,28 @@ export function inventoryFromLandingOutline(input: {
         : ["Section body came from the completed offer analysis because rendered DOM text was thin."],
       box: null,
     });
+  }
+
+  // At most ONE form component across the whole inventory.
+  if (input.hasForm || (input.formFields || []).length >= 2) {
+    const scoreSection = (section: InventorySection): number => {
+      const hay = `${section.sourceHeading || ""} ${section.internalLabel || ""} ${section.purpose || ""}`.toLowerCase();
+      let score = 0;
+      if (/form|sign[\s-]?up|register|book|schedule|apply|lead|contact/i.test(hay)) score += 5;
+      if (section.order === 0) score += 2;
+      if (section.order === sections.length - 1) score += 3;
+      return score;
+    };
+    const alreadyHas = sections.some((s) => s.components.some((c) => c.kind === "form"));
+    if (!alreadyHas && sections.length) {
+      const target = [...sections].sort((a, b) => scoreSection(b) - scoreSection(a))[0];
+      target.components.push({
+        id: `${target.id}-form`,
+        kind: "form",
+        text: "Lead capture form matching the competitor page (use exactly once)",
+        items: (input.formFields || []).slice(0, 8),
+      });
+    }
   }
   const unresolved = sections.filter((section) => section.textKind !== "rendered").length;
   return {
@@ -253,6 +313,36 @@ export function inventoryFromLandingOutline(input: {
     },
     visionUsed: false,
   };
+}
+
+/** Keep at most one form component across the inventory (competitor LPs almost never have more). */
+export function limitInventoryToSingleForm(inventory: PageInventory): PageInventory {
+  let kept = false;
+  const sections = inventory.sections.map((section) => {
+    const forms = section.components.filter((c) => c.kind === "form");
+    if (!forms.length) return section;
+    if (kept) {
+      return {
+        ...section,
+        components: section.components.filter((c) => c.kind !== "form"),
+      };
+    }
+    kept = true;
+    const mergedItems = [...new Set(forms.flatMap((f) => f.items))].slice(0, 8);
+    return {
+      ...section,
+      components: [
+        ...section.components.filter((c) => c.kind !== "form"),
+        {
+          id: `${section.id}-form`,
+          kind: "form" as const,
+          text: "Lead capture form matching the competitor page (use exactly once)",
+          items: mergedItems,
+        },
+      ],
+    };
+  });
+  return { ...inventory, sections };
 }
 
 /** Offer analysis or HTML outline is enough to continue recreation when browser capture fails. */

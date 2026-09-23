@@ -1,5 +1,5 @@
 /**
- * Minimal Firecrawl v2 client (scrape + map).
+ * Minimal Firecrawl v2 client (scrape + map + search).
  * Auth: FIRECRAWL_API_KEY
  */
 
@@ -404,6 +404,63 @@ export async function firecrawlScrapeForContent(
     blockAds: true,
     proxy: "auto",
   });
+}
+
+export type FirecrawlSearchWebResult = {
+  url?: string;
+  title?: string | null;
+  description?: string | null;
+  markdown?: string | null;
+};
+
+export type FirecrawlSearchResult = {
+  success?: boolean;
+  data?: {
+    web?: FirecrawlSearchWebResult[];
+    news?: FirecrawlSearchWebResult[];
+  } | FirecrawlSearchWebResult[];
+  warning?: string | null;
+};
+
+/**
+ * Firecrawl /v2/search — web search (optionally with scraped snippets).
+ * Docs: https://docs.firecrawl.dev/features/search
+ */
+export async function firecrawlSearch(
+  query: string,
+  options?: {
+    limit?: number;
+    country?: string;
+    location?: string;
+    scrapeMarkdown?: boolean;
+  },
+): Promise<FirecrawlSearchResult> {
+  const body: Record<string, unknown> = {
+    query: query.slice(0, 500),
+    limit: Math.min(Math.max(options?.limit ?? 5, 1), 10),
+    sources: [{ type: "web" }],
+  };
+  if (options?.country) body.country = options.country;
+  if (options?.location) body.location = options.location;
+  if (options?.scrapeMarkdown) {
+    body.scrapeOptions = {
+      formats: ["markdown"],
+      onlyMainContent: true,
+    };
+  }
+  return firecrawlPost<FirecrawlSearchResult>("/search", body);
+}
+
+/** Flatten web results from Firecrawl search response shapes. */
+export function flattenFirecrawlSearchResults(
+  result: FirecrawlSearchResult,
+): FirecrawlSearchWebResult[] {
+  const data = result.data;
+  if (!data) return [];
+  if (Array.isArray(data)) return data;
+  const web = Array.isArray(data.web) ? data.web : [];
+  const news = Array.isArray(data.news) ? data.news : [];
+  return [...web, ...news];
 }
 
 export function hasFirecrawlKey(): boolean {

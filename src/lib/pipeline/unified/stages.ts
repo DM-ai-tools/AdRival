@@ -1,6 +1,6 @@
 /** Ordered recreation stages. Weights sum to 100 for the overall bar. */
 
-export const UNIFIED_PIPELINE_VERSION = "unified-1";
+export const UNIFIED_PIPELINE_VERSION = "unified-2";
 
 export type UnifiedStageId =
   | "preparing"

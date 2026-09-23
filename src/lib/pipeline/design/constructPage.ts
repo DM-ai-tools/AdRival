@@ -77,9 +77,16 @@ export function verifiedCompanyLogo(assets: BrandSiteAssets | null | undefined):
 export function logoStatus(assets: BrandSiteAssets | null | undefined, preferLight = false): { url: string | null; issue: string | null } {
   const ranked = rankedLogos(assets);
   const rawLogos = (assets?.images || []).filter((image) => image.kind === "logo" && image.src && !/favicon/i.test(image.src));
+  const preferred = (assets?.logoUrl || "").trim() || null;
+
   if (!ranked.length) {
+    if (preferred) return { url: preferred, issue: null };
     if (rawLogos.length > 1) {
-      return { url: null, issue: "Company logo is ambiguous. Select the primary logo before export. A site photo was not used." };
+      // Prefer the first logo mark over blocking recreate — export can still swap later.
+      return {
+        url: rawLogos[0].src,
+        issue: "Multiple logo candidates found; using the first. Confirm the primary logo before export if needed.",
+      };
     }
     return { url: rawLogos[0]?.src || null, issue: null };
   }
@@ -92,8 +99,14 @@ export function logoStatus(assets: BrandSiteAssets | null | undefined, preferLig
       const plain = top.find((image) => !isLightLogo(image.src));
       if (plain) return { url: plain.src, issue: null };
     }
+    if (preferred && top.some((image) => image.src === preferred)) {
+      return { url: preferred, issue: null };
+    }
     if (!paired) {
-      return { url: null, issue: "Company logo is ambiguous. Select the primary logo before export. A site photo was not used." };
+      return {
+        url: top[0].src,
+        issue: "Multiple similar logos ranked equally; using the top candidate. Confirm before export if needed.",
+      };
     }
   }
   if (preferLight) {

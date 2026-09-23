@@ -182,7 +182,7 @@ export function ContentReviewWorkspace({
         <section className="review-map panel">
           <h3>Page map</h3>
           <p className="muted">
-            {pack.inventory.visionUsed ? "Visual regions were reconciled with rendered text." : "Visual analysis did not complete."} Capture is not treated as complete just because a model returned a list.
+            {pack.inventory.visionUsed ? "Visual regions were reconciled with rendered text." : "Visual analysis did not complete."} Capture is not treated as complete just because analysis returned a list.
           </p>
           <ol>
             {pack.inventory.sections.map((item) => (

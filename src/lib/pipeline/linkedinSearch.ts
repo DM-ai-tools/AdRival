@@ -381,8 +381,32 @@ export async function runLinkedInSearch(
           job.competitorIds.push(competitor.id);
           job.progress.accepted = accepted.length;
           job.progress.stage = "searching_ads";
-          const locNote = provisional.locationLabel
-            ? ` · ${provisional.locationLabel}`
+
+          try {
+            const { enrichCompetitorSociavaultAddress } = await import(
+              "./competitorLocation"
+            );
+            const loc = await enrichCompetitorSociavaultAddress({
+              competitorId: competitor.id,
+              facebookUrl: null,
+              linkedinUrl: liUrl,
+              geoMode,
+              targetLocations,
+            });
+            if (loc) {
+              competitor.locationLabel = loc.locationLabel;
+              competitor.locationCity = loc.locationCity;
+              competitor.locationSuburb = loc.locationSuburb;
+              competitor.locationCountry = loc.locationCountry;
+              competitor.locationStatus = loc.locationStatus;
+              competitor.locationSource = loc.locationSource;
+            }
+          } catch {
+            /* keep provisional */
+          }
+
+          const locNote = competitor.locationLabel
+            ? ` · ${competitor.locationLabel}`
             : "";
           job.progress.message = `Accepted ${primary.pageName} (${accepted.length}/${TARGET_COMPETITORS})${locNote}`;
           saveJob(job);
@@ -435,6 +459,20 @@ export async function runLinkedInSearch(
         accepted.push(competitor);
         job.competitorIds.push(competitor.id);
         job.progress.accepted = accepted.length;
+        try {
+          const { enrichCompetitorSociavaultAddress } = await import(
+            "./competitorLocation"
+          );
+          await enrichCompetitorSociavaultAddress({
+            competitorId: competitor.id,
+            facebookUrl: null,
+            linkedinUrl: held.liUrl,
+            geoMode,
+            targetLocations,
+          });
+        } catch {
+          /* ignore */
+        }
       }
     }
 

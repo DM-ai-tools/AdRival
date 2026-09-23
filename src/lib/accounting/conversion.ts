@@ -24,55 +24,84 @@ import { CREDIT_SCALE, chargeCeil } from "./units";
 
 const C = (credits: number) => Math.round(credits * CREDIT_SCALE);
 
-export const SEED_RULE_VERSION = 1;
+export const SEED_RULE_VERSION = 2;
 
+/**
+ * Softened rates so one landing-page redesign does not empty a typical allowance.
+ * Historical charges still settle against the rule version stored on each call.
+ */
 export function seedConversionRuleSet(): ConversionRuleSet {
   return {
     version: SEED_RULE_VERSION,
     createdAt: new Date().toISOString(),
     createdByUserId: null,
     note:
-      "Seeded defaults. Credit rates are starting points and monetary prices " +
-      "are intentionally unset — configure both in Admin → Settings.",
+      "Softened redesign-friendly defaults (v2). Anthropic/Firecrawl/Runway " +
+      "rates are lower so a single recreate stays affordable. Monetary USD " +
+      "prices stay unset — configure those in Admin → Settings if needed.",
     rates: {
       sociavault: {
-        // Application credits per SociaVault request-unit. When the API
-        // reports `credits_used`, that value is used; otherwise one call is
-        // treated as one estimated request.
         default: { perRequest: C(1) },
       },
       openrouter: {
         default: {
-          perThousandInputTokens: C(0.3),
-          perThousandOutputTokens: C(1.5),
+          perThousandInputTokens: C(0.2),
+          perThousandOutputTokens: C(0.8),
           estimatedInputTokens: 4000,
           estimatedOutputTokens: 1500,
         },
       },
       openai: {
         default: {
-          perThousandInputTokens: C(0.3),
-          perThousandOutputTokens: C(1.5),
+          perThousandInputTokens: C(0.2),
+          perThousandOutputTokens: C(0.8),
           estimatedInputTokens: 4000,
           estimatedOutputTokens: 1500,
         },
       },
       anthropic: {
+        // ~4× softer on output vs v1 so a 30–60k HTML page stays within ~30–60 credits
+        // instead of draining a 200+ allowance when a truncated retry also runs.
         default: {
-          perThousandInputTokens: C(0.4),
-          perThousandOutputTokens: C(2),
-          estimatedInputTokens: 6000,
-          estimatedOutputTokens: 2000,
+          perThousandInputTokens: C(0.12),
+          perThousandOutputTokens: C(0.45),
+          estimatedInputTokens: 8000,
+          estimatedOutputTokens: 16000,
+        },
+        "claude-haiku": {
+          perThousandInputTokens: C(0.06),
+          perThousandOutputTokens: C(0.2),
+          estimatedInputTokens: 8000,
+          estimatedOutputTokens: 16000,
+        },
+        "claude-sonnet-5": {
+          perThousandInputTokens: C(0.1),
+          perThousandOutputTokens: C(0.35),
+          estimatedInputTokens: 8000,
+          estimatedOutputTokens: 20000,
+        },
+        "claude-opus-5": {
+          // Opus list price is higher; keep app credits soft so redesigns stay usable.
+          perThousandInputTokens: C(0.18),
+          perThousandOutputTokens: C(0.55),
+          estimatedInputTokens: 8000,
+          estimatedOutputTokens: 20000,
+        },
+        "claude-sonnet-4": {
+          perThousandInputTokens: C(0.12),
+          perThousandOutputTokens: C(0.45),
+          estimatedInputTokens: 8000,
+          estimatedOutputTokens: 16000,
         },
       },
       firecrawl: {
-        default: { perRequest: C(1) },
+        default: { perRequest: C(0.4) },
       },
       brandfetch: {
-        default: { perRequest: C(1) },
+        default: { perRequest: C(0.5) },
       },
       runway: {
-        default: { perImage: C(10), perRequest: C(10) },
+        default: { perImage: C(4), perRequest: C(4) },
       },
     },
     /**
@@ -81,14 +110,25 @@ export function seedConversionRuleSet(): ConversionRuleSet {
      */
     perCallReservationCeiling: {
       sociavault: C(2),
-      openrouter: C(60),
-      openai: C(60),
-      anthropic: C(80),
-      firecrawl: C(2),
-      brandfetch: C(2),
-      runway: C(15),
+      openrouter: C(40),
+      openai: C(40),
+      anthropic: C(12),
+      firecrawl: C(1),
+      brandfetch: C(1),
+      runway: C(6),
     },
   };
+}
+
+/** True when the active rule set still uses pre-softening Anthropic output rates or a high hold. */
+export function conversionRulesNeedSoftening(ruleSet: ConversionRuleSet): boolean {
+  const out = ruleSet.rates.anthropic?.default?.perThousandOutputTokens;
+  // v1 charged C(2) = 20000 subunits per 1k output tokens.
+  if (typeof out === "number" && out >= C(1.5)) return true;
+  const ceiling = ruleSet.perCallReservationCeiling?.anthropic;
+  // Lean redesign holds ~12 credits per call; legacy 50 blocked low balances.
+  if (typeof ceiling === "number" && ceiling >= C(40)) return true;
+  return false;
 }
 
 /** Longest-prefix model match, then provider default, then null. */

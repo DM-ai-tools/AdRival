@@ -34,6 +34,34 @@ export interface TokenListPrice {
 export const TOKEN_LIST_PRICES: TokenListPrice[] = [
   {
     provider: "anthropic",
+    modelPrefix: "claude-opus-5",
+    inputUsdPerMillion: 5,
+    outputUsdPerMillion: 25,
+    source: "Anthropic pricing — Claude Opus 5",
+  },
+  {
+    provider: "anthropic",
+    modelPrefix: "claude-sonnet-5",
+    inputUsdPerMillion: 2,
+    outputUsdPerMillion: 10,
+    source: "Anthropic pricing — Claude Sonnet 5",
+  },
+  {
+    provider: "anthropic",
+    modelPrefix: "claude-haiku-4-5",
+    inputUsdPerMillion: 1,
+    outputUsdPerMillion: 5,
+    source: "Anthropic pricing — Claude Haiku 4.5",
+  },
+  {
+    provider: "anthropic",
+    modelPrefix: "claude-haiku",
+    inputUsdPerMillion: 1,
+    outputUsdPerMillion: 5,
+    source: "Anthropic pricing — Claude Haiku",
+  },
+  {
+    provider: "anthropic",
     modelPrefix: "claude-sonnet-4-5",
     inputUsdPerMillion: 3,
     outputUsdPerMillion: 15,

@@ -263,12 +263,16 @@ export async function getFacebookProfile(url: string) {
       website?: string;
       category?: string;
       pageIntro?: string;
+      address?: string | null;
+      phone?: string | null;
+      email?: string | null;
       [key: string]: unknown;
     };
   }>("/v1/scrape/facebook/profile", { url });
 }
 
 export async function getInstagramProfile(handle: string) {
+  const clean = handle.trim().replace(/^@/, "");
   return svFetch<{
     success?: boolean;
     data?: {
@@ -281,20 +285,31 @@ export async function getInstagramProfile(handle: string) {
           [key: string]: unknown;
         };
       };
+      user?: {
+        username?: string;
+        edge_followed_by?: { count?: number };
+        external_url?: string;
+        [key: string]: unknown;
+      };
+      follower_count?: number;
+      followers?: number;
+      username?: string;
       [key: string]: unknown;
     };
-  }>("/v1/scrape/instagram/profile", { handle, trim: true });
+  }>("/v1/scrape/instagram/profile", { handle: clean, trim: true });
 }
 
 export async function getTwitterProfile(handle: string) {
+  const clean = handle.trim().replace(/^@/, "");
   return svFetch<{
     success?: boolean;
     data?: {
-      legacy?: { followers_count?: number; screen_name?: string };
+      legacy?: { followers_count?: number; screen_name?: string; location?: string };
       core?: { screen_name?: string; name?: string };
+      location?: { location?: string } | string;
       [key: string]: unknown;
     };
-  }>("/v1/scrape/twitter/profile", { handle });
+  }>("/v1/scrape/twitter/profile", { handle: clean });
 }
 
 export async function getYoutubeChannel(params: {
@@ -302,6 +317,10 @@ export async function getYoutubeChannel(params: {
   url?: string;
   channelId?: string;
 }) {
+  const cleaned: Record<string, string> = {};
+  if (params.channelId) cleaned.channelId = params.channelId.trim();
+  if (params.handle) cleaned.handle = params.handle.trim().replace(/^@/, "");
+  if (params.url) cleaned.url = params.url.trim();
   return svFetch<{
     success?: boolean;
     data?: {
@@ -310,9 +329,11 @@ export async function getYoutubeChannel(params: {
       subscriberCountText?: string;
       handle?: string;
       url?: string;
+      channel?: string;
+      links?: string[] | Record<string, string>;
       [key: string]: unknown;
     };
-  }>("/v1/scrape/youtube/channel", params);
+  }>("/v1/scrape/youtube/channel", cleaned);
 }
 
 export async function getLinkedInCompany(url: string) {
@@ -325,6 +346,11 @@ export async function getLinkedInCompany(url: string) {
       website?: string;
       handle?: string;
       url?: string;
+      location?:
+        | string
+        | { city?: string; state?: string; country?: string }
+        | null;
+      headquarters?: string | null;
       [key: string]: unknown;
     };
   }>("/v1/scrape/linkedin/company", { url });

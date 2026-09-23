@@ -520,6 +520,45 @@ export async function enrichCompetitorDeepLocation(input: {
   }
 }
 
+/**
+ * Fast address enrich during Find competitors — SociaVault only (Facebook address /
+ * LinkedIn HQ). No Perplexity. Updates the competitor row when an address is found.
+ */
+export async function enrichCompetitorSociavaultAddress(input: {
+  competitorId: string;
+  facebookUrl?: string | null;
+  linkedinUrl?: string | null;
+  geoMode?: SearchGeoMode | null;
+  targetLocations?: BusinessLocation[] | null;
+}): Promise<ResolvedCompetitorLocation | null> {
+  try {
+    const sv = await fromSociavault({
+      facebookUrl: input.facebookUrl,
+      linkedinUrl: input.linkedinUrl,
+    });
+    if (!sv || (!sv.locationLabel && !sv.locationCity)) return null;
+
+    const matched = applyTargetMatch(
+      sv,
+      input.targetLocations || [],
+      input.geoMode || "countrywide",
+    );
+    const { updateCompetitor } = await import("../db");
+    updateCompetitor(input.competitorId, {
+      locationLabel: matched.locationLabel,
+      locationCity: matched.locationCity,
+      locationSuburb: matched.locationSuburb,
+      locationCountry: matched.locationCountry,
+      locationStatus: matched.locationStatus,
+      locationSource: "sociavault",
+    });
+    return matched;
+  } catch (err) {
+    console.warn("[location] Sociavault address enrich failed", err);
+    return null;
+  }
+}
+
 export async function resolveAndMatchCompetitorLocation(input: {
   pageName: string;
   website?: string | null;
@@ -583,4 +622,217 @@ export async function resolveAndMatchCompetitorLocation(input: {
   );
 
   return { location: matched, accept: true };
+}
+
+function hostFromUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url.startsWith("http") ? url : `https://${url}`).hostname.replace(
+      /^www\./i,
+      "",
+    );
+  } catch {
+    return null;
+  }
+}
+
+async function fromFirecrawlSearch(input: {
+  pageName: string;
+  website?: string | null;
+  landingPageUrl?: string | null;
+  domain?: string | null;
+  countryHint?: string | null;
+}): Promise<ResolvedCompetitorLocation | null> {
+  const {
+    firecrawlSearch,
+    flattenFirecrawlSearchResults,
+    hasFirecrawlKey,
+  } = await import("../firecrawl/client");
+  if (!hasFirecrawlKey()) return null;
+
+  const domain =
+    input.domain ||
+    hostFromUrl(input.website) ||
+    hostFromUrl(input.landingPageUrl);
+  const queries = [
+    input.landingPageUrl
+      ? `what is the business address of ${input.landingPageUrl}`
+      : null,
+    domain ? `what is the address of ${domain}` : null,
+    input.pageName
+      ? `what is the business address of "${input.pageName}"${domain ? ` ${domain}` : ""}`
+      : null,
+    domain ? `"${input.pageName || domain}" headquarters address` : null,
+  ].filter((q): q is string => Boolean(q));
+
+  const snippets: string[] = [];
+  for (const query of queries.slice(0, 3)) {
+    try {
+      const result = await firecrawlSearch(query, {
+        limit: 5,
+        country: input.countryHint || undefined,
+      });
+      for (const row of flattenFirecrawlSearchResults(result)) {
+        const line = [row.title, row.description, row.url]
+          .filter(Boolean)
+          .join(" — ");
+        if (line) snippets.push(line);
+      }
+      if (snippets.length >= 6) break;
+    } catch (err) {
+      console.warn("[location] Firecrawl search failed:", (err as Error).message);
+    }
+  }
+  if (!snippets.length) return null;
+
+  // Prefer LLM parse when available; else regex-ish first address-looking snippet
+  if (process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY) {
+    try {
+      const {
+        getOpenAICompatClient,
+        resolveOpenAICompatModel,
+      } = await import("../openrouter/openaiCompat");
+      const client = getOpenAICompatClient();
+      const completion = await client.chat.completions.create({
+        model: resolveOpenAICompatModel("gpt-4o-mini"),
+        temperature: 0.1,
+        max_tokens: 200,
+        messages: [
+          {
+            role: "system",
+            content: `Extract the company's real-world business address or HQ city from search snippets.
+Return JSON only: {"label":"street or city string or null","city":"string or null","suburb":"string or null","country":"string or null","confidence":"high|medium|low"}.
+If unknown, use nulls. Prefer a full street address when present.`,
+          },
+          {
+            role: "user",
+            content: JSON.stringify({
+              company: input.pageName,
+              domain,
+              website: input.website,
+              landingPageUrl: input.landingPageUrl,
+              snippets: snippets.slice(0, 12),
+            }),
+          },
+        ],
+        response_format: { type: "json_object" },
+      });
+      const raw = completion.choices[0]?.message?.content || "{}";
+      const parsed = JSON.parse(raw) as {
+        label?: string | null;
+        city?: string | null;
+        suburb?: string | null;
+        country?: string | null;
+      };
+      const label = (parsed.label || "").trim() || null;
+      const city = (parsed.city || "").trim() || null;
+      if (!label && !city) return null;
+      return {
+        locationLabel: label || city,
+        locationCity: city || label,
+        locationSuburb: (parsed.suburb || "").trim() || null,
+        locationCountry: (parsed.country || "").trim() || null,
+        locationStatus: "unknown",
+        locationSource: "firecrawl",
+        locationConfidence: "medium",
+      };
+    } catch (err) {
+      console.warn("[location] Firecrawl address parse failed:", (err as Error).message);
+    }
+  }
+
+  // Fallback: first snippet that looks like it contains a place
+  const placeLike = snippets.find((s) =>
+    /\b(street|st\.|road|rd\.|avenue|ave\.|suite|floor|city|headquarters|hq|australia|united states|, [A-Z]{2,3}\b)/i.test(
+      s,
+    ),
+  );
+  if (!placeLike) return null;
+  return {
+    locationLabel: placeLike.slice(0, 160),
+    locationCity: null,
+    locationSuburb: null,
+    locationCountry: null,
+    locationStatus: "unknown",
+    locationSource: "firecrawl",
+    locationConfidence: "low",
+  };
+}
+
+/**
+ * Redo location via Firecrawl web search (on-demand after Find competitors).
+ * Queries address of landing URL / domain / company name, then updates the row.
+ */
+export async function enrichCompetitorFirecrawlLocation(input: {
+  competitorId: string;
+  pageName: string;
+  website?: string | null;
+  landingPageUrl?: string | null;
+  domain?: string | null;
+  countryHint?: string | null;
+  geoMode?: SearchGeoMode | null;
+  targetLocations?: BusinessLocation[] | null;
+}): Promise<ResolvedCompetitorLocation | null> {
+  try {
+    const resolved = await fromFirecrawlSearch({
+      pageName: input.pageName,
+      website: input.website,
+      landingPageUrl: input.landingPageUrl,
+      domain: input.domain,
+      countryHint: input.countryHint,
+    });
+    if (!resolved) return null;
+    const matched = applyTargetMatch(
+      resolved,
+      input.targetLocations || [],
+      input.geoMode || "countrywide",
+    );
+    // locationSource type may not include firecrawl yet — cast via update
+    const { updateCompetitor } = await import("../db");
+    updateCompetitor(input.competitorId, {
+      locationLabel: matched.locationLabel,
+      locationCity: matched.locationCity,
+      locationSuburb: matched.locationSuburb,
+      locationCountry: matched.locationCountry,
+      locationStatus: matched.locationStatus,
+      locationSource: "firecrawl" as CompetitorLocationSource,
+    });
+    return { ...matched, locationSource: "firecrawl" as CompetitorLocationSource };
+  } catch (err) {
+    console.warn("[location] Firecrawl enrich failed", err);
+    return null;
+  }
+}
+
+/** Batch Firecrawl location refresh for a search run. */
+export async function enrichRunFirecrawlLocations(
+  runId: string,
+  options?: { onlyUnknown?: boolean },
+): Promise<{ updated: number; skipped: number; failed: number }> {
+  const { getCompetitorsByRun, getJob } = await import("../db");
+  const job = getJob(runId);
+  const competitors = getCompetitorsByRun(runId);
+  let updated = 0;
+  let skipped = 0;
+  let failed = 0;
+  for (const c of competitors) {
+    const hasLoc = Boolean(c.locationLabel || c.locationCity);
+    if (options?.onlyUnknown !== false && hasLoc && c.locationStatus !== "unknown") {
+      skipped += 1;
+      continue;
+    }
+    const loc = await enrichCompetitorFirecrawlLocation({
+      competitorId: c.id,
+      pageName: c.pageName,
+      website: c.brand?.website || null,
+      landingPageUrl: c.sampleAd?.landingPageUrl || null,
+      domain: c.sampleAd?.domain || null,
+      countryHint: typeof c.country === "string" ? c.country : null,
+      geoMode: job?.geoMode || "countrywide",
+      targetLocations: job?.targetLocations || [],
+    });
+    if (loc?.locationLabel || loc?.locationCity) updated += 1;
+    else failed += 1;
+  }
+  return { updated, skipped, failed };
 }

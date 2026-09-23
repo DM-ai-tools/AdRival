@@ -263,25 +263,39 @@ export function LookupOffersDashboard({
 
   const offerPages = useMemo(
     () =>
-      report.landingPages.pages.filter(
-        (p) =>
-          p.status === "completed" &&
-          p.primaryOffer &&
-          !isLegalOrUtilityPage(p.url, p.headline),
-      ),
+      report.landingPages.pages
+        .filter(
+          (p) =>
+            p.status === "completed" &&
+            p.primaryOffer &&
+            !isLegalOrUtilityPage(p.url, p.headline),
+        )
+        .slice()
+        .sort(
+          (a, b) =>
+            (b.relevanceScore || 0) - (a.relevanceScore || 0) ||
+            b.adCount - a.adCount,
+        ),
     [report.landingPages.pages],
   );
 
   const otherPages = useMemo(
     () =>
-      report.landingPages.pages.filter(
-        (p) =>
-          !(
-            p.status === "completed" &&
-            p.primaryOffer &&
-            !isLegalOrUtilityPage(p.url, p.headline)
-          ),
-      ),
+      report.landingPages.pages
+        .filter(
+          (p) =>
+            !(
+              p.status === "completed" &&
+              p.primaryOffer &&
+              !isLegalOrUtilityPage(p.url, p.headline)
+            ),
+        )
+        .slice()
+        .sort(
+          (a, b) =>
+            (b.relevanceScore || 0) - (a.relevanceScore || 0) ||
+            b.adCount - a.adCount,
+        ),
     [report.landingPages.pages],
   );
 
@@ -407,7 +421,7 @@ export function LookupOffersDashboard({
           [
             ["overview", "Overview"],
             ["creatives", `Creatives (${report.adCopy.uniqueCreatives})`],
-            ["pages", `Landing pages (${report.landingPages.uniqueUrls})`],
+            ["pages", `By landing page (${report.landingPages.uniqueUrls})`],
             [
               "services",
               `Services (${report.services?.uniqueServices ?? serviceNodes.length})`,
@@ -442,7 +456,16 @@ export function LookupOffersDashboard({
                 {report.adCopy.uniqueOffers.slice(0, 10).map((o) => (
                   <li key={`ov-ac-${o.offer}`}>
                     <div className="offers-pill-main">
-                      <strong>{o.offer}</strong>
+                      <strong>
+                        {o.pricing &&
+                        /^(?:\$|₹|£|€)/.test(o.offer) &&
+                        /[·•]/.test(o.offer)
+                          ? o.sampleHooks?.[0] || o.offer
+                          : o.offer}
+                      </strong>
+                      {o.pricing ? (
+                        <span className="muted">{o.pricing}</span>
+                      ) : null}
                       <span className="offers-count">
                         {o.adCount} ad{o.adCount === 1 ? "" : "s"}
                       </span>

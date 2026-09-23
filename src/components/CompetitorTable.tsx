@@ -20,7 +20,13 @@ function countryLabel(c?: string | null) {
   return c;
 }
 
-function locationCell(c: CompetitorRecord) {
+function locationCell(
+  c: CompetitorRecord,
+  opts?: {
+    busy?: boolean;
+    onRefresh?: () => void;
+  },
+) {
   const label =
     c.locationLabel ||
     [c.locationSuburb, c.locationCity].filter(Boolean).join(", ") ||
@@ -37,6 +43,17 @@ function locationCell(c: CompetitorRecord) {
       )}
       {status === "mismatch" && (
         <span className="location-badge is-mismatch">mismatch</span>
+      )}
+      {opts?.onRefresh && (
+        <button
+          type="button"
+          className="linkish-btn location-refresh-btn"
+          disabled={opts.busy}
+          onClick={opts.onRefresh}
+          title="Find address via web search"
+        >
+          {opts.busy ? "…" : "Find address"}
+        </button>
       )}
     </div>
   );
@@ -105,7 +122,9 @@ type SortDir = "asc" | "desc";
 
 interface CompetitorTableProps {
   competitors: CompetitorRecord[];
+  runId?: string | null;
   onCompetitorUpdated?: (competitor: CompetitorRecord) => void;
+  onCompetitorsUpdated?: (competitors: CompetitorRecord[]) => void;
 }
 
 function SortTh({
@@ -141,13 +160,61 @@ function SortTh({
 /** Ad creative preview — brand metrics live in the Brand review tab. */
 export function CompetitorTable({
   competitors,
+  runId = null,
   onCompetitorUpdated,
+  onCompetitorsUpdated,
 }: CompetitorTableProps) {
   const [sortKey, setSortKey] = useState<SortKey>("activeAdsCount");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [analyzingId, setAnalyzingId] = useState<string | null>(null);
   const [analyzeError, setAnalyzeError] = useState<Record<string, string>>({});
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [locationBusyId, setLocationBusyId] = useState<string | null>(null);
+  const [locationBatchBusy, setLocationBatchBusy] = useState(false);
+  const [locationError, setLocationError] = useState<string | null>(null);
+
+  const resolvedRunId = runId || competitors[0]?.runId || null;
+
+  async function refreshOneLocation(competitorId: string) {
+    setLocationError(null);
+    setLocationBusyId(competitorId);
+    try {
+      const res = await fetch("/api/competitors/location", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ competitorId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Location refresh failed");
+      if (data.competitor) onCompetitorUpdated?.(data.competitor);
+    } catch (err) {
+      setLocationError((err as Error).message);
+    } finally {
+      setLocationBusyId(null);
+    }
+  }
+
+  async function refreshAllLocations() {
+    if (!resolvedRunId) return;
+    setLocationError(null);
+    setLocationBatchBusy(true);
+    try {
+      const res = await fetch("/api/competitors/location", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ runId: resolvedRunId, onlyUnknown: true }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Location refresh failed");
+      if (Array.isArray(data.competitors)) {
+        onCompetitorsUpdated?.(data.competitors);
+      }
+    } catch (err) {
+      setLocationError((err as Error).message);
+    } finally {
+      setLocationBatchBusy(false);
+    }
+  }
 
   const sorted = useMemo(() => {
     const rows = [...competitors];
@@ -257,6 +324,25 @@ export function CompetitorTable({
 
   return (
     <div className="table-wrap">
+      {resolvedRunId && (
+        <div className="history-actions brand-review-actions" style={{ marginBottom: 12 }}>
+          <button
+            type="button"
+            className="chip-btn"
+            disabled={locationBatchBusy || Boolean(locationBusyId)}
+            onClick={() => void refreshAllLocations()}
+          >
+            {locationBatchBusy
+              ? "Finding addresses…"
+              : "Refresh unknown locations"}
+          </button>
+          {locationError && (
+            <span className="error-text" role="alert">
+              {locationError}
+            </span>
+          )}
+        </div>
+      )}
       <table className="comp-table">
         <thead>
           <tr>
@@ -389,7 +475,12 @@ export function CompetitorTable({
                       {countryLabel(c.country)}
                     </span>
                   </td>
-                  <td>{locationCell(c)}</td>
+                  <td>
+                    {locationCell(c, {
+                      busy: locationBusyId === c.id || locationBatchBusy,
+                      onRefresh: () => void refreshOneLocation(c.id),
+                    })}
+                  </td>
                   <td>
                     <div className="tags">
                       {c.services.map((s) => (

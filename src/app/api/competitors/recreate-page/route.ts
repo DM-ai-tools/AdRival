@@ -24,15 +24,32 @@ import {
   generateMissingUnifiedImages,
   isUnifiedRunActive,
   runUnifiedRecreation,
+  stopUnifiedRecreation,
 } from "@/lib/pipeline/unified/run";
 import { recreationActionPermission } from "@/lib/pipeline/content/permissions";
 import { draftIsCurrent } from "@/lib/pipeline/content/pageIntent";
 import type { CanonicalContent } from "@/lib/pipeline/content/model";
 import { ContentRevisionError } from "@/lib/pipeline/content/revisions";
-import { sanitizeClientFacingText } from "@/lib/clientFacing";
+import { sanitizeClientFacingText, maskRecreatedPage, maskPageAnalysis } from "@/lib/clientFacing";
 
 export const runtime = "nodejs";
-export const maxDuration = 600;
+/** Landing HTML streams can take well past 10 minutes. */
+export const maxDuration = 1800;
+
+function maskCompetitor<T extends {
+  recreatedPage?: unknown;
+  pageAnalysis?: unknown;
+}>(competitor: T): T {
+  return {
+    ...competitor,
+    recreatedPage: maskRecreatedPage(
+      (competitor.recreatedPage ?? null) as Parameters<typeof maskRecreatedPage>[0],
+    ),
+    pageAnalysis: maskPageAnalysis(
+      (competitor.pageAnalysis ?? null) as Parameters<typeof maskPageAnalysis>[0],
+    ),
+  };
+}
 
 export async function POST(request: Request) {
   try {
@@ -69,6 +86,11 @@ export async function POST(request: Request) {
       recreationActionPermission(action),
     );
 
+    if (action === "stop") {
+      const competitor = stopUnifiedRecreation(competitorId);
+      return NextResponse.json({ competitor: maskCompetitor(competitor), stopped: true });
+    }
+
     // Every remaining branch reaches an LLM, Firecrawl, Brandfetch or Runway.
     const billed = <T>(operation: string, fn: () => Promise<T>) =>
       runBillable(
@@ -98,7 +120,7 @@ export async function POST(request: Request) {
       existing.recreatedPage.status === "completed" &&
       existing.recreatedPage.html
     ) {
-      return NextResponse.json({ competitor: existing, cached: true });
+      return NextResponse.json({ competitor: maskCompetitor(existing), cached: true });
     }
     if (
       (action === "generate_content" || action === "generate_page") &&
@@ -106,7 +128,7 @@ export async function POST(request: Request) {
       isUnifiedRunActive(existing.recreatedPage) &&
       existing.recreatedPage?.pipelineVersion?.startsWith("unified")
     ) {
-      return NextResponse.json({ competitor: existing, cached: true, inFlight: true });
+      return NextResponse.json({ competitor: maskCompetitor(existing), cached: true, inFlight: true });
     }
 
     // Cached completed page with approved content (legacy)
@@ -117,10 +139,10 @@ export async function POST(request: Request) {
       existing.recreatedPage?.contentPack &&
       !existing.recreatedPage.contentPack.legacy &&
       existing.recreatedPage.contentPack.canonical.sections.length > 0 &&
-      existing.recreatedPage.pipelineVersion !== "unified-1" &&
+      !existing.recreatedPage.pipelineVersion?.startsWith("unified") &&
       draftIsCurrent(existing.recreatedPage.contentPack)
     ) {
-      return NextResponse.json({ competitor: existing, cached: true });
+      return NextResponse.json({ competitor: maskCompetitor(existing), cached: true });
     }
 
     if (action === "save_content") {
@@ -143,7 +165,7 @@ export async function POST(request: Request) {
         canonical,
         expectedRevision,
       );
-      return NextResponse.json({ competitor, cached: false });
+      return NextResponse.json({ competitor: maskCompetitor(competitor), cached: false });
     }
 
     if (action === "update_intent") {
@@ -159,7 +181,7 @@ export async function POST(request: Request) {
         },
         Number(body.expectedRevision),
       );
-      return NextResponse.json({ competitor, cached: false });
+      return NextResponse.json({ competitor: maskCompetitor(competitor), cached: false });
     }
 
     if (action === "approve_content") {
@@ -168,14 +190,14 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "expectedRevision is required" }, { status: 400 });
       }
       const competitor = approveRecreationContent(competitorId, expectedRevision);
-      return NextResponse.json({ competitor, cached: false });
+      return NextResponse.json({ competitor: maskCompetitor(competitor), cached: false });
     }
 
     if (action === "accept_proposal") {
-      return NextResponse.json({ competitor: acceptContentProposal(competitorId), cached: false });
+      return NextResponse.json({ competitor: maskCompetitor(acceptContentProposal(competitorId)), cached: false });
     }
     if (action === "discard_proposal") {
-      return NextResponse.json({ competitor: discardContentProposal(competitorId), cached: false });
+      return NextResponse.json({ competitor: maskCompetitor(discardContentProposal(competitorId)), cached: false });
     }
     if (action === "undo_content") {
       const expectedRevision = Number(body.expectedRevision);
@@ -191,7 +213,7 @@ export async function POST(request: Request) {
         String(body.value || ""),
         user.username,
       );
-      return NextResponse.json({ competitor, cached: false });
+      return NextResponse.json({ competitor: maskCompetitor(competitor), cached: false });
     }
 
     if (action === "regenerate_section") {
@@ -203,7 +225,7 @@ export async function POST(request: Request) {
           Number(body.expectedRevision),
         ),
       );
-      return NextResponse.json({ competitor, cached: false });
+      return NextResponse.json({ competitor: maskCompetitor(competitor), cached: false });
     }
 
     if (action === "refresh_brand_colors") {
@@ -232,14 +254,14 @@ export async function POST(request: Request) {
           typeof body.feedback === "string" ? body.feedback : userFeedback,
         ),
       );
-      return NextResponse.json({ competitor, cached: false });
+      return NextResponse.json({ competitor: maskCompetitor(competitor), cached: false });
     }
 
     if (action === "generate_missing_images") {
       const competitor = await billed("recreate.regenerate_image", () =>
         generateMissingUnifiedImages(competitorId),
       );
-      return NextResponse.json({ competitor, cached: false });
+      return NextResponse.json({ competitor: maskCompetitor(competitor), cached: false });
     }
 
     if (
@@ -248,13 +270,25 @@ export async function POST(request: Request) {
       action === "regenerate_design" ||
       action === "revise_page"
     ) {
+      // A finished page that only failed validation should be returned, not rebuilt.
+      const prior = existing.recreatedPage;
+      const priorHtml = prior?.html || "";
+      const validationLeftover = Boolean(
+        priorHtml &&
+          /<\/html>/i.test(priorHtml) &&
+          (prior?.error || (prior?.publishBlockers || []).length) &&
+          prior?.status !== "pending",
+      );
+      if (!userFeedback && validationLeftover && (action === "regenerate_design" || action === "revise_page")) {
+        return NextResponse.json({ competitor: maskCompetitor(existing), cached: true });
+      }
       const competitor = await billed("recreate.generate_page", () =>
         runUnifiedRecreation(competitorId, {
           force: true,
           userFeedback: userFeedback || undefined,
         }),
       );
-      return NextResponse.json({ competitor, cached: false });
+      return NextResponse.json({ competitor: maskCompetitor(competitor), cached: false });
     }
 
     // Default / regenerate_content / generate_content / generate_page → unified
@@ -268,7 +302,7 @@ export async function POST(request: Request) {
         userFeedback: userFeedback || undefined,
       }),
     );
-    return NextResponse.json({ competitor, cached: false });
+    return NextResponse.json({ competitor: maskCompetitor(competitor), cached: false });
   } catch (err) {
     if (isCreditError(err)) {
       return NextResponse.json(
@@ -328,9 +362,9 @@ export async function GET(request: Request) {
       }
     }
     return NextResponse.json({
-      competitor,
-      recreatedPage: competitor.recreatedPage ?? null,
-      pageAnalysis: competitor.pageAnalysis ?? null,
+      competitor: maskCompetitor(competitor),
+      recreatedPage: maskRecreatedPage(competitor.recreatedPage ?? null),
+      pageAnalysis: maskPageAnalysis(competitor.pageAnalysis ?? null),
       access: { role: access.role, canEdit: access.role !== "viewer" },
     });
   } catch (err) {

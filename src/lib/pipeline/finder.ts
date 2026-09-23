@@ -505,9 +505,31 @@ export async function runCompetitorSearch(
       job.competitorIds.push(competitor.id);
     }
 
-    // Location network enrich is deferred to offer / page analysis (cheap text only here)
-    const locNote = provisional.locationLabel
-      ? ` · ${provisional.locationLabel}`
+    // Sociavault address (FB page / LI company) so Preview shows a real location
+    try {
+      const { enrichCompetitorSociavaultAddress } = await import("./competitorLocation");
+      const loc = await enrichCompetitorSociavaultAddress({
+        competitorId: competitor.id,
+        facebookUrl: brand.facebookUrl || primary.pageProfileUri || null,
+        linkedinUrl: brand.linkedinUrl || null,
+        geoMode,
+        targetLocations,
+      });
+      if (loc) {
+        competitor.locationLabel = loc.locationLabel;
+        competitor.locationCity = loc.locationCity;
+        competitor.locationSuburb = loc.locationSuburb;
+        competitor.locationCountry = loc.locationCountry;
+        competitor.locationStatus = loc.locationStatus;
+        competitor.locationSource = loc.locationSource;
+      }
+    } catch {
+      /* keep provisional text location */
+    }
+
+    // Brand review is on-demand via Brand review tab — not during find
+    const locNote = competitor.locationLabel
+      ? ` · ${competitor.locationLabel}`
       : "";
     setProgress(job, {
       accepted: accepted.length,

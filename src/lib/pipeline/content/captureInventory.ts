@@ -67,12 +67,32 @@ async function openWithPlaywright(url: string, viewport: { width: number; height
       window.scrollTo(0, 0);
     });
     const readBlocks = () => page.evaluate(() => {
-      const nodes = Array.from(document.querySelectorAll("h1,h2,h3,p,li,button,a,img"));
-      return nodes.slice(0, 400).map((node, index) => {
+      const nodes = Array.from(
+        document.querySelectorAll("h1,h2,h3,p,li,button,a,img,form,label,input,textarea,select"),
+      );
+      return nodes.slice(0, 450).map((node, index) => {
         const box = node.getBoundingClientRect();
+        const tag = node.tagName.toLowerCase();
+        let text = (node.textContent || "").replace(/\s+/g, " ").trim().slice(0, 500);
+        if (/^(input|textarea|select)$/i.test(tag)) {
+          const el = node as HTMLInputElement;
+          text = (
+            el.getAttribute("placeholder") ||
+            el.getAttribute("aria-label") ||
+            el.getAttribute("name") ||
+            el.id ||
+            tag
+          )
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 120);
+        }
+        if (tag === "form") {
+          text = text || "Lead capture form";
+        }
         return {
-          tag: node.tagName.toLowerCase(),
-          text: (node.textContent || "").replace(/\s+/g, " ").trim().slice(0, 500),
+          tag,
+          text,
           alt: node.getAttribute("alt"),
           href: node.getAttribute("href"),
           nodeId: node.id || `n-${index}`,

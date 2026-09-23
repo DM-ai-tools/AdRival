@@ -19,7 +19,7 @@ import type {
   UserRole,
   UserStatus,
 } from "./types";
-import { seedConversionRuleSet } from "./accounting/conversion";
+import { seedConversionRuleSet, conversionRulesNeedSoftening } from "./accounting/conversion";
 import { creditsToSubunits } from "./accounting/units";
 
 /** ADRIVAL_DATA_DIR lets tests point the store at a scratch directory. */
@@ -29,7 +29,7 @@ const DB_PATH = path.join(DATA_DIR, "store.json");
 const DB_LOCK_PATH = path.join(DATA_DIR, "store.json.lock");
 
 /** Current store shape. Bump whenever migrateDb() gains a step. */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 4;
 
 /** In-process cache so status polls don't re-parse a multi-MB store on every request. */
 let memoryDb: DatabaseShape | null = null;
@@ -135,6 +135,33 @@ export function isSearchJobSuppressed(jobId: string): boolean {
     return true;
   }
   return false;
+}
+
+/** Allow a stopped search/brand-review job to run again (clears stop flag). */
+export function clearSearchJobSuppression(jobId: string): SearchJob | null {
+  suppressedSearchJobIds.delete(jobId);
+  return withDbLock(() => {
+    const db = ensureDb();
+    const idx = db.jobs.findIndex((j) => j.id === jobId);
+    if (idx < 0) {
+      writeDb(db);
+      return null;
+    }
+    const prev = db.jobs[idx];
+    if (!prev.progress?.stopRequested && !suppressedSearchJobIds.has(jobId)) {
+      return prev;
+    }
+    db.jobs[idx] = {
+      ...prev,
+      progress: {
+        ...prev.progress,
+        stopRequested: false,
+      },
+      updatedAt: new Date().toISOString(),
+    };
+    writeDb(db);
+    return db.jobs[idx];
+  });
 }
 
 /** Stop an in-flight keyword search (pipeline checks suppression each page). */
@@ -430,6 +457,25 @@ function migrateDb(parsed: DatabaseShape): DatabaseShape {
   if (!parsed.appSettings) parsed.appSettings = defaultAppSettings();
   if (!parsed.conversionRuleSets?.length) {
     parsed.conversionRuleSets = [seedConversionRuleSet()];
+  }
+
+  // Soften redesign pricing / reservation ceilings for lean Claude usage.
+  if (from < 4) {
+    const activeVersion = parsed.appSettings.activeConversionRuleVersion ?? 1;
+    const active =
+      parsed.conversionRuleSets.find((rule) => rule.version === activeVersion) ||
+      parsed.conversionRuleSets[0];
+    if (active && conversionRulesNeedSoftening(active)) {
+      const soft = seedConversionRuleSet();
+      const nextVersion =
+        Math.max(0, ...parsed.conversionRuleSets.map((rule) => rule.version)) + 1;
+      soft.version = nextVersion;
+      soft.note =
+        `Auto-migrated lean redesign rates (schema v4). Previous active rule was v${active.version}.`;
+      parsed.conversionRuleSets.push(soft);
+      parsed.appSettings.activeConversionRuleVersion = nextVersion;
+      parsed.appSettings.updatedAt = new Date().toISOString();
+    }
   }
   if (!parsed.creditPeriods) parsed.creditPeriods = [];
   if (!parsed.creditLedger) parsed.creditLedger = [];

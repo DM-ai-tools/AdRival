@@ -24,6 +24,7 @@ import {
   type LookupAdRecord,
   type SameLandingPageAd,
   type SameLandingPageAdsSummary,
+  type SearchCompetitorAdRecord,
 } from "../types";
 import type { AdPlatform } from "../platforms";
 
@@ -513,5 +514,98 @@ export async function collectSameLandingPageAdsFromLookup(input: {
     matchingAds: matching.length,
     ads: dedupeCreatives(ads),
     note: null,
+  };
+}
+
+/**
+ * Reuse ads already fetched for the offers dashboard (searchCompetitorAds)
+ * instead of spending more SociaVault credits on a company-ad scrape.
+ */
+export async function collectSameLandingPageAdsFromSearchCache(input: {
+  competitor: CompetitorRecord;
+  cachedAds: SearchCompetitorAdRecord[];
+  analyzedUrl: string;
+  pageOffer?: string | null;
+}): Promise<SameLandingPageAdsSummary> {
+  const targetKey = landingPageMatchKey(input.analyzedUrl);
+  const sampleKey = landingPageMatchKey(
+    input.competitor.sampleAd?.landingPageUrl,
+  );
+  const keys = new Set(
+    [targetKey, sampleKey].filter((k): k is string => Boolean(k)),
+  );
+
+  const matching = input.cachedAds.filter((s) => {
+    const k = landingPageMatchKey(s.landingPageUrl);
+    return Boolean(k && keys.has(k));
+  });
+
+  // Prefer LP matches; if none, still surface the sample ad when it is in cache
+  // or matches the analyzed URL.
+  let pool = matching;
+  if (pool.length === 0) {
+    const sampleId = input.competitor.sampleAd?.adArchiveId;
+    const fromSample = sampleId
+      ? input.cachedAds.filter((a) => a.adArchiveId === sampleId)
+      : [];
+    pool = fromSample;
+  }
+
+  const asRaw: RawCompanyAd[] = pool.slice(0, MAX_ADS_IN_UI).map((s) => ({
+    adArchiveId: s.adArchiveId,
+    title: s.title || "",
+    body: s.body || "",
+    fullText: s.body || "",
+    ctaText: s.ctaText ?? null,
+    landingPageUrl: s.landingPageUrl ?? null,
+    isActive: Boolean(s.isActive),
+    daysRunning:
+      typeof s.daysRunning === "number" && Number.isFinite(s.daysRunning)
+        ? s.daysRunning
+        : -1,
+    startDate: s.startDateString ?? null,
+    country: String(s.country || ""),
+    adLibraryUrl: s.adLibraryUrl,
+  }));
+
+  const enriched = await enrichHooksAndOffers(asRaw, input.pageOffer);
+
+  const ads: SameLandingPageAd[] = asRaw.map((s) => {
+    const extra = enriched.get(s.adArchiveId);
+    return {
+      adArchiveId: s.adArchiveId,
+      adLibraryUrl: s.adLibraryUrl,
+      hook: extra?.hook || extractAdHook(s.title, s.body),
+      offer: extra?.offer || heuristicOffer(s.title, s.body, s.ctaText),
+      title: s.title || null,
+      bodySnippet: (s.body || "").slice(0, 220) || null,
+      ctaText: s.ctaText,
+      isActive: s.isActive,
+      daysRunning: s.daysRunning >= 0 ? s.daysRunning : null,
+      startDate: s.startDate,
+      country: s.country,
+    };
+  });
+
+  const unique = dedupeCreatives(ads);
+  const noteParts = [
+    `Reused ${input.cachedAds.length} ad${input.cachedAds.length === 1 ? "" : "s"} from the offers dashboard cache (no SociaVault re-fetch).`,
+  ];
+  if (matching.length === 0 && unique.length > 0) {
+    noteParts.push(
+      "No exact landing-page matches in cache — showing the sample creative when available.",
+    );
+  } else if (matching.length > MAX_ADS_IN_UI) {
+    noteParts.push(
+      `Showing ${unique.length} unique creatives of ${matching.length} cached ads on this landing page.`,
+    );
+  }
+
+  return {
+    landingUrl: input.analyzedUrl,
+    scannedAds: input.cachedAds.length,
+    matchingAds: matching.length || unique.length,
+    ads: unique,
+    note: noteParts.join(" "),
   };
 }

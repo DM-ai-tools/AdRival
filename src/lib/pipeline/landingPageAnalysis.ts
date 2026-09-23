@@ -6,11 +6,13 @@ import type {
   LandingPageOfferAnalysis,
   LookupAdRecord,
 } from "../types";
+import { extractCompetitorChromeFromHtml } from "./unified/recreateChrome";
 import {
   getCompetitor,
   getJob,
   getLookupAd,
   getLookupAds,
+  getSearchCompetitorAdsByCompetitor,
   updateCompetitor,
   updateLookupAd,
 } from "../db";
@@ -20,10 +22,7 @@ import {
   hasOpenRouterKey,
   OPENROUTER_PERPLEXITY_MODEL,
 } from "../openrouter/client";
-import {
-  getDirectOpenAIClient,
-  OPENROUTER_OPENAI_MODEL,
-} from "../openrouter/openaiCompat";
+import { OPENROUTER_OPENAI_MODEL, resolveOpenAICompatModel } from "../openrouter/openaiCompat";
 import {
   getAnthropicClient,
   getAnthropicModel,
@@ -34,6 +33,7 @@ import { fetchRawLandingHtml, normalizeLandingUrl } from "./htmlFetch";
 import {
   collectSameLandingPageAds,
   collectSameLandingPageAdsFromLookup,
+  collectSameLandingPageAdsFromSearchCache,
 } from "./sameLandingPageAds";
 import {
   captureCompetitorScreenshotTiles,
@@ -85,6 +85,15 @@ type PageOutline = {
     snippet: string;
   }>;
   ctas: string[];
+  /** True when the competitor HTML includes a visible lead/contact form. */
+  hasForm: boolean;
+  /** Field labels / names detected on forms. */
+  formFields: string[];
+  /** Real header nav labels from the competitor page (not section headlines). */
+  navLinks: Array<{ label: string; href: string }>;
+  /** Real footer link labels from the competitor page. */
+  footerLinks: Array<{ label: string; href: string }>;
+  headerCta: { label: string; href: string } | null;
   plainText: string;
 };
 
@@ -383,6 +392,39 @@ export function extractPageOutline(html: string, fallbackTitle: string | null): 
     }
   });
 
+  const formFields: string[] = [];
+  const pushFormField = (raw: string) => {
+    const t = normalizeText(raw);
+    if (!t || t.length < 2 || t.length > 60) return;
+    if (/submit|send|captcha|token|honeypot|csrf/i.test(t)) return;
+    if (formFields.some((f) => f.toLowerCase() === t.toLowerCase())) return;
+    formFields.push(t);
+  };
+  $("form").each((_, form) => {
+    const $form = $(form);
+    if ($form.closest("nav, footer").length && $form.find("input:not([type='hidden']), textarea, select").length < 2) {
+      return;
+    }
+    $form.find("label").each((__, label) => pushFormField($(label).text()));
+    $form.find("input, textarea, select").each((__, field) => {
+      const $field = $(field);
+      const type = (($field.attr("type") || "") as string).toLowerCase();
+      if (type === "hidden" || type === "submit" || type === "button" || type === "image") return;
+      pushFormField(
+        $field.attr("placeholder") ||
+          $field.attr("aria-label") ||
+          $field.attr("name") ||
+          $field.attr("id") ||
+          "",
+      );
+    });
+  });
+  const hasForm =
+    $("form").filter((_, form) => {
+      const $form = $(form);
+      return $form.find("input:not([type='hidden']), textarea, select").length >= 2;
+    }).length > 0 || formFields.length >= 2;
+
   // Readable body text with heading markers preserved
   const $scope: any = $("body").length ? $("body") : $.root();
   const bodyClone: any = $scope.clone();
@@ -437,6 +479,9 @@ export function extractPageOutline(html: string, fallbackTitle: string | null): 
 
   const combined = [metaBlock, plain].filter(Boolean).join("\n\n").trim();
 
+  // Prefer chrome harvested before script stripping — re-parse original HTML for nav/footer.
+  const chrome = extractCompetitorChromeFromHtml(html);
+
   return {
     title,
     ogTitle,
@@ -444,6 +489,11 @@ export function extractPageOutline(html: string, fallbackTitle: string | null): 
     heroCandidates: heroCandidates.slice(0, 6),
     headingOutline: headingOutline.slice(0, 40),
     ctas: ctas.slice(0, 12),
+    hasForm: hasForm || chrome.hasForm,
+    formFields: (formFields.length ? formFields : chrome.formFields).slice(0, 10),
+    navLinks: chrome.navLinks,
+    footerLinks: chrome.footerLinks,
+    headerCta: chrome.headerCta,
     plainText: combined.slice(0, MAX_TEXT_CHARS),
   };
 }
@@ -702,10 +752,11 @@ async function analyzeWithLlm(input: {
 
   let raw: string | null = null;
 
-  // Offers / page offer extraction: prefer direct OpenAI API (vision when screenshots exist)
-  if (process.env.OPENAI_API_KEY) {
+  // Offers / page offer extraction: OpenRouter OpenAI first (vision when screenshots exist).
+  // Avoids burning direct platform.openai.com credits.
+  if (hasOpenRouterKey()) {
     try {
-      const client = getDirectOpenAIClient();
+      const client = getOpenRouterClient();
       const userContent: Array<
         | { type: "text"; text: string }
         | { type: "image_url"; image_url: { url: string } }
@@ -719,7 +770,11 @@ async function analyzeWithLlm(input: {
         });
       }
       const completion = await client.chat.completions.create({
-        model: process.env.OFFERS_OPENAI_MODEL?.trim() || "gpt-4o",
+        model: resolveOpenAICompatModel(
+          process.env.OFFERS_OPENAI_MODEL?.trim() ||
+            process.env.OPENROUTER_OPENAI_MODEL?.trim() ||
+            OPENROUTER_OPENAI_MODEL,
+        ),
         temperature: 0.15,
         max_tokens: 6000,
         response_format: { type: "json_object" },
@@ -728,10 +783,10 @@ async function analyzeWithLlm(input: {
           { role: "user", content: userContent },
         ],
       });
-      raw = completion.choices[0]?.message?.content || null;
+      raw = completion.choices[0]?.message?.content?.trim() || null;
     } catch (err) {
       if (isCreditError(err)) throw err;
-      console.error("[page-analysis] direct OpenAI failed, falling back", err);
+      console.error("[page-analysis] OpenRouter OpenAI failed, falling back", err);
     }
   }
 
@@ -763,7 +818,7 @@ async function analyzeWithLlm(input: {
       content.push({
         type: "text",
         text: shots.length
-          ? `${userText}\n\nUse the attached Firecrawl screenshots to verify headline, primary CTA, and section architecture.`
+          ? `${userText}\n\nUse the attached screenshots to verify headline, primary CTA, and section architecture.`
           : userText,
       });
       const completion = await client.messages.create({
@@ -780,39 +835,6 @@ async function analyzeWithLlm(input: {
     } catch (err) {
       if (isCreditError(err)) throw err;
       console.error("[page-analysis] Anthropic failed, falling back", err);
-    }
-  }
-
-  if (!raw && hasOpenRouterKey()) {
-    try {
-      const client = getOpenRouterClient();
-      const userContent: Array<
-        | { type: "text"; text: string }
-        | { type: "image_url"; image_url: { url: string } }
-      > = [{ type: "text", text: userText }];
-      for (const shot of shots) {
-        userContent.push({
-          type: "image_url",
-          image_url: { url: `data:${shot.mediaType};base64,${shot.data}` },
-        });
-      }
-      const completion = await client.chat.completions.create({
-        model: OPENROUTER_OPENAI_MODEL,
-        temperature: 0.15,
-        max_tokens: 6000,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: userContent },
-        ],
-      });
-      raw = completion.choices[0]?.message?.content?.trim() || null;
-    } catch (err) {
-      if (isCreditError(err)) throw err;
-      console.error(
-        "[page-analysis] OpenRouter OpenAI failed, falling back",
-        err,
-      );
     }
   }
 
@@ -837,7 +859,6 @@ async function analyzeWithLlm(input: {
 
   if (!raw) {
     console.error("[page-analysis] no model response", {
-      openai: Boolean(process.env.OPENAI_API_KEY?.trim()),
       anthropic: Boolean(process.env.ANTHROPIC_API_KEY?.trim()),
       openrouter: hasOpenRouterKey(),
     });
@@ -1137,11 +1158,26 @@ export async function analyzeCompetitorLandingPage(
 
     let sameLandingPageAds = null;
     try {
-      sameLandingPageAds = await collectSameLandingPageAds({
-        competitor,
-        analyzedUrl: page.finalUrl,
-        pageOffer: llm.offer?.primaryOffer,
-      });
+      const job = getJob(competitor.runId);
+      const cachedAds = getSearchCompetitorAdsByCompetitor(
+        competitor.runId,
+        competitor.id,
+      );
+      const offersDone = job?.offersReport?.status === "completed";
+      if (offersDone && cachedAds.length > 0) {
+        sameLandingPageAds = await collectSameLandingPageAdsFromSearchCache({
+          competitor,
+          cachedAds,
+          analyzedUrl: page.finalUrl,
+          pageOffer: llm.offer?.primaryOffer,
+        });
+      } else {
+        sameLandingPageAds = await collectSameLandingPageAds({
+          competitor,
+          analyzedUrl: page.finalUrl,
+          pageOffer: llm.offer?.primaryOffer,
+        });
+      }
     } catch (err) {
       console.warn("[page-analysis] same-LP ads failed", err);
     }

@@ -939,9 +939,30 @@ async function tryAcceptFromAds(args: {
   accepted.push(competitor);
   job.competitorIds.push(competitor.id);
   job.progress.accepted = accepted.length;
-  // Deep location enrich deferred to offer / page analysis
-  const locNote = provisional.locationLabel
-    ? ` · ${provisional.locationLabel}`
+
+  try {
+    const { enrichCompetitorSociavaultAddress } = await import("./competitorLocation");
+    const loc = await enrichCompetitorSociavaultAddress({
+      competitorId: competitor.id,
+      facebookUrl: brand.facebookUrl || null,
+      linkedinUrl: brand.linkedinUrl || null,
+      geoMode: job.geoMode || "countrywide",
+      targetLocations: job.targetLocations || [],
+    });
+    if (loc) {
+      competitor.locationLabel = loc.locationLabel;
+      competitor.locationCity = loc.locationCity;
+      competitor.locationSuburb = loc.locationSuburb;
+      competitor.locationCountry = loc.locationCountry;
+      competitor.locationStatus = loc.locationStatus;
+      competitor.locationSource = loc.locationSource;
+    }
+  } catch {
+    /* keep provisional */
+  }
+
+  const locNote = competitor.locationLabel
+    ? ` · ${competitor.locationLabel}`
     : "";
   job.progress.stage = "searching_ads";
   job.progress.message = `Accepted ${pageName} (${accepted.length}/${TARGET_COMPETITORS}) via ${domain}${locNote}`;

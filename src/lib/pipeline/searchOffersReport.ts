@@ -664,6 +664,15 @@ export async function runSearchOffersReportPhase(
       finalStatus: "completed",
       maxLandingPages: 5,
       maxCreativeClusters: 24,
+      relevance: {
+        searchKeywords: job.keywords?.length
+          ? job.keywords
+          : job.keyword
+            ? [job.keyword]
+            : [],
+        selectedCategory: job.selectedCategory || null,
+        businessProfile: job.businessProfile || null,
+      },
       onProgress: (tick) => {
         if (isSearchJobSuppressed(runId)) return;
         const analysisPct = 58 + Math.round((tick.pct / 100) * 40);

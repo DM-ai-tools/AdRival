@@ -335,11 +335,13 @@ export async function meterProviderCall<T>(
           runId: context.runId,
         });
       }
-      // The main app never names the vendor. Admin → Alerts keeps the name.
-      throw new ProviderCreditsExhaustedError(
-        spec.provider,
-        USER_PROVIDER_CREDIT_MESSAGE,
-      );
+      // Admins see which shared API wallet failed; everyone else gets a generic message.
+      const raw = err instanceof Error ? err.message : String(err);
+      const adminDetail = raw.replace(/\s+/g, " ").trim().slice(0, 280);
+      const message = userHasUnlimitedCredits(user)
+        ? `${spec.provider} API wallet is out of credits (this is separate from Unlimited app credits). ${adminDetail}`
+        : USER_PROVIDER_CREDIT_MESSAGE;
+      throw new ProviderCreditsExhaustedError(spec.provider, message);
     }
     throw err;
   }

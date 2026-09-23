@@ -20,13 +20,13 @@ export type CompetitorScreenshotTile = {
   sourceUrl: string;
 };
 
-/** Anthropic rejects any side > 8000px; keep a margin. */
-const MAX_VISION_EDGE = 7500;
-const MAX_DOWNLOAD_BYTES = 12_000_000;
-const MAX_OUTPUT_BYTES = 3_500_000;
+/** Anthropic vision cost scales with pixels — keep fold shots small. */
+const MAX_VISION_EDGE = 1280;
+const MAX_DOWNLOAD_BYTES = 8_000_000;
+const MAX_OUTPUT_BYTES = 350_000;
 
 /**
- * Fit image under Anthropic vision limits and emit JPEG for smaller payloads.
+ * Fit image under lean vision limits and emit JPEG for smaller payloads.
  */
 export async function prepareVisionImage(
   bytes: Buffer,
@@ -54,11 +54,10 @@ export async function prepareVisionImage(
       }
     }
 
-    let quality = 72;
+    let quality = 58;
     let out = await pipeline.jpeg({ quality, mozjpeg: true }).toBuffer();
-    // Shrink further if still huge (very tall pages after width clamp).
-    while (out.length > MAX_OUTPUT_BYTES && quality > 40) {
-      quality -= 10;
+    while (out.length > MAX_OUTPUT_BYTES && quality > 36) {
+      quality -= 8;
       out = await sharp(out).jpeg({ quality, mozjpeg: true }).toBuffer();
     }
     if (out.length < 800 || out.length > MAX_OUTPUT_BYTES) return null;
@@ -127,10 +126,10 @@ export async function captureCompetitorScreenshotTiles(
           sourceUrl: fold.finalUrl || pageUrl,
         });
       } else {
-        warnings.push("Firecrawl fold screenshot URL could not be prepared for vision");
+        warnings.push("Fold screenshot URL could not be prepared for layout reference");
       }
     } else {
-      warnings.push("Firecrawl returned no above-the-fold screenshot");
+      warnings.push("No above-the-fold screenshot was returned");
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -156,10 +155,10 @@ export async function captureCompetitorScreenshotTiles(
             sourceUrl: full.finalUrl || pageUrl,
           });
         } else {
-          warnings.push("Firecrawl full-page screenshot could not be prepared for vision");
+          warnings.push("Full-page screenshot URL could not be prepared for layout reference");
         }
       } else {
-        warnings.push("Firecrawl returned no full-page screenshot");
+        warnings.push("No full-page screenshot was returned");
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

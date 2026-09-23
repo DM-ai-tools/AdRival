@@ -351,6 +351,10 @@ export async function generateRecreationContent(
       ownerUserId: ctx.job.ownerUserId || "unassigned",
       spaceId: ctx.job.spaceId || null,
       focusTerms: serviceTokens(pageIntent),
+      knownBusinessName:
+        ctx.job.businessProfile?.businessName ||
+        pending.businessName ||
+        null,
     });
     const intent = withClientMatch(pageIntent, evidence);
     assertCanDraft(evidence);

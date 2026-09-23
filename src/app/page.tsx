@@ -17,6 +17,7 @@ import { KillWorkButton } from "@/components/KillWorkButton";
 import { AuthHeaderActions } from "@/components/AuthHeaderActions";
 import { ClientSpaceBar, SPACE_EVENT, type SpaceSelection } from "@/components/ClientSpaceBar";
 import { PlatformPicker } from "@/components/PlatformPicker";
+import { BusinessProfileSummary } from "@/components/BusinessProfileSummary";
 import { RunCreditLine, type RunCredits } from "@/components/RunCreditLine";
 import { PLATFORM_META, type AdPlatform } from "@/lib/platforms";
 import type { UnifiedHistoryItem } from "@/lib/historyUnified";
@@ -29,7 +30,7 @@ import type {
 } from "@/lib/types";
 
 type Mode = "search" | "lookup" | "history";
-type ResultsView = "preview" | "brand" | "offers";
+type ResultsView = "website" | "preview" | "brand" | "offers";
 
 export default function HomePage() {
   const [platform, setPlatform] = useState<AdPlatform>("facebook");
@@ -187,7 +188,7 @@ export default function HomePage() {
       setHistoryCompetitors([]);
       setHistoryLookupJob(null);
       setHistoryLookupAds([]);
-      setHistoryResultsView("preview");
+      setHistoryResultsView(run.kind === "search" ? "website" : "preview");
       setHistoryOffersError(null);
       setHistoryCredits(null);
       setGeneratingHistoryOffers(false);
@@ -499,6 +500,14 @@ export default function HomePage() {
               <button
                 type="button"
                 role="tab"
+                className={`tab-btn ${resultsView === "website" ? "active" : ""}`}
+                onClick={() => setResultsView("website")}
+              >
+                Your website
+              </button>
+              <button
+                type="button"
+                role="tab"
                 className={`tab-btn ${resultsView === "preview" ? "active" : ""}`}
                 onClick={() => setResultsView("preview")}
               >
@@ -528,14 +537,26 @@ export default function HomePage() {
               </button>
             </div>
 
-            {resultsView === "preview" ? (
+            {resultsView === "website" ? (
+              <BusinessProfileSummary
+                profile={job?.businessProfile}
+                businessUrl={job?.businessUrl}
+                selectedCategory={job?.selectedCategory}
+                keyword={job?.keyword}
+                keywords={job?.keywords || keywords}
+                geoMode={job?.geoMode}
+                targetLocations={job?.targetLocations}
+              />
+            ) : resultsView === "preview" ? (
               <CompetitorTable
                 competitors={competitors}
+                runId={jobId}
                 onCompetitorUpdated={(updated) => {
                   setCompetitors((prev) =>
                     prev.map((c) => (c.id === updated.id ? updated : c)),
                   );
                 }}
+                onCompetitorsUpdated={setCompetitors}
               />
             ) : resultsView === "brand" ? (
               <BrandReviewPanel
@@ -744,6 +765,14 @@ export default function HomePage() {
                   <button
                     type="button"
                     role="tab"
+                    className={`tab-btn ${historyResultsView === "website" ? "active" : ""}`}
+                    onClick={() => setHistoryResultsView("website")}
+                  >
+                    Your website
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
                     className={`tab-btn ${historyResultsView === "preview" ? "active" : ""}`}
                     onClick={() => setHistoryResultsView("preview")}
                   >
@@ -772,14 +801,26 @@ export default function HomePage() {
                     )}
                   </button>
                 </div>
-                {historyResultsView === "preview" ? (
+                {historyResultsView === "website" ? (
+                  <BusinessProfileSummary
+                    profile={historyJob.businessProfile}
+                    businessUrl={historyJob.businessUrl}
+                    selectedCategory={historyJob.selectedCategory}
+                    keyword={historyJob.keyword}
+                    keywords={historyJob.keywords}
+                    geoMode={historyJob.geoMode}
+                    targetLocations={historyJob.targetLocations}
+                  />
+                ) : historyResultsView === "preview" ? (
                   <CompetitorTable
                     competitors={historyCompetitors}
+                    runId={selectedHistory?.id}
                     onCompetitorUpdated={(updated) => {
                       setHistoryCompetitors((prev) =>
                         prev.map((c) => (c.id === updated.id ? updated : c)),
                       );
                     }}
+                    onCompetitorsUpdated={setHistoryCompetitors}
                   />
                 ) : historyResultsView === "brand" ? (
                   <BrandReviewPanel

@@ -14,6 +14,7 @@ import {
   hasUsableCompetitorReference,
   hasUsableRenderedSource,
   inventoryFromLandingOutline,
+  limitInventoryToSingleForm,
 } from "../content/inventory";
 import { extractPageOutline } from "../landingPageAnalysis";
 import { fetchRawLandingHtml } from "../htmlFetch";
@@ -24,12 +25,21 @@ import { logoStatus } from "../design/constructPage";
 import { assertPublicHttpUrl } from "../content/safeUrl";
 import { extractColorsViaFirecrawl } from "../brandColorSources";
 import type { BrandSiteAssets } from "../brandAssets";
+import { sanitizeClientFacingText } from "../../clientFacing";
 import { buildUnifiedBrief } from "./brief";
-import { generateUnifiedPage, repairUnifiedPage } from "./generatePage";
+import { generateUnifiedPage, repairUnifiedPage, UnifiedRepairIncompleteError } from "./generatePage";
 import { executeImageSlots } from "./images";
-import { injectIdentityLogo, injectProofLogos, validateAndPackageUnifiedPage } from "./validate";
+import { ensurePageChrome, injectIdentityLogo, injectProofLogos, validateAndPackageUnifiedPage } from "./validate";
+import { buildRecreateChromeLinks, scrubOffTopicChromeHtml, extractCompetitorChromeFromHtml, type CompetitorChrome } from "./recreateChrome";
+import { verifyAndRepairUnifiedPage } from "./verifyPage";
 import { embedRemoteImagesInHtml } from "../design/packageHtml";
 import { captureCompetitorScreenshotTiles } from "../competitorScreenshots";
+import {
+  beginUnifiedAbort,
+  endUnifiedAbort,
+  abortUnifiedRun,
+  isUnifiedAbortError,
+} from "./abort";
 import {
   UNIFIED_PIPELINE_VERSION,
   initialStages,
@@ -156,7 +166,7 @@ async function ensureEmbeddableIdentityLogo(
   // Refresh via Firecrawl branding (v2 logo extraction) even when a cached brand bundle exists.
   try {
     const fc = await extractColorsViaFirecrawl(businessUrl);
-    warnings.push(...fc.warnings);
+    warnings.push(...fc.warnings.map((w) => sanitizeClientFacingText(w)));
     const firecrawlLogo = fc.logoUrl || fc.assets?.logoUrl || null;
     if (firecrawlLogo) {
       const nextAssets = withLogoUrl(fc.assets || assets, firecrawlLogo, businessUrl);
@@ -167,34 +177,50 @@ async function ensureEmbeddableIdentityLogo(
         nextAssets.socialLinks = assets.socialLinks.length ? assets.socialLinks : nextAssets.socialLinks;
         nextAssets.emails = assets.emails.length ? assets.emails : nextAssets.emails;
         nextAssets.phones = assets.phones.length ? assets.phones : nextAssets.phones;
+        // Keep page logos from HTML so proof strips can use Firecrawl/site image links.
+        const seen = new Set(nextAssets.images.map((i) => i.src));
+        for (const image of assets.images || []) {
+          if (!image.src || seen.has(image.src)) continue;
+          seen.add(image.src);
+          nextAssets.images.push(image);
+        }
       }
       const embedded = firecrawlLogo.startsWith("data:")
         ? firecrawlLogo
         : await embedRemoteAsset(firecrawlLogo);
       if (embedded) {
-        warnings.push("Identity logo embedded from Firecrawl Branding Format.");
+        warnings.push("Identity logo embedded from site branding.");
         return { assets: nextAssets, identityLogoDataUri: embedded, warnings };
       }
+      // Embed failed — keep trying CDN fallbacks instead of shipping a hotlink that browsers often break.
+      warnings.push("Branding logo URL found but bytes could not be inlined; trying CDN fallbacks.");
       assets = nextAssets;
       push(firecrawlLogo);
     } else {
-      warnings.push("Firecrawl branding returned no logo URL.");
+      warnings.push("Site branding returned no logo URL.");
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    warnings.push(`Firecrawl branding logo refresh failed: ${message.slice(0, 160)}`);
+    warnings.push(`Site branding logo refresh failed: ${message.slice(0, 160)}`);
   }
 
   for (const url of logoCdnFallbacks(businessUrl)) {
     const embedded = await embedRemoteAsset(url);
     if (embedded) {
-      warnings.push("Used CDN logo fallback because site/Firecrawl logo could not be embedded.");
+      warnings.push("Used CDN logo fallback because the site logo could not be embedded.");
       return {
         assets: withLogoUrl(assets, url, businessUrl),
         identityLogoDataUri: embedded,
         warnings,
       };
     }
+  }
+
+  // Last resort: keep a remote https logo link so the page still shows branding.
+  const remoteFallback = candidates.find((url) => /^https?:\/\//i.test(url)) || assets?.logoUrl || null;
+  if (remoteFallback && /^https?:\/\//i.test(remoteFallback)) {
+    warnings.push("Using remote logo URL because inlining failed.");
+    return { assets, identityLogoDataUri: remoteFallback, warnings };
   }
 
   return { assets, identityLogoDataUri: null, warnings };
@@ -295,7 +321,44 @@ export function isUnifiedRunActive(page: RecreatedLandingPage | null | undefined
   if (page.status !== "pending" && page.status !== "design_pending") return false;
   const updated = Date.parse(page.updatedAt || "");
   if (!Number.isFinite(updated)) return false;
-  return Date.now() - updated < 12 * 60 * 1000;
+  // Allow long Claude streams; heartbeats refresh updatedAt about every 8s.
+  return Date.now() - updated < 30 * 60 * 1000;
+}
+
+/** Abort an in-flight unified recreate and mark the page stopped. */
+export function stopUnifiedRecreation(
+  competitorId: string,
+  reason = "Recreation stopped",
+): CompetitorRecord {
+  abortUnifiedRun(competitorId);
+  const competitor = getCompetitor(competitorId);
+  if (!competitor?.recreatedPage) {
+    throw new Error("Competitor not found");
+  }
+  const page = competitor.recreatedPage;
+  const stages = (page.progress?.stages || initialStages()).map((stage) =>
+    stage.status === "active" || stage.status === "indeterminate"
+      ? { ...stage, status: "blocked" as const, detail: reason }
+      : stage,
+  );
+  const next: RecreatedLandingPage = {
+    ...page,
+    status: page.html ? "completed" : "failed",
+    error: reason,
+    progress: {
+      phase: "failed",
+      message: reason,
+      pct: page.progress?.pct || 0,
+      stages,
+      indeterminate: false,
+      details: page.progress?.details,
+    },
+    updatedAt: new Date().toISOString(),
+  };
+  updateCompetitor(competitorId, { recreatedPage: next });
+  const latest = getCompetitor(competitorId);
+  if (!latest) throw new Error("Failed to stop recreation");
+  return latest;
 }
 
 /** Unified recreate: capture → brief → Anthropic content+HTML → images → validate. */
@@ -318,6 +381,9 @@ export async function runUnifiedRecreation(
     return competitor;
   }
 
+  const abortSignal = beginUnifiedAbort(competitorId);
+  /** Last complete HTML from this run, kept if a later validation step fails. */
+  let salvageHtml = "";
   const keyword = job.keywords?.[0] || job.keyword.split(",")[0]?.trim() || job.keyword;
   const sourceUrl = competitor.pageAnalysis.analyzedUrl;
   let page = basePage({ competitor, job, businessUrl, keyword, sourceUrl });
@@ -363,6 +429,8 @@ export async function runUnifiedRecreation(
             ctas: outline.ctas,
             architecture: savedArchitecture,
             campaignOffer,
+            hasForm: outline.hasForm,
+            formFields: outline.formFields,
           });
         } catch {
           inventory = inventoryFromLandingOutline({
@@ -413,7 +481,38 @@ export async function runUnifiedRecreation(
         throw new Error("SOURCE_INCOMPLETE: The competitor page could not be captured, and the saved offer analysis has no usable sections. Refresh offer & page details, then retry.");
       }
 
-      inventory = enrichInventoryWithCampaignOffer(inventory!, campaignOffer);
+      inventory = limitInventoryToSingleForm(enrichInventoryWithCampaignOffer(inventory!, campaignOffer));
+
+      // Always harvest competitor header/footer chrome + form signals from live HTML.
+      let competitorChrome: CompetitorChrome | null = null;
+      try {
+        const fetched = await fetchRawLandingHtml(sourceUrl);
+        competitorChrome = extractCompetitorChromeFromHtml(fetched.html);
+        if (competitorChrome.hasForm) {
+          const hasFormComponent = inventory!.sections.some((s) =>
+            s.components.some((c) => c.kind === "form"),
+          );
+          if (!hasFormComponent && inventory!.sections.length) {
+            const target =
+              inventory!.sections.find((s) =>
+                /form|contact|book|sign|apply|lead|cta/i.test(
+                  `${s.sourceHeading || ""} ${s.internalLabel || ""} ${s.purpose || ""}`,
+                ),
+              ) || inventory!.sections[0];
+            target.components.push({
+              id: `${target.id}-form`,
+              kind: "form",
+              text: "Lead capture form matching the competitor page (use exactly once)",
+              items: (competitorChrome.formSpec?.fields.map(
+                (f) => `${f.label}|${f.type}${f.required ? "|required" : ""}`,
+              ) || competitorChrome.formFields).slice(0, 16),
+            });
+            inventory = limitInventoryToSingleForm(inventory!);
+          }
+        }
+      } catch {
+        /* chrome harvest optional — screenshots still guide layout */
+      }
 
       // Skip layout measurement on the offer-analysis fast path — it is another full browser pass.
       let layout = inventory!.layout || null;
@@ -456,7 +555,7 @@ export async function runUnifiedRecreation(
           ],
         };
       }
-      return { inventory: inventory!, layout };
+      return { inventory: inventory!, layout, competitorChrome };
     })();
 
     const clientPrep = (async () => {
@@ -495,12 +594,17 @@ export async function runUnifiedRecreation(
         ownerUserId: job.ownerUserId || "system",
         spaceId: job.spaceId || null,
         focusTerms: [keyword, ...(competitor.pageAnalysis?.offer?.headline ? [competitor.pageAnalysis.offer.headline] : [])],
+        knownBusinessName:
+          job.businessProfile?.businessName ||
+          page.businessName ||
+          assets?.siteName ||
+          null,
       });
       assertCanDraft(evidence);
       return { brand, assets, evidence };
     })();
 
-    const [{ inventory, layout }, client] = await Promise.all([
+    const [{ inventory, layout, competitorChrome }, client] = await Promise.all([
       competitorPrep,
       clientPrep,
     ]);
@@ -553,10 +657,12 @@ export async function runUnifiedRecreation(
     updateJob(job.id, { businessProfile: profile });
 
     const logo = logoStatus(assets);
-    if (logo.issue) {
+    if (logo.issue && !logo.url) {
       page = persist(competitorId, page, stages, "analyzing_client", logo.issue, {
         publishBlockers: [logo.issue],
       });
+    } else if (logo.issue) {
+      page = persist(competitorId, page, stages, "analyzing_client", logo.issue);
     }
     if (!identityLogoDataUri && logo.url) {
       page = persist(competitorId, page, stages, "analyzing_client", "Logo URL found but could not be embedded yet.", {
@@ -580,18 +686,41 @@ export async function runUnifiedRecreation(
     stages = markStage(stages, "preparing_brief", "active");
     page = persist(competitorId, page, stages, "preparing_brief", "Preparing page brief…");
 
+    const identityUrl = (logo.url || assets?.logoUrl || "").trim();
     const proofCandidates = (assets?.images || [])
-      .filter((image) => image.kind === "logo" && image.src && image.src !== logo.url)
-      .slice(0, 8);
+      .filter((image) => {
+        const src = (image.src || "").trim();
+        if (!src) return false;
+        if (identityUrl && src === identityUrl) return false;
+        if (/favicon|apple-touch|sprite|pixel|1x1/i.test(src)) return false;
+        // Prefer logo marks; include non-favicon icons that often appear in trust strips.
+        if (image.kind === "logo") return true;
+        if (image.kind === "icon" && /^https?:\/\//i.test(src) && !/favicon/i.test(src)) {
+          return true;
+        }
+        return false;
+      })
+      .slice(0, 12);
     const proofLogos: Array<{ src: string; alt: string }> = [];
+    const seenProof = new Set<string>();
     for (const image of proofCandidates) {
-      const embedded = image.src.startsWith("data:") ? image.src : await embedRemoteAsset(image.src);
-      if (embedded) proofLogos.push({ src: embedded, alt: image.alt || "Partner logo" });
+      const remote = image.src.trim();
+      if (seenProof.has(remote)) continue;
+      const embedded =
+        remote.startsWith("data:") ? remote : await embedRemoteAsset(remote);
+      // Keep Firecrawl/HTML https logo links when bytes cannot be inlined.
+      const src =
+        embedded ||
+        (/^https?:\/\//i.test(remote) ? remote : null);
+      if (!src) continue;
+      seenProof.add(remote);
+      proofLogos.push({ src, alt: image.alt || "Partner logo" });
+      if (proofLogos.length >= 8) break;
     }
 
-    // Prefer Firecrawl fold screenshot for vision (fast). Full-page is optional elsewhere.
+    // Fold + full-page screenshots for accurate section replication (quality over speed).
     page = persist(competitorId, page, stages, "preparing_brief", "Capturing competitor screenshots…");
-    const shotResult = await captureCompetitorScreenshotTiles(sourceUrl, { foldOnly: true });
+    const shotResult = await captureCompetitorScreenshotTiles(sourceUrl, { foldOnly: false });
     const tileBase64: Array<{
       id: string;
       data: string;
@@ -602,7 +731,7 @@ export async function runUnifiedRecreation(
       mediaType: tile.mediaType,
     }));
     if (!tileBase64.length) {
-      for (const tile of (inventory.tiles || []).slice(0, 1)) {
+      for (const tile of (inventory.tiles || []).slice(0, 2)) {
         try {
           const bytes = await readFile(tile.path);
           tileBase64.push({ id: tile.id, data: bytes.toString("base64"), mediaType: "image/jpeg" });
@@ -640,12 +769,13 @@ export async function runUnifiedRecreation(
       design: brand.design || job.businessProfile?.brandDesign || null,
       profile,
       userFeedback: options.userFeedback || null,
-      imageBudget: 3,
+      imageBudget: 2,
       tileBase64,
       identityLogoDataUri,
       proofLogos,
       campaignOffer,
-      hasCompetitorScreenshots: shotResult.tiles.length > 0,
+      hasCompetitorScreenshots: tileBase64.length > 0,
+      competitorChrome,
     };
     const brief = buildUnifiedBrief({ ...briefInput, compact: false });
     const compactBrief = buildUnifiedBrief({
@@ -653,23 +783,37 @@ export async function runUnifiedRecreation(
       tileBase64: [],
       compact: true,
       hasCompetitorScreenshots: false,
-      imageBudget: 2,
+      imageBudget: 1,
     });
     stages = markStage(stages, "preparing_brief", "done", `Brief ready (${brief.sectionCount} sections)`);
     page = persist(competitorId, page, stages, "preparing_brief", "Page brief ready");
 
-    stages = markStage(stages, "creating_page", "indeterminate", "Anthropic is generating content and design…");
+    stages = markStage(stages, "creating_page", "indeterminate", "Creating content and design (sectioned clone)…");
     page = persist(competitorId, { ...page, status: "design_pending" }, stages, "creating_page", "Creating content and design…");
 
-    const generated = await generateUnifiedPage(brief, { compactBrief });
+    const generated = await generateUnifiedPage(brief, {
+      compactBrief,
+      signal: abortSignal,
+      onProgress: ({ chars, pass, label }) => {
+        if (abortSignal.aborted) return;
+        const message =
+          label ||
+          `Creating content and design… (${pass})${
+            chars > 0 ? ` · ${Math.max(1, Math.round(chars / 1000))}k chars` : ""
+          }`;
+        stages = markStage(stages, "creating_page", "indeterminate", message);
+        page = persist(competitorId, page, stages, "creating_page", message);
+      },
+    });
     let html = generated.response.html;
+    salvageHtml = html;
     if (identityLogoDataUri) {
       html = injectIdentityLogo(html, identityLogoDataUri, page.businessName || "Brand", businessUrl);
     }
     if (proofLogos.length) {
       html = injectProofLogos(html, proofLogos);
     }
-    stages = markStage(stages, "creating_page", "done", `Model ${generated.model}`);
+    stages = markStage(stages, "creating_page", "done", "Content and design draft received");
     page = persist(competitorId, page, stages, "creating_page", "Content and design draft received");
 
     stages = markStage(stages, "generating_images", "active");
@@ -728,11 +872,72 @@ export async function runUnifiedRecreation(
     stages = markStage(stages, "checking", "active");
     page = persist(competitorId, page, stages, "checking", "Checking and packaging page…");
     // Embed any remaining remote http(s) images so preview/download stay portable.
-    const remoteEmbedded = await embedRemoteImagesInHtml(html, { maxImages: 14 });
+    const remoteEmbedded = await embedRemoteImagesInHtml(html, { maxImages: 24 });
     html = remoteEmbedded.html;
     if (identityLogoDataUri) {
       html = injectIdentityLogo(html, identityLogoDataUri, page.businessName || "Brand", businessUrl);
     }
+    if (proofLogos.length) {
+      html = injectProofLogos(html, proofLogos);
+    }
+
+    // Verify/repair header + footer chrome (logo, nav, multi-column footer) before packaging.
+    // Use campaign-aligned chrome — never the client's full SEO/service sitemap.
+    const hasForm =
+      Boolean(competitorChrome?.hasForm) ||
+      inventory.sections.some((section) =>
+        section.components.some((component) => component.kind === "form"),
+      );
+    const recreateChrome = buildRecreateChromeLinks({
+      clientUrl: businessUrl,
+      sections: inventory.sections.map((section) => ({
+        id: section.id,
+        heading: section.sourceHeading || section.internalLabel,
+        purpose: section.purpose,
+      })),
+      campaignOffer,
+      keyword,
+      assets,
+      hasForm,
+      competitorChrome,
+    });
+    const chromeAssets = {
+      clientName: page.businessName || hostOf(businessUrl) || "Brand",
+      clientUrl: businessUrl,
+      logoUrl: identityLogoDataUri || logo.url || assets?.logoUrl || null,
+      navLinks: recreateChrome.navLinks,
+      footerLinks: recreateChrome.footerLinks,
+      footerColumns: recreateChrome.footerColumns,
+      ctaLinks: recreateChrome.ctaLinks,
+      socialLinks: assets?.socialLinks || [],
+      phones: assets?.phones || [],
+      emails: assets?.emails || [],
+      tagline:
+        job.businessProfile?.positioningSummary ||
+        job.businessProfile?.description ||
+        page.businessName ||
+        null,
+    };
+    let chromeFix = ensurePageChrome(html, chromeAssets, { forceHeader: true, forceFooter: true });
+    html = chromeFix.html;
+    html = scrubOffTopicChromeHtml(html, recreateChrome.topicHay, [
+      ...recreateChrome.navLinks.map((l) => l.label),
+      ...recreateChrome.footerLinks.map((l) => l.label),
+      ...recreateChrome.ctaLinks.map((l) => l.label),
+    ]);
+    if (identityLogoDataUri) {
+      html = injectIdentityLogo(html, identityLogoDataUri, page.businessName || "Brand", businessUrl);
+    }
+    if (chromeFix.repaired.length) {
+      page = persist(
+        competitorId,
+        page,
+        stages,
+        "checking",
+        `Repaired ${chromeFix.repaired.join(" + ")} chrome before delivery`,
+      );
+    }
+
     let validated = validateAndPackageUnifiedPage({
       html,
       clientHost: hostOf(businessUrl),
@@ -740,14 +945,52 @@ export async function runUnifiedRecreation(
       logoRequired: Boolean(identityLogoDataUri || logo.url),
       expectedSections: inventory.sections.length,
       colors: brand.colors,
+      requireChrome: true,
     });
+    // Force-rebuild chrome if validation still flags header/footer/logo issues.
+    if (!validated.ok && validated.blockers.some((b) => /header|footer|logo|navigation/i.test(b))) {
+      chromeFix = ensurePageChrome(html, chromeAssets, { forceHeader: true, forceFooter: true });
+      html = chromeFix.html;
+      html = scrubOffTopicChromeHtml(html, recreateChrome.topicHay, [
+        ...recreateChrome.navLinks.map((l) => l.label),
+        ...recreateChrome.footerLinks.map((l) => l.label),
+        ...recreateChrome.ctaLinks.map((l) => l.label),
+      ]);
+      if (identityLogoDataUri) {
+        html = injectIdentityLogo(html, identityLogoDataUri, page.businessName || "Brand", businessUrl);
+      }
+      validated = validateAndPackageUnifiedPage({
+        html,
+        clientHost: hostOf(businessUrl),
+        competitorHost: hostOf(sourceUrl),
+        logoRequired: Boolean(identityLogoDataUri || logo.url),
+        expectedSections: inventory.sections.length,
+        colors: brand.colors,
+        requireChrome: true,
+      });
+    }
     if (!validated.ok) {
       page = persist(competitorId, page, stages, "checking", "Repairing validation defects…");
-      const repaired = await repairUnifiedPage({
-        html,
-        defects: validated.blockers,
-        briefText: brief.text,
-      });
+      let repaired: Awaited<ReturnType<typeof repairUnifiedPage>> | null = null;
+      try {
+        repaired = await repairUnifiedPage({
+          html,
+          defects: validated.blockers,
+          briefText: brief.text,
+        });
+      } catch (err) {
+        if (!(err instanceof UnifiedRepairIncompleteError)) throw err;
+        page = persist(
+          competitorId,
+          page,
+          stages,
+          "checking",
+          "Repair was truncated — keeping the assembled page.",
+        );
+      }
+      if (!repaired) {
+        // Assembled HTML is already complete. Deterministic chrome/QA still runs below.
+      } else {
       html = repaired.response.html;
       if (logo.url || identityLogoDataUri) {
         const embedded =
@@ -764,6 +1007,15 @@ export async function runUnifiedRecreation(
       });
       html = imageRepair.html;
       imageReport = imageRepair.report.images.length ? imageRepair.report : imageReport;
+      html = ensurePageChrome(html, chromeAssets, { forceHeader: true, forceFooter: true }).html;
+      html = scrubOffTopicChromeHtml(html, recreateChrome.topicHay, [
+        ...recreateChrome.navLinks.map((l) => l.label),
+        ...recreateChrome.footerLinks.map((l) => l.label),
+        ...recreateChrome.ctaLinks.map((l) => l.label),
+      ]);
+      if (identityLogoDataUri) {
+        html = injectIdentityLogo(html, identityLogoDataUri, page.businessName || "Brand", businessUrl);
+      }
       validated = validateAndPackageUnifiedPage({
         html,
         clientHost: hostOf(businessUrl),
@@ -771,12 +1023,142 @@ export async function runUnifiedRecreation(
         logoRequired: Boolean(identityLogoDataUri || logo.url),
         expectedSections: inventory.sections.length,
         colors: brand.colors,
+        requireChrome: true,
       });
       if (!validated.ok) {
+        salvageHtml = html;
         throw new Error(validated.blockers.slice(0, 4).join(" "));
+      }
       }
     }
 
+    // Final QA gate — collapse duplicate forms/CTAs, finish incomplete buttons, check logo.
+    page = persist(competitorId, page, stages, "checking", "Verifying page for glitches…");
+    const qa = verifyAndRepairUnifiedPage(validated.html, {
+      expectForm: hasForm,
+      maxBodyCtas: 3,
+      maxHeaderCtas: 1,
+      clientName: page.businessName || hostOf(businessUrl) || "Brand",
+      logoRequired: Boolean(identityLogoDataUri || logo.url),
+      formSpec: competitorChrome?.formSpec || null,
+      formCtaLabel: recreateChrome.ctaLinks[0]?.label || campaignOffer?.cta || null,
+    });
+    html = qa.html;
+    if (identityLogoDataUri) {
+      html = injectIdentityLogo(html, identityLogoDataUri, page.businessName || "Brand", businessUrl);
+    }
+    if (qa.repairs.length) {
+      page = persist(
+        competitorId,
+        page,
+        stages,
+        "checking",
+        `QA repaired: ${qa.repairs.slice(0, 3).join("; ")}`,
+      );
+    }
+    validated = {
+      ...validated,
+      html,
+      ok: validated.ok && qa.ok,
+      blockers: [...validated.blockers, ...qa.blockers],
+      warnings: [...validated.warnings, ...qa.warnings],
+    };
+    if (!validated.ok) {
+      // One repair pass focused on QA defects, then re-verify.
+      page = persist(competitorId, page, stages, "checking", "Repairing QA defects…");
+      let repaired: Awaited<ReturnType<typeof repairUnifiedPage>> | null = null;
+      try {
+        repaired = await repairUnifiedPage({
+          html,
+          defects: validated.blockers,
+          briefText: brief.text,
+        });
+      } catch (err) {
+        if (!(err instanceof UnifiedRepairIncompleteError)) throw err;
+        page = persist(
+          competitorId,
+          page,
+          stages,
+          "checking",
+          "Repair was truncated — delivering the assembled page.",
+        );
+      }
+      if (!repaired) {
+        validated = {
+          ...validated,
+          ok: /<\/html>/i.test(html),
+          warnings: [
+            ...validated.warnings,
+            ...validated.blockers,
+            "Full-page repair was truncated; the assembled page was kept.",
+          ],
+          blockers: /<\/html>/i.test(html) ? [] : validated.blockers,
+          html,
+        };
+        if (!validated.ok) {
+          salvageHtml = html;
+          throw new Error(validated.blockers.slice(0, 4).join(" ") || "The page could not be completed.");
+        }
+      } else {
+      html = repaired.response.html;
+      if (identityLogoDataUri) {
+        html = injectIdentityLogo(html, identityLogoDataUri, page.businessName || "Brand", businessUrl);
+      }
+      html = ensurePageChrome(html, chromeAssets, { forceHeader: true, forceFooter: true }).html;
+      html = scrubOffTopicChromeHtml(html, recreateChrome.topicHay, [
+        ...recreateChrome.navLinks.map((l) => l.label),
+        ...recreateChrome.footerLinks.map((l) => l.label),
+        ...recreateChrome.ctaLinks.map((l) => l.label),
+      ]);
+      if (identityLogoDataUri) {
+        html = injectIdentityLogo(html, identityLogoDataUri, page.businessName || "Brand", businessUrl);
+      }
+      const qa2 = verifyAndRepairUnifiedPage(html, {
+        expectForm: hasForm,
+        maxBodyCtas: 3,
+        maxHeaderCtas: 1,
+        clientName: page.businessName || hostOf(businessUrl) || "Brand",
+        logoRequired: Boolean(identityLogoDataUri || logo.url),
+        formSpec: competitorChrome?.formSpec || null,
+        formCtaLabel: recreateChrome.ctaLinks[0]?.label || campaignOffer?.cta || null,
+      });
+      html = qa2.html;
+      if (identityLogoDataUri) {
+        html = injectIdentityLogo(html, identityLogoDataUri, page.businessName || "Brand", businessUrl);
+      }
+      validated = validateAndPackageUnifiedPage({
+        html,
+        clientHost: hostOf(businessUrl),
+        competitorHost: hostOf(sourceUrl),
+        logoRequired: Boolean(identityLogoDataUri || logo.url),
+        expectedSections: inventory.sections.length,
+        colors: brand.colors,
+        requireChrome: true,
+      });
+      const qa3 = verifyAndRepairUnifiedPage(validated.html, {
+        expectForm: hasForm,
+        maxBodyCtas: 3,
+        maxHeaderCtas: 1,
+        clientName: page.businessName || hostOf(businessUrl) || "Brand",
+        logoRequired: Boolean(identityLogoDataUri || logo.url),
+        formSpec: competitorChrome?.formSpec || null,
+        formCtaLabel: recreateChrome.ctaLinks[0]?.label || campaignOffer?.cta || null,
+      });
+      validated = {
+        ...validated,
+        html: qa3.html,
+        ok: validated.ok && qa3.ok,
+        blockers: [...validated.blockers, ...qa3.blockers],
+        warnings: [...validated.warnings, ...qa3.warnings, ...qa2.warnings],
+      };
+      if (!validated.ok) {
+        salvageHtml = html;
+        throw new Error(validated.blockers.slice(0, 4).join(" "));
+      }
+      }
+    }
+
+    salvageHtml = validated.html || html;
     const placeholders = imageReport.placeholders > 0;
     const publishBlockers = [
       ...generated.response.unresolvedRequirements,
@@ -794,7 +1176,7 @@ export async function runUnifiedRecreation(
         generatedImages: imageReport.images,
         brandColors: brand.colors,
         differentiationNotes: [
-          `Unified pipeline ${UNIFIED_PIPELINE_VERSION} via ${generated.model}.`,
+          `Unified pipeline ${UNIFIED_PIPELINE_VERSION}.`,
           ...generated.response.warnings,
           ...validated.warnings,
         ].join(" "),
@@ -811,21 +1193,42 @@ export async function runUnifiedRecreation(
 
     const latest = getCompetitor(competitorId);
     if (!latest) throw new Error("Failed to save recreated page");
+    endUnifiedAbort(competitorId, abortSignal);
     return latest;
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    endUnifiedAbort(competitorId, abortSignal);
+    const aborted = isUnifiedAbortError(err) || abortSignal.aborted;
+    const message = aborted
+      ? "Recreation stopped"
+      : err instanceof Error
+        ? err.message
+        : String(err);
     stages = markStage(stages, (page.progress?.phase as UnifiedStageId) || "preparing", "blocked", message);
-    persist(
+    const keepGenerated =
+      !aborted &&
+      (/<\/html>/i.test(salvageHtml) || /<body[\s>]/i.test(salvageHtml) || salvageHtml.length > 800);
+    const saved = persist(
       competitorId,
       {
         ...page,
-        status: page.html ? "completed" : "failed",
-        error: message,
+        status: keepGenerated || page.html ? "completed" : "failed",
+        html: keepGenerated ? salvageHtml : page.html,
+        error: keepGenerated ? null : message,
+        publishReady: false,
+        publishBlockers: keepGenerated
+          ? [message, ...(page.publishBlockers || [])].slice(0, 6)
+          : page.publishBlockers,
       },
       stages,
-      "failed",
-      message,
+      keepGenerated ? "ready" : "failed",
+      keepGenerated ? "Page kept after a validation issue" : message,
     );
+    if (aborted || keepGenerated) {
+      const latest = getCompetitor(competitorId);
+      if (!latest) throw new Error(keepGenerated ? "Failed to save the generated page" : "Failed to stop recreation");
+      return latest;
+    }
+    void saved;
     throw err;
   }
 }

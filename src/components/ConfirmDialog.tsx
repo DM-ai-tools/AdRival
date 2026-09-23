@@ -38,7 +38,7 @@ export function ConfirmDialog({
     const prev = document.activeElement as HTMLElement | null;
     cancelRef.current?.focus();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) dismiss();
+      if (e.key === "Escape") dismiss();
     };
     window.addEventListener("keydown", onKey);
     return () => {
@@ -54,7 +54,7 @@ export function ConfirmDialog({
       className="confirm-overlay"
       role="presentation"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget && !busy) dismiss();
+        if (e.target === e.currentTarget) dismiss();
       }}
     >
       <div
@@ -75,10 +75,9 @@ export function ConfirmDialog({
             ref={cancelRef}
             type="button"
             className="chip-btn"
-            disabled={busy}
             onClick={onCancel}
           >
-            {cancelLabel}
+            {busy ? "Close" : cancelLabel}
           </button>
           <button
             type="button"

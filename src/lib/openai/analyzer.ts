@@ -14,6 +14,7 @@ import {
   getOpenAICompatClient,
   resolveOpenAICompatModel,
 } from "../openrouter/openaiCompat";
+import { detectAgencySopRejectReason } from "../guardrails/industrySops";
 
 const KEYWORD_STOPWORDS = new Set([
   "a",
@@ -443,25 +444,32 @@ Reject (relevant=false) when:
 - They are a different specialty (e.g. orthodontics vs general dentistry when keywords are specific)
 - They are a marketing agency advertising agency services (unless seed is an agency)
 - The creative only shares geography/brand vibes without keyword-relevant offer
+- For agency/PPC seeds: reject AI/SaaS ad tools, DIY platforms, workshops/courses/coaching that are NOT done-for-you agencies (e.g. "alternative to your ad agency", "AI fixed our ads")
+- Case-study landing pages for a software tool's customer are NOT agency competitors
 
 OUTPUT:
 - isMarketingAgency=true only if they are primarily a marketing agency.
 - relevant=true only for credible same-service competitors whose ads are keyword-relevant.`
     : `You qualify Facebook Ad Library advertisers for a MARKETING-AGENCY competitor finder.
 
-GOAL: Keep ONLY true marketing agencies / marketing consultancies. Reject ordinary businesses that merely run ads to promote themselves.
+GOAL: Keep ONLY true marketing agencies / marketing consultancies selling done-for-you services. Reject ordinary businesses, AI/SaaS ad tools, DIY platforms, workshops, webinars, and courses.
 
 CRITICAL READING RULES:
 - Read fullCreativeText / primaryBody before deciding.
 - Do NOT decide from headline + CTA alone.
 - Quote bodyEvidence that proves they sell marketing services TO other businesses.
-- When unsure whether they are an agency vs a normal business advertising itself, REJECT (isMarketingAgency=false, relevant=false).
+- When unsure whether they are an agency vs a tool/course/normal business, REJECT (isMarketingAgency=false, relevant=false).
 
 Qualification (ALL required for relevant=true):
 1) Keyword relevance: their agency offer relates to the user keyword (semantic OK). Score 0–1 only.
-2) MUST be a marketing agency (strict B2B positioning).
+2) MUST be a marketing agency (strict B2B positioning — managed ads / retainers / done-for-you).
 3) Service focus: body copy promotes selling at least one of: Google Ads, SEO, AEO/GEO, SMM (as a client service).
    Map into these labels only: ${SERVICE_LABELS.join(", ")}.
+
+HARD REJECTS (relevant=false, isMarketingAgency=false):
+- AI ad tools / software ("alternative to your ad agency", "Blend's AI", SaaS free trial)
+- Workshops, webinars, courses, coaching cohorts, DIY ad setup products
+- Ordinary ecommerce or local businesses advertising themselves
 
 OUTPUT:
 - services MUST be a JSON array, e.g. ["Google Ads","SEO"].
@@ -559,19 +567,46 @@ OUTPUT:
       (agencySignal || score >= Math.max(scoreFloor, 0.55));
   }
 
+  // Agency / PPC searches: hard-reject AI tools, DIY platforms, workshops, courses
+  const agencySeed =
+    !profile ||
+    /agency|ppc|google ads|digital marketing|paid media|seo agency/i.test(
+      [
+        profile.industry,
+        profile.subIndustry,
+        profile.positioningSummary,
+        ...(profile.offerings || []),
+        selectedCategory?.label || "",
+        keywordList,
+      ]
+        .filter(Boolean)
+        .join(" "),
+    );
+  const toolOrEdu = detectAgencySopRejectReason(
+    `${creativeBlob}\n${services.join(" ")}\n${ad.landingPageUrl || ""}\n${ad.pageName || ""}`,
+  );
+  const diyService = services.some((s) => /\bdiy\b/i.test(s));
+  if (agencySeed && (toolOrEdu || diyService)) {
+    relevant = false;
+  }
+
   return {
     relevant,
     relevanceScore: score,
-    isMarketingAgency: isAgency,
+    isMarketingAgency: isAgency && !toolOrEdu && !diyService,
     services,
     bodyEvidence,
     reason: profile
-      ? !hasBody
+      ? toolOrEdu || diyService
+        ? `${reason} (rejected: ${toolOrEdu || "DIY positioning"} — not an agency competitor)`
+        : !hasBody
         ? `${reason} (rejected: insufficient creative text)`
         : keywordOverlap <= 0 && score < Math.max(scoreFloor + 0.15, 0.55)
           ? `${reason} (rejected: weak keyword/service overlap in ad copy)`
           : reason
-      : !isAgency
+      : toolOrEdu || diyService
+        ? `${reason} (rejected: ${toolOrEdu || "DIY positioning"} — tool/workshop not agency)`
+        : !isAgency
         ? `${reason} (rejected: not a marketing agency)`
         : !hasBody
           ? `${reason} (rejected: insufficient creative text)`

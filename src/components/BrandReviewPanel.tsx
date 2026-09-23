@@ -51,12 +51,14 @@ export function BrandReviewPanel({
 }: BrandReviewPanelProps) {
   const [batchBusy, setBatchBusy] = useState(false);
   const [rowBusy, setRowBusy] = useState<string | null>(null);
+  const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmRedoAll, setConfirmRedoAll] = useState(false);
   const [localProgress, setLocalProgress] = useState<LocalProgress | null>(
     null,
   );
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   const resolvedRunId = runId || competitors[0]?.runId || null;
 
@@ -91,6 +93,7 @@ export function BrandReviewPanel({
   useEffect(() => {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
+      abortRef.current?.abort();
     };
   }, []);
 
@@ -120,6 +123,13 @@ export function BrandReviewPanel({
             currentName: progress.brandReviewCurrentName ?? null,
             message: progress.message || "Brand review in progress…",
           });
+          if (
+            progress.stage !== "brand_review" &&
+            progress.stopRequested
+          ) {
+            setBatchBusy(false);
+            setStopping(false);
+          }
         }
         if (Array.isArray(data.competitors) && data.competitors.length) {
           onCompetitorsUpdated?.(data.competitors);
@@ -130,9 +140,42 @@ export function BrandReviewPanel({
     }, 1200);
   }
 
+  async function stopBrandReview() {
+    if (!resolvedRunId || stopping) return;
+    setStopping(true);
+    setError(null);
+    abortRef.current?.abort();
+    try {
+      await fetch("/api/stop", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jobId: resolvedRunId }),
+      });
+      setLocalProgress((prev) =>
+        prev
+          ? {
+              ...prev,
+              currentName: null,
+              message: "Stopping brand review…",
+            }
+          : {
+              done: 0,
+              total: competitors.length,
+              currentName: null,
+              message: "Stopping brand review…",
+            },
+      );
+    } catch (err) {
+      setError((err as Error).message);
+      setStopping(false);
+    }
+  }
+
   async function runBatch(force: boolean) {
     if (!resolvedRunId) return;
+    setConfirmRedoAll(false);
     setBatchBusy(true);
+    setStopping(false);
     setError(null);
     setLocalProgress({
       done: 0,
@@ -142,32 +185,50 @@ export function BrandReviewPanel({
         ? "Re-running brand review for all competitors…"
         : "Starting brand review…",
     });
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
     startPolling(resolvedRunId);
     try {
       const res = await fetch("/api/competitors/brand-review", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ runId: resolvedRunId, force }),
+        signal: ac.signal,
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (ac.signal.aborted) return;
       if (!res.ok) throw new Error(data.error || "Brand review failed");
       if (Array.isArray(data.competitors)) {
         onCompetitorsUpdated?.(data.competitors);
       }
+      const wasStopped = Boolean(data.stopped);
       setLocalProgress({
-        done: competitors.length,
+        done: data.updated ?? competitors.length,
         total: competitors.length,
         currentName: null,
-        message: force
-          ? `Redo complete · ${data.updated ?? competitors.length} updated`
-          : `Brand review complete · ${data.updated ?? competitors.length} updated`,
+        message: wasStopped
+          ? `Brand review stopped · ${data.updated ?? 0} updated`
+          : force
+            ? `Redo complete · ${data.updated ?? competitors.length} updated`
+            : `Brand review complete · ${data.updated ?? competitors.length} updated`,
       });
     } catch (err) {
-      setError((err as Error).message);
-      setLocalProgress(null);
+      if ((err as Error).name === "AbortError") {
+        setLocalProgress({
+          done: localProgress?.done ?? 0,
+          total: competitors.length,
+          currentName: null,
+          message: "Brand review stopped",
+        });
+      } else {
+        setError((err as Error).message);
+        setLocalProgress(null);
+      }
     } finally {
       stopPolling();
       setBatchBusy(false);
+      setStopping(false);
       setConfirmRedoAll(false);
       window.setTimeout(() => setLocalProgress(null), 3500);
     }
@@ -184,13 +245,18 @@ export function BrandReviewPanel({
       currentName: name,
       message: `Re-scraping socials for ${name}…`,
     });
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
     try {
       const res = await fetch("/api/competitors/brand-review", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ competitorId }),
+        signal: ac.signal,
       });
       const data = await res.json();
+      if (ac.signal.aborted) return;
       if (!res.ok) throw new Error(data.error || "Brand review failed");
       if (data.competitor && onCompetitorsUpdated) {
         onCompetitorsUpdated(
@@ -207,8 +273,10 @@ export function BrandReviewPanel({
       });
       window.setTimeout(() => setLocalProgress(null), 2500);
     } catch (err) {
-      setError((err as Error).message);
-      setLocalProgress(null);
+      if ((err as Error).name !== "AbortError") {
+        setError((err as Error).message);
+        setLocalProgress(null);
+      }
     } finally {
       setRowBusy(null);
     }
@@ -219,8 +287,8 @@ export function BrandReviewPanel({
   if (competitors.length === 0) {
     return (
       <p className="empty-hint">
-        Brand metrics appear here after the search finishes (batch brand
-        review). You can also run or redo brand review from history.
+        Find competitors first (top 10). Then click <strong>Run brand review</strong>{" "}
+        here to scrape each domain for socials and pull follower / employee metrics.
       </p>
     );
   }
@@ -245,6 +313,16 @@ export function BrandReviewPanel({
           >
             Redo all
           </button>
+          {reviewing && (
+            <button
+              type="button"
+              className="chip-btn"
+              disabled={stopping}
+              onClick={() => void stopBrandReview()}
+            >
+              {stopping ? "Stopping…" : "Stop"}
+            </button>
+          )}
         </div>
       )}
 
@@ -274,9 +352,7 @@ export function BrandReviewPanel({
             />
           </div>
           <p className="brand-review-progress-msg">
-            {displayProgress.currentName
-              ? `${displayProgress.message}`
-              : displayProgress.message}
+            {displayProgress.message}
           </p>
         </div>
       )}
@@ -299,6 +375,7 @@ export function BrandReviewPanel({
               <th>YouTube subs</th>
               <th>LI employees</th>
               <th>LI followers</th>
+              <th>Company revenue</th>
               {showActions && <th />}
             </tr>
           </thead>
@@ -347,6 +424,15 @@ export function BrandReviewPanel({
                   <td>{fmtMetric(hasYouTube(b), b.youtubeSubscribers)}</td>
                   <td>{fmtMetric(hasLinkedIn(b), b.linkedinEmployees)}</td>
                   <td>{fmtMetric(hasLinkedIn(b), b.linkedinFollowers)}</td>
+                  <td>
+                    {b.companyRevenue ? (
+                      <span title={b.companyRevenueSource || undefined}>
+                        {String(b.companyRevenue).replace(/^["']|["']$/g, "")}
+                      </span>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
                   {showActions && (
                     <td>
                       <button
@@ -369,14 +455,12 @@ export function BrandReviewPanel({
       <ConfirmDialog
         open={confirmRedoAll}
         title="Redo brand review for all?"
-        description="This re-scrapes each competitor website and refreshes Facebook, Instagram, X, YouTube, and LinkedIn metrics from the ad library. Existing brand metrics will be replaced."
+        description="This re-scrapes each competitor website and refreshes Facebook, Instagram, X, YouTube, and LinkedIn metrics. Existing brand metrics will be replaced."
         confirmLabel="Redo all"
         cancelLabel="Cancel"
         tone="danger"
-        busy={batchBusy}
-        onCancel={() => {
-          if (!batchBusy) setConfirmRedoAll(false);
-        }}
+        busy={false}
+        onCancel={() => setConfirmRedoAll(false)}
         onConfirm={() => void runBatch(true)}
       />
     </div>

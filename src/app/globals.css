@@ -513,6 +513,22 @@ a:hover {
   background: color-mix(in srgb, var(--panel) 75%, transparent);
 }
 
+.business-profile-summary {
+  margin-top: 4px;
+}
+
+.business-profile-summary .business-profile-card {
+  margin-top: 8px;
+}
+
+.business-profile-block {
+  margin-top: 14px;
+}
+
+.business-profile-block .search-label {
+  margin-bottom: 6px;
+}
+
 .industry-banner {
   display: flex;
   flex-wrap: wrap;
@@ -1007,6 +1023,22 @@ button.tag-selected {
 .offers-competitor-pick-meta {
   font-size: 0.75rem;
   opacity: 0.7;
+}
+
+.offers-competitor-pick-prior {
+  border-style: dashed;
+}
+
+.offers-competitor-pick-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  vertical-align: middle;
+  color: color-mix(in srgb, var(--accent, #2a6f6a) 90%, #000);
+  background: color-mix(in srgb, var(--accent, #2a6f6a) 14%, transparent);
 }
 
 .offers-teaser-stats {

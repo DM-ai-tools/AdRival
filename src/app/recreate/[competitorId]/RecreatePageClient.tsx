@@ -343,6 +343,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
           }
         } else if (hasHtml) {
           setView("design");
+          if (inFlight) setGenerating(true);
         }
       } catch (err) {
         if (!cancelled) setError((err as Error).message);
@@ -867,7 +868,11 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
         </p>
       ) : null}
 
-      {(loading || generating || building) && (
+      {(loading ||
+        generating ||
+        building ||
+        page?.status === "pending" ||
+        page?.status === "design_pending") && (
         <div
           className="recreate-status panel recreate-progress-panel"
           aria-live="polite"
@@ -939,9 +944,6 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
               <p className="muted">
                 Full page content for your brand — edit in place, then approve to
                 fit into the design.
-                {page?.contentDraft?.model
-                  ? ` · model ${page.contentDraft.model}`
-                  : null}
               </p>
             </div>
             <div className="recreate-content-actions">

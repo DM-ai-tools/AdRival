@@ -125,13 +125,61 @@ function addFact(
 export function resolveBusinessIdentity(
   facts: EvidenceFact[],
   canonicalUrl: string,
+  knownBusinessName?: string | null,
 ): EvidenceFact | null {
   const hostName = (hostLabel(canonicalUrl) || "").toLowerCase().replace(/\s+/g, "");
-  return facts.find((fact) => {
-    if (fact.category !== "identity" || looksLikeSlogan(fact.value) || !hostName) return false;
+  const identityFacts = facts.filter(
+    (fact) => fact.category === "identity" && !looksLikeSlogan(fact.value) && fact.value.trim().length >= 2,
+  );
+
+  const hostMatch = identityFacts.find((fact) => {
+    if (!hostName) return false;
     const value = fact.value.toLowerCase().replace(/\s+/g, "");
     return value.includes(hostName) || hostName.includes(value);
-  }) || null;
+  });
+  if (hostMatch) return hostMatch;
+
+  const known = (knownBusinessName || "").replace(/\s+/g, " ").trim();
+  if (known) {
+    const knownKey = known.toLowerCase().replace(/\s+/g, "");
+    const knownMatch = identityFacts.find((fact) => {
+      const value = fact.value.toLowerCase().replace(/\s+/g, "");
+      return value.includes(knownKey) || knownKey.includes(value);
+    });
+    if (knownMatch) return knownMatch;
+    // Prefer the profile / job name over a marketing H1 that failed the host match.
+    return {
+      id: "identity-known",
+      category: "identity",
+      value: known.slice(0, 120),
+      sourceUrl: canonicalUrl,
+      excerpt: known.slice(0, 120),
+      retrievedAt: new Date().toISOString(),
+      status: "stated_on_site",
+      qualifiers: "Confirmed from the saved business profile / display name.",
+    };
+  }
+
+  // Short identity headings (brand names) beat long marketing H1s.
+  const shortName = identityFacts
+    .filter((fact) => fact.value.trim().length <= 48 && fact.value.split(/\s+/).length <= 6)
+    .sort((a, b) => a.value.length - b.value.length)[0];
+  if (shortName) return shortName;
+
+  const label = hostLabel(canonicalUrl);
+  if (label) {
+    return {
+      id: "identity-host",
+      category: "identity",
+      value: label,
+      sourceUrl: canonicalUrl,
+      excerpt: label,
+      retrievedAt: new Date().toISOString(),
+      status: "stated_on_site",
+      qualifiers: "Derived from the client domain when the site did not state a clear brand name.",
+    };
+  }
+  return null;
 }
 
 export function hostLabel(url: string): string | null {
@@ -375,6 +423,8 @@ export async function researchClientSite(input: {
   spaceId?: string | null;
   pageBudget?: number;
   focusTerms?: string[];
+  /** Saved profile / recreate display name — used when scrape identity is ambiguous. */
+  knownBusinessName?: string | null;
 }, deps: ResearchDeps = {}): Promise<ClientEvidenceRecord> {
   const entered = canonicalPageUrl(input.enteredUrl);
   const focus = (input.focusTerms || []).map((term) => term.toLowerCase()).filter((term) => term.length > 2).slice(0, 6);
@@ -385,7 +435,32 @@ export async function researchClientSite(input: {
     focus: focus.join("|") || null,
   });
   const cached = cache.get(key);
-  if (cached) return cached;
+  if (cached && cached.missingEssential.length === 0) return cached;
+  // Stale cache blocked only on identity — patch with known profile name instead of replaying failure.
+  if (
+    cached &&
+    cached.missingEssential.includes("confirmed business name") &&
+    (input.knownBusinessName || "").trim()
+  ) {
+    const identity = resolveBusinessIdentity(cached.facts, entered, input.knownBusinessName);
+    const remaining = cached.missingEssential.filter((item) => item !== "confirmed business name");
+    if (identity && remaining.length === 0) {
+      const patched: ClientEvidenceRecord = {
+        ...cached,
+        businessName: identity.value,
+        identityStatus: "inferred",
+        missingEssential: [],
+        incomplete: cached.unavailable.length > 0,
+        facts: cached.facts.some((f) => f.category === "identity" && f.value === identity.value)
+          ? cached.facts
+          : [identity, ...cached.facts],
+      };
+      cache.set(key, patched);
+      return patched;
+    }
+  }
+  // Other incomplete caches without a known-name fix still replay (avoid hammering Firecrawl).
+  if (cached && !(input.knownBusinessName || "").trim()) return cached;
 
   const budget = input.pageBudget ?? Number(process.env.CLIENT_EVIDENCE_PAGE_BUDGET || DEFAULT_PAGE_BUDGET);
   const retrievedAt = new Date().toISOString();
@@ -460,7 +535,10 @@ export async function researchClientSite(input: {
   });
   facts.length = 0;
   facts.push(...assigned);
-  const identity = resolveBusinessIdentity(facts, entered);
+  const identity = resolveBusinessIdentity(facts, entered, input.knownBusinessName);
+  if (identity && !facts.some((fact) => fact.id === identity.id || (fact.category === "identity" && fact.value === identity.value))) {
+    facts.unshift(identity);
+  }
   const slogan = facts.find((fact) => looksLikeSlogan(fact.value))?.value || null;
   const hasService = facts.some((fact) => fact.category === "service" || fact.category === "identity");
   const missingEssential: string[] = [];

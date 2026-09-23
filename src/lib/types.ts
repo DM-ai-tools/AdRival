@@ -68,7 +68,7 @@ export interface BusinessLocation {
 }
 
 export type CompetitorLocationStatus = "matched" | "unknown" | "mismatch";
-export type CompetitorLocationSource = "sociavault" | "perplexity" | "none";
+export type CompetitorLocationSource = "sociavault" | "perplexity" | "firecrawl" | "none";
 
 /** Industry profile produced by OpenRouter / Perplexity from a business URL. */
 export interface BusinessProfile {
@@ -274,6 +274,11 @@ export interface BrandReview {
   linkedinFollowers?: number | null;
   website?: string | null;
   category?: string | null;
+  /** Approx annual revenue estimate (e.g. "$2–5M") from scrape/LLM */
+  companyRevenue?: string | null;
+  companyRevenueSource?: "llm" | "scrape" | null;
+  /** Street / HQ address when SociaVault exposes one */
+  address?: string | null;
 }
 
 export interface CompetitorRecord {
@@ -553,6 +558,8 @@ export interface LookupUniqueLandingPage {
   serviceTargeted?: string | null;
   /** Ads (creative clusters) that use this landing page */
   ads?: LookupOfferAdLeaf[];
+  /** 0–1 service/keyword relevance used for ranking (search offers) */
+  relevanceScore?: number | null;
 }
 
 /** Deduped offer line appearing across creatives or LPs. */
@@ -988,7 +995,7 @@ export interface RecreatedLandingPage {
   /** Token for the in-flight or completed construction build. Older jobs must not overwrite a newer token. */
   designBuildId?: string | null;
   designRendererVersion?: string | null;
-  /** unified-1 = content+HTML in one Anthropic call; absent/legacy = older split pipeline */
+  /** unified-2 = sectioned multipass clone; unified-1 = legacy one-shot; absent = older split pipeline */
   pipelineVersion?: string | null;
   /** Live progress while content/design is running (polled by UI) */
   progress?: {
