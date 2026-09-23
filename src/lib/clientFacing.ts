@@ -76,7 +76,7 @@ export function maskRecreatedPage<T extends {
   progress?: {
     message?: string | null;
     phase?: string | null;
-    stages?: Array<{ detail?: string | null; label?: string }>;
+    stages?: Array<{ detail?: string | null; label?: string }> | null;
   } | null;
   contentDraft?: { model?: string | null } | null;
 } | null | undefined>(page: T): T {
