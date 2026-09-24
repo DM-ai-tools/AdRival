@@ -279,6 +279,11 @@ export interface BrandReview {
   companyRevenueSource?: "llm" | "scrape" | null;
   /** Street / HQ address when SociaVault exposes one */
   address?: string | null;
+  /** 0–100 size score from saved follower, employee, and revenue metrics. */
+  brandScore?: number | null;
+  /** One- or two-sentence explanation of brandScore. */
+  brandScoreSummary?: string | null;
+  brandScoreAt?: string | null;
 }
 
 export interface CompetitorRecord {
@@ -592,21 +597,39 @@ export interface LookupServiceOfferingNode {
   }>;
 }
 
+/** One step in a low-ticket → high-ticket offer flow. */
+export interface OfferLadderStep {
+  id: string;
+  order: number;
+  ticketTier: OfferTicketTier;
+  offer: string;
+  details?: string | null;
+  cta?: string | null;
+  pricing?: string | null;
+  funnelStage?: FunnelStage;
+  landingPageUrl?: string | null;
+  /** Competitors that run this step. A ladder can mix several. */
+  competitors?: string[];
+}
+
 /**
- * One core offer value ladder.
- * Core = unique landing-page offer; adOffers = mapped ad-copy offers for that core.
+ * One offer ladder: a low-ticket to high-ticket flow.
+ * Steps can come from more than one competitor and more than one landing page.
  */
 export interface LookupCoreOfferLadder {
   id: string;
   rank: number;
-  /** Unique landing-page offer (the core) */
+  /** Short name for the whole flow */
   coreOffer: string;
   details: string;
   cta: string | null;
   ticketTier: OfferTicketTier;
   pricing: string | null;
   funnelStage: FunnelStage;
+  /** Representative URL when the flow has a single page; otherwise null */
   landingPageUrl: string | null;
+  /** Ordered low → high steps that make up this ladder */
+  steps?: OfferLadderStep[];
   /** Ads that land on this core offer’s page(s) */
   adCount: number;
   /** Relevant ad-copy offers mapped under this core */
@@ -669,7 +692,7 @@ export interface LookupOffersReport {
     nodes: LookupServiceOfferingNode[];
   };
   valueLadder?: {
-    /** One ladder per unique landing-page (core) offer */
+    /** Low-to-high offer flows. A flow can span several competitors. */
     ladders: LookupCoreOfferLadder[];
     summary?: string | null;
     /** Legacy flat steps (older reports only) */

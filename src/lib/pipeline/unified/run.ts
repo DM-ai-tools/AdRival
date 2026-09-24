@@ -599,6 +599,13 @@ export async function runUnifiedRecreation(
           page.businessName ||
           assets?.siteName ||
           null,
+        knownProfile: job.businessProfile
+          ? {
+              description: job.businessProfile.description,
+              offerings: job.businessProfile.offerings,
+              positioningSummary: job.businessProfile.positioningSummary,
+            }
+          : null,
       });
       assertCanDraft(evidence);
       return { brand, assets, evidence };

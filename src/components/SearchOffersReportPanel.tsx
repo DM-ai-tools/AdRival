@@ -10,6 +10,7 @@ import type {
   SearchCompetitorAdRecord,
   SearchJob,
 } from "@/lib/types";
+import { OfferLadderFlow, ladderSteps } from "./OfferLadderFlow";
 
 function shortUrl(url: string): string {
   return url.replace(/^https?:\/\//i, "").replace(/\/$/, "");
@@ -1428,8 +1429,8 @@ export function SearchOffersDashboard({
                       {ladder.coreOffer}
                     </span>
                     <span className="offers-competitor-jump-count">
-                      Core {ladder.rank}
-                      {ladder.funnelStage ? ` · ${ladder.funnelStage}` : ""}
+                      Ladder {ladder.rank}
+                      {` · ${ladderSteps(ladder).length} steps`}
                     </span>
                   </button>
                 ))}
@@ -1445,9 +1446,9 @@ export function SearchOffersDashboard({
               >
                 <header className="offers-core-ladder-head">
                   <div className="offers-meta-row">
-                    <span className="offers-card-kicker">Core {ladder.rank}</span>
-                    <FunnelBadge stage={ladder.funnelStage} />
+                    <span className="offers-card-kicker">Ladder {ladder.rank}</span>
                     <span className="muted">
+                      {ladderSteps(ladder).length} steps ·{" "}
                       {ladder.sourceCompetitors?.length || 0} competitor
                       {(ladder.sourceCompetitors?.length || 0) === 1 ? "" : "s"}
                       {refs.length ? ` · ${refs.length} referenced ads` : ""}
@@ -1470,6 +1471,8 @@ export function SearchOffersDashboard({
                     </p>
                   ) : null}
                 </header>
+
+                <OfferLadderFlow ladder={ladder} />
 
                 {ladder.adOffers?.length ? (
                   <div className="offers-core-ladder-ads">

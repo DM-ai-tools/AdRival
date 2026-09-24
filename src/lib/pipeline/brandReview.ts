@@ -26,6 +26,7 @@ import {
   socialLinksToSociavaultParams,
   type SociavaultSocialParams,
 } from "./socialParams";
+import { applyBrandScoresForJob, withBrandScore } from "./brandScore";
 import {
   getCompetitorsByRun,
   getJob,
@@ -1052,7 +1053,7 @@ export async function runBrandReview(input: {
   }
 
   brand.website = normalizeWebsiteUrl(brand.website) || null;
-  return brand;
+  return withBrandScore(brand);
 }
 
 /** Run brand review for every competitor in a finished search job. */
@@ -1174,6 +1175,9 @@ export async function runBrandReviewForJob(
     fresh.updatedAt = new Date().toISOString();
     saveJob(fresh);
   }
+
+  // Score from the metrics just saved. This does not scrape or re-run review.
+  if (!stopped) applyBrandScoresForJob(jobId);
 
   return { updated, skipped, stopped };
 }

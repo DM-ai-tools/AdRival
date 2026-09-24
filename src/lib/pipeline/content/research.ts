@@ -425,6 +425,12 @@ export async function researchClientSite(input: {
   focusTerms?: string[];
   /** Saved profile / recreate display name — used when scrape identity is ambiguous. */
   knownBusinessName?: string | null;
+  /** Saved search profile. Used only when the live client page cannot be read. */
+  knownProfile?: {
+    description?: string | null;
+    offerings?: string[] | null;
+    positioningSummary?: string | null;
+  } | null;
 }, deps: ResearchDeps = {}): Promise<ClientEvidenceRecord> {
   const entered = canonicalPageUrl(input.enteredUrl);
   const focus = (input.focusTerms || []).map((term) => term.toLowerCase()).filter((term) => term.length > 2).slice(0, 6);
@@ -436,6 +442,13 @@ export async function researchClientSite(input: {
   });
   const cached = cache.get(key);
   if (cached && cached.missingEssential.length === 0) return cached;
+  if (cached && profileCanStandIn(input)) {
+    const stoodIn = applyProfileStandIn(cached, input);
+    if (stoodIn.missingEssential.length === 0) {
+      cache.set(key, stoodIn);
+      return stoodIn;
+    }
+  }
   // Stale cache blocked only on identity — patch with known profile name instead of replaying failure.
   if (
     cached &&
@@ -529,6 +542,11 @@ export async function researchClientSite(input: {
     }
   }
 
+  const noReadablePage = pagesRead.length === 0 || pagesRead.every((page) => !page.ok);
+  if (noReadablePage && profileCanStandIn(input)) {
+    seedProfileFacts(facts, entered, retrievedAt, input);
+  }
+
   const assigned = assignCollectionIds(facts, {
     ownerUserId: input.ownerUserId,
     spaceId: input.spaceId ?? null,
@@ -543,7 +561,9 @@ export async function researchClientSite(input: {
   const hasService = facts.some((fact) => fact.category === "service" || fact.category === "identity");
   const missingEssential: string[] = [];
   if (!identity) missingEssential.push("confirmed business name");
-  if (pagesRead.every((page) => !page.ok)) missingEssential.push("readable client page");
+  if (noReadablePage && !profileCanStandIn(input)) {
+    missingEssential.push("readable client page");
+  }
   if (!hasService && pagesRead.some((page) => page.ok)) {
     // Identity heading counts as a starting point; service detail may still be missing.
     if (!facts.some((fact) => fact.category === "service")) {
@@ -569,8 +589,106 @@ export async function researchClientSite(input: {
     missingEssential,
     pageExcerpts,
   };
-  cache.set(key, record);
-  return record;
+  const finished = noReadablePage && profileCanStandIn(input)
+    ? applyProfileStandIn(record, input)
+    : record;
+  cache.set(key, finished);
+  return finished;
+}
+
+function profileCanStandIn(input: {
+  knownBusinessName?: string | null;
+  knownProfile?: {
+    description?: string | null;
+    offerings?: string[] | null;
+    positioningSummary?: string | null;
+  } | null;
+}): boolean {
+  const profile = input.knownProfile;
+  return Boolean(
+    (input.knownBusinessName || "").trim() ||
+      (profile?.description || "").trim() ||
+      (profile?.positioningSummary || "").trim() ||
+      (profile?.offerings || []).some((item) => item.trim()),
+  );
+}
+
+function seedProfileFacts(
+  facts: EvidenceFact[],
+  canonicalUrl: string,
+  retrievedAt: string,
+  input: {
+    knownBusinessName?: string | null;
+    knownProfile?: {
+      description?: string | null;
+      offerings?: string[] | null;
+      positioningSummary?: string | null;
+    } | null;
+  },
+): void {
+  const qualifier = "Saved business profile. The live client page could not be read on this run.";
+  const add = (category: EvidenceFact["category"], value: string) => {
+    const text = value.replace(/\s+/g, " ").trim();
+    if (text.length < 2) return;
+    if (facts.some((fact) => fact.category === category && fact.value === text)) return;
+    facts.push({
+      id: `profile-${category}-${facts.length}`,
+      category,
+      value: text.slice(0, 240),
+      sourceUrl: canonicalUrl,
+      excerpt: text.slice(0, 240),
+      retrievedAt,
+      status: "user_confirmed",
+      qualifiers: qualifier,
+      serviceRelevance: "general",
+    });
+  };
+  for (const offering of input.knownProfile?.offerings || []) add("service", offering);
+  add("service", input.knownProfile?.positioningSummary || "");
+  add("service", input.knownProfile?.description || "");
+}
+
+function applyProfileStandIn(
+  record: ClientEvidenceRecord,
+  input: {
+    knownBusinessName?: string | null;
+    knownProfile?: {
+      description?: string | null;
+      offerings?: string[] | null;
+      positioningSummary?: string | null;
+    } | null;
+  },
+): ClientEvidenceRecord {
+  const facts = [...record.facts];
+  seedProfileFacts(facts, record.canonicalUrl, new Date().toISOString(), input);
+  const identity = resolveBusinessIdentity(facts, record.canonicalUrl, input.knownBusinessName);
+  if (
+    identity &&
+    !facts.some(
+      (fact) =>
+        fact.id === identity.id ||
+        (fact.category === "identity" && fact.value === identity.value),
+    )
+  ) {
+    facts.unshift(identity);
+  }
+  const hasService = facts.some(
+    (fact) => fact.category === "service" || fact.category === "identity",
+  );
+  const missingEssential = record.missingEssential.filter((item) => {
+    if (item === "confirmed business name" && identity) return false;
+    if (item === "readable client page" && (identity || hasService)) return false;
+    if (item === "service description" && hasService) return false;
+    return true;
+  });
+  return {
+    ...record,
+    facts,
+    businessName: identity?.value ?? record.businessName,
+    identityStatus: identity ? "inferred" : record.identityStatus,
+    missingEssential,
+    incomplete: missingEssential.length > 0 || record.unavailable.length > 0,
+  };
 }
 
 async function scrapeWithFirecrawl(url: string): Promise<ScrapePageResult> {

@@ -18,6 +18,7 @@ import type {
   LookupUniqueAdCreative,
   LookupUniqueLandingPage,
   LookupUniqueOfferLine,
+  OfferLadderStep,
   OfferTicketTier,
 } from "../types";
 import { analyzeLookupAdLandingPage } from "./landingPageAnalysis";
@@ -832,269 +833,292 @@ function buildServiceNodes(
     .sort((a, b) => b.adCount - a.adCount);
 }
 
-const EMPTY_LADDER_MSG = "No value ladder found for this core offer";
+type LadderNode = {
+  offer: string;
+  cta: string | null;
+  pricing: string | null;
+  funnelStage: FunnelStage;
+  ticketTier: OfferTicketTier;
+  landingPageUrl: string | null;
+  adCount: number;
+  competitors: string[];
+  service: string;
+  relevance: number;
+};
+
+function flowTierOrder(tier: OfferTicketTier, stage: FunnelStage): number {
+  if (tier === "low" || (tier === "unknown" && stage === "TOFU")) return 0;
+  if (tier === "high" || (tier === "unknown" && stage === "BOFU")) return 3;
+  if (tier === "mid" || (tier === "unknown" && stage === "MOFU")) return 2;
+  return 1;
+}
+
+function namesForUrl(url: string | null, ads: LookupAdRecord[]): string[] {
+  if (!url) return [];
+  const key = landingPageMatchKey(url);
+  if (!key) return [];
+  const names = new Set<string>();
+  for (const ad of ads) {
+    if (landingPageMatchKey(ad.landingPageUrl || null) === key && ad.pageName) {
+      names.add(ad.pageName);
+    }
+  }
+  return [...names];
+}
 
 /**
- * Build one value ladder per unique landing-page (core) offer.
- * Map relevant ad-copy offers under each core; if none map, mark empty.
- * When service signals exist, rank cores by keyword/service relevance first.
+ * Build offer ladders as low-ticket → high-ticket flows.
+ * A flow groups related offers and can include steps from several competitors.
+ * There is no fixed cap on how many flows are returned.
  */
 async function buildValueLadder(input: {
   adOffers: LookupUniqueOfferLine[];
   lpOffers: LookupUniqueOfferLine[];
   creatives: LookupUniqueAdCreative[];
   pages: LookupUniqueLandingPage[];
+  ads?: LookupAdRecord[];
   signals?: ServiceSignalOptions | null;
 }): Promise<{
   ladders: LookupCoreOfferLadder[];
   summary: string | null;
 }> {
-  // Prefer deduped unique LP offers; fall back to completed page primaryOffers
-  const coreSources: Array<{
-    offer: string;
-    adCount: number;
-    cta: string | null;
-    pricing: string | null;
-    funnelStage: FunnelStage;
-    ticketTier: OfferTicketTier;
-    landingPageUrl: string | null;
-    urls: string[];
-    relevanceScore: number;
-  }> = [];
-
-  const scoreCoreText = (text: string) =>
+  const ads = input.ads || [];
+  const scoreText = (text: string) =>
     input.signals ? serviceKeywordOverlapScore(text, input.signals) : 0;
 
-  if (input.lpOffers.length > 0) {
-    for (const o of input.lpOffers) {
-      if (!normalizeOfferKey(o.offer)) continue;
-      if (isWeakOfferLabel(o.offer) && !o.pricing) continue;
-      const offerLabel = isWeakOfferLabel(o.offer)
-        ? o.sampleHooks?.[0] && !isWeakOfferLabel(o.sampleHooks[0])
-          ? o.sampleHooks[0]
-          : o.offer
-        : o.offer;
-      coreSources.push({
-        offer: offerLabel,
-        adCount: o.adCount,
-        cta: o.cta || null,
-        pricing: o.pricing || null,
-        funnelStage: o.funnelStage || "unknown",
-        ticketTier:
-          o.ticketTier || heuristicTicketTier(offerLabel, o.pricing, o.cta),
-        landingPageUrl: o.urls?.[0] || null,
-        urls: o.urls || [],
-        relevanceScore: scoreCoreText(
-          `${offerLabel} ${o.pricing || ""} ${(o.sampleHooks || []).join(" ")}`,
-        ),
-      });
-    }
-  } else {
-    const byKey = new Map<string, (typeof coreSources)[number]>();
-    for (const p of input.pages) {
-      if (p.status !== "completed" || !p.primaryOffer) continue;
-      const key = normalizeOfferKey(p.primaryOffer);
-      if (!key) continue;
-      const uvp = (p.uniqueValueProps || [])[0] || "";
-      const offerLabel =
-        isWeakOfferLabel(p.primaryOffer) && uvp
-          ? `${p.primaryOffer.replace(/[·•].*$/, "").trim()} — ${uvp}`.slice(
-              0,
-              140,
-            )
-          : p.primaryOffer;
-      const prev = byKey.get(key);
-      if (prev) {
-        prev.adCount += p.adCount;
-        if (p.url && !prev.urls.includes(p.url)) prev.urls.push(p.url);
-        prev.relevanceScore = Math.max(
-          prev.relevanceScore,
-          scoreCoreText(`${offerLabel} ${p.summary || ""} ${uvp}`),
-        );
-        continue;
-      }
-      byKey.set(key, {
-        offer: offerLabel,
-        adCount: p.adCount,
-        cta: p.cta || null,
-        pricing: p.pricing || null,
-        funnelStage: p.funnelStage || "unknown",
-        ticketTier: heuristicTicketTier(offerLabel, p.pricing, p.cta),
-        landingPageUrl: p.url,
-        urls: [p.url],
-        relevanceScore: scoreCoreText(
-          `${offerLabel} ${p.headline || ""} ${p.summary || ""} ${uvp} ${p.serviceTargeted || ""}`,
-        ),
-      });
-    }
-    coreSources.push(...byKey.values());
-  }
-
-  const tierRank: Record<OfferTicketTier, number> = {
-    low: 1,
-    mid: 2,
-    high: 3,
-    unknown: 2,
+  const nodes: LadderNode[] = [];
+  const pushNode = (node: Omit<LadderNode, "service" | "relevance"> & { service?: string | null }) => {
+    const offer = (node.offer || "").trim();
+    if (!normalizeOfferKey(offer)) return;
+    if (isWeakOfferLabel(offer) && !node.pricing) return;
+    const service =
+      node.service?.trim() ||
+      heuristicService(offer, node.pricing, node.cta) ||
+      "";
+    nodes.push({
+      ...node,
+      offer,
+      service,
+      relevance: scoreText(`${offer} ${node.pricing || ""} ${node.cta || ""} ${service}`),
+      competitors: [...new Set(node.competitors.filter(Boolean))],
+    });
   };
 
-  const hasSignals = Boolean(
-    input.signals &&
-      ((input.signals.searchKeywords || []).length > 0 ||
-        input.signals.selectedCategory ||
-        input.signals.businessProfile),
-  );
-
-  let cores = [...coreSources].sort(
-    (a, b) =>
-      b.relevanceScore - a.relevanceScore ||
-      (tierRank[a.ticketTier] || 2) - (tierRank[b.ticketTier] || 2) ||
-      b.adCount - a.adCount,
-  );
-
-  // When we know the service, drop cores with zero relevance if stronger ones exist.
-  if (hasSignals) {
-    const relevant = cores.filter((c) => c.relevanceScore > 0);
-    if (relevant.length > 0) {
-      cores = [
-        ...relevant,
-        ...cores.filter((c) => c.relevanceScore === 0).slice(0, 2),
-      ];
-    }
+  for (const page of input.pages) {
+    if (page.status !== "completed" || !page.primaryOffer) continue;
+    pushNode({
+      offer: page.primaryOffer,
+      cta: page.cta || null,
+      pricing: page.pricing || null,
+      funnelStage: page.funnelStage || "unknown",
+      ticketTier: heuristicTicketTier(page.primaryOffer, page.pricing, page.cta),
+      landingPageUrl: page.url,
+      adCount: page.adCount,
+      competitors: namesForUrl(page.url, ads),
+      service: page.serviceTargeted || null,
+    });
   }
-  // Cap ladders so the dashboard stays focused
-  cores = cores.slice(0, 12);
 
-  const pageMatchKeysForCore = (coreKey: string, urls: string[]) => {
-    const keys = new Set<string>();
-    for (const p of input.pages) {
-      if (!p.primaryOffer) continue;
-      if (normalizeOfferKey(p.primaryOffer) === coreKey) {
-        keys.add(p.matchKey);
-      }
-    }
-    for (const u of urls) {
-      const k = landingPageMatchKey(u);
-      if (k) keys.add(k);
-    }
-    return keys;
-  };
+  for (const creative of input.creatives) {
+    if (!creative.offer) continue;
+    const adNames = creative.sampleAdIds
+      .map((id) => ads.find((ad) => ad.id === id)?.pageName)
+      .filter((name): name is string => Boolean(name));
+    pushNode({
+      offer: creative.offer,
+      cta: creative.cta || null,
+      pricing: null,
+      funnelStage: creative.funnelStage || "unknown",
+      ticketTier: heuristicTicketTier(creative.offer, null, creative.cta),
+      landingPageUrl: creative.landingPageUrl || null,
+      adCount: creative.adCount,
+      competitors: adNames.length
+        ? adNames
+        : namesForUrl(creative.landingPageUrl || null, ads),
+      service: creative.serviceTargeted || null,
+    });
+  }
 
-  const offerTokens = (s: string) =>
+  for (const line of input.adOffers) {
+    pushNode({
+      offer: line.offer,
+      cta: line.cta || null,
+      pricing: line.pricing || null,
+      funnelStage: line.funnelStage || "unknown",
+      ticketTier: line.ticketTier || heuristicTicketTier(line.offer, line.pricing, line.cta),
+      landingPageUrl: line.urls?.[0] || null,
+      adCount: line.adCount,
+      competitors: namesForUrl(line.urls?.[0] || null, ads),
+      service: heuristicService(line.offer, line.pricing, line.cta),
+    });
+  }
+  for (const line of input.lpOffers) {
+    pushNode({
+      offer: line.offer,
+      cta: line.cta || null,
+      pricing: line.pricing || null,
+      funnelStage: line.funnelStage || "unknown",
+      ticketTier: line.ticketTier || heuristicTicketTier(line.offer, line.pricing, line.cta),
+      landingPageUrl: line.urls?.[0] || null,
+      adCount: line.adCount,
+      competitors: namesForUrl(line.urls?.[0] || null, ads),
+      service: heuristicService(line.offer, line.pricing, line.cta),
+    });
+  }
+
+  const offerTokens = (value: string) =>
     new Set(
-      normalizeOfferKey(s)
+      normalizeOfferKey(value)
         .split(" ")
-        .filter((t) => t.length > 2),
+        .filter((token) => token.length > 2),
     );
-
   const overlapScore = (a: string, b: string) => {
-    const ta = offerTokens(a);
-    const tb = offerTokens(b);
-    if (!ta.size || !tb.size) return 0;
+    const left = offerTokens(a);
+    const right = offerTokens(b);
+    if (!left.size || !right.size) return 0;
     let hit = 0;
-    for (const t of ta) if (tb.has(t)) hit += 1;
-    return hit / Math.max(ta.size, tb.size);
+    for (const token of left) if (right.has(token)) hit += 1;
+    return hit / Math.max(left.size, right.size);
   };
 
-  const ladders: LookupCoreOfferLadder[] = cores.map((core, i) => {
-    const coreKey = normalizeOfferKey(core.offer);
-    const matchKeys = pageMatchKeysForCore(coreKey, core.urls);
-    const seen = new Map<string, LookupOfferAdLeaf>();
+  const groups = new Map<string, LadderNode[]>();
+  const loose: LadderNode[] = [];
+  for (const node of nodes) {
+    if (node.service) {
+      const key = normalizeServiceKey(node.service);
+      const bucket = groups.get(key) || [];
+      bucket.push(node);
+      groups.set(key, bucket);
+    } else {
+      loose.push(node);
+    }
+  }
+  for (const node of loose) {
+    let bestKey = "";
+    let best = 0;
+    for (const [key, bucket] of groups) {
+      const sample = bucket[0]?.offer || key;
+      const score = Math.max(overlapScore(node.offer, sample), overlapScore(node.offer, key));
+      if (score > best) {
+        best = score;
+        bestKey = key;
+      }
+    }
+    if (bestKey && best >= 0.22) {
+      groups.get(bestKey)!.push({ ...node, service: groups.get(bestKey)![0].service });
+    } else {
+      const key = `offer:${normalizeOfferKey(node.offer)}`;
+      groups.set(key, [{ ...node, service: node.offer }]);
+    }
+  }
 
-    // 1) Ads already attached to matching landing pages
-    for (const p of input.pages) {
-      if (!matchKeys.has(p.matchKey)) continue;
-      for (const leaf of p.ads || []) {
-        const id = leaf.creativeId || normalizeOfferKey(leaf.offer);
-        const prev = seen.get(id);
-        if (prev) {
-          prev.adCount += leaf.adCount;
+  const ladders: LookupCoreOfferLadder[] = [...groups.values()]
+    .map((bucket) => {
+      const merged = new Map<string, LadderNode>();
+      for (const node of bucket) {
+        const key = normalizeOfferKey(node.offer);
+        const prev = merged.get(key);
+        if (!prev) {
+          merged.set(key, { ...node, competitors: [...node.competitors] });
           continue;
         }
-        seen.set(id, { ...leaf });
-      }
-    }
-
-    // 2) Creatives whose destination matches core pages
-    for (const c of input.creatives) {
-      const cKey = c.landingPageUrl
-        ? landingPageMatchKey(c.landingPageUrl)
-        : null;
-      if (cKey && matchKeys.has(cKey)) {
-        const id = c.id;
-        if (!seen.has(id)) {
-          seen.set(
-            id,
-            creativeToLeaf(c, {
-              landingPageUrl: core.landingPageUrl || c.landingPageUrl || null,
-            }),
-          );
+        prev.adCount += node.adCount;
+        prev.competitors = [...new Set([...prev.competitors, ...node.competitors])];
+        if (!prev.pricing && node.pricing) prev.pricing = node.pricing;
+        if (!prev.cta && node.cta) prev.cta = node.cta;
+        if (!prev.landingPageUrl && node.landingPageUrl) prev.landingPageUrl = node.landingPageUrl;
+        if (flowTierOrder(node.ticketTier, node.funnelStage) > flowTierOrder(prev.ticketTier, prev.funnelStage)) {
+          prev.ticketTier = node.ticketTier;
+          prev.funnelStage = node.funnelStage;
         }
+        prev.relevance = Math.max(prev.relevance, node.relevance);
       }
-    }
-
-    // 3) Ad-copy unique offers that relate to this core (+ keyword boost)
-    for (const line of input.adOffers) {
-      const semantic = overlapScore(core.offer, line.offer);
-      const kwBoost = input.signals
-        ? serviceKeywordOverlapScore(line.offer, input.signals) * 0.25
-        : 0;
-      const score = semantic + kwBoost;
-      if (score < 0.35) continue;
-      const id = `line:${normalizeOfferKey(line.offer)}`;
-      if (seen.has(id)) continue;
-      const urlHit = (line.urls || []).some((u) => {
-        const k = landingPageMatchKey(u);
-        return Boolean(k && matchKeys.has(k));
-      });
-      if (!urlHit && score < 0.5) continue;
-      seen.set(id, {
-        creativeId: id,
-        hook: line.sampleHooks?.[0] || line.offer,
-        offer: line.offer,
-        cta: line.cta ?? null,
-        serviceTargeted: null,
-        funnelStage: line.funnelStage || "unknown",
-        adCount: line.adCount,
+      const collapsed: LadderNode[] = [];
+      for (const node of merged.values()) {
+        const twin = collapsed.find((item) => overlapScore(item.offer, node.offer) >= 0.72);
+        if (!twin) {
+          collapsed.push(node);
+          continue;
+        }
+        twin.adCount += node.adCount;
+        twin.competitors = [...new Set([...twin.competitors, ...node.competitors])];
+        if (!twin.pricing && node.pricing) twin.pricing = node.pricing;
+      }
+      return collapsed.sort(
+        (a, b) =>
+          flowTierOrder(a.ticketTier, a.funnelStage) - flowTierOrder(b.ticketTier, b.funnelStage) ||
+          b.adCount - a.adCount,
+      );
+    })
+    .filter((steps) => steps.length > 0)
+    .sort((a, b) => {
+      const span = (steps: LadderNode[]) => {
+        const orders = new Set(steps.map((step) => flowTierOrder(step.ticketTier, step.funnelStage)));
+        return orders.size;
+      };
+      return (
+        span(b) - span(a) ||
+        b.reduce((sum, step) => sum + step.adCount, 0) -
+          a.reduce((sum, step) => sum + step.adCount, 0)
+      );
+    })
+    .map((steps, index) => {
+      const service = steps.find((step) => step.service && !step.service.includes(steps[0].offer))?.service || steps[0].service;
+      const title = service && !normalizeOfferKey(service).startsWith(normalizeOfferKey(steps[0].offer))
+        ? service
+        : steps.length > 1
+          ? `${steps[0].offer} → ${steps[steps.length - 1].offer}`
+          : steps[0].offer;
+      const competitors = [...new Set(steps.flatMap((step) => step.competitors))].sort();
+      const top = steps[steps.length - 1];
+      const flowSteps: OfferLadderStep[] = steps.map((step, stepIndex) => ({
+        id: `step-${index}-${stepIndex}`,
+        order: stepIndex + 1,
+        ticketTier: step.ticketTier === "unknown" ? (step.funnelStage === "TOFU" ? "low" : step.funnelStage === "BOFU" ? "high" : step.ticketTier) : step.ticketTier,
+        offer: step.offer,
+        cta: step.cta,
+        pricing: step.pricing,
+        funnelStage: step.funnelStage,
+        landingPageUrl: step.landingPageUrl,
+        competitors: step.competitors,
+      }));
+      const adOffers: LookupOfferAdLeaf[] = flowSteps.map((step) => ({
+        creativeId: step.id,
+        hook: step.offer,
+        offer: step.offer,
+        cta: step.cta ?? null,
+        serviceTargeted: service || null,
+        funnelStage: step.funnelStage || "unknown",
+        adCount: steps.find((item) => item.offer === step.offer)?.adCount || 1,
         sampleAdIds: [],
         sampleCopy: null,
-        landingPageUrl: line.urls?.[0] || core.landingPageUrl,
-      });
-    }
-
-    const adOffers = [...seen.values()].sort((a, b) => {
-      const ra = input.signals
-        ? serviceKeywordOverlapScore(a.offer, input.signals)
-        : 0;
-      const rb = input.signals
-        ? serviceKeywordOverlapScore(b.offer, input.signals)
-        : 0;
-      return rb - ra || b.adCount - a.adCount;
+        landingPageUrl: step.landingPageUrl || null,
+      }));
+      const path = flowSteps.map((step) => step.offer).join(" → ");
+      return {
+        id: `flow-${index}`,
+        rank: index + 1,
+        coreOffer: title,
+        details: competitors.length
+          ? `${path}. Steps come from ${competitors.join(", ")}.`
+          : path,
+        cta: top.cta,
+        ticketTier: top.ticketTier,
+        pricing: top.pricing,
+        funnelStage: top.funnelStage,
+        landingPageUrl: flowSteps.length === 1 ? flowSteps[0].landingPageUrl || null : null,
+        steps: flowSteps,
+        adCount: steps.reduce((sum, step) => sum + step.adCount, 0),
+        adOffers,
+        emptyMessage: null,
+        sourceCompetitors: competitors,
+      } satisfies LookupCoreOfferLadder;
     });
-    const empty = adOffers.length === 0;
-
-    return {
-      id: `core-vl${i}`,
-      rank: i + 1,
-      coreOffer: core.offer,
-      details: empty
-        ? EMPTY_LADDER_MSG
-        : `${adOffers.length} mapped ad-copy offer${adOffers.length === 1 ? "" : "s"} supporting this landing-page offer.`,
-      cta: core.cta,
-      ticketTier: core.ticketTier,
-      pricing: core.pricing,
-      funnelStage: core.funnelStage,
-      landingPageUrl: core.landingPageUrl,
-      adCount: core.adCount,
-      adOffers,
-      emptyMessage: empty ? EMPTY_LADDER_MSG : null,
-    };
-  });
-
   // Optional LLM polish: short summary + per-core details (does not change structure)
   let summary: string | null =
     ladders.length === 0
-      ? "No value ladder found — analyze landing pages to extract core offers."
-      : `${ladders.length} core landing-page offer${ladders.length === 1 ? "" : "s"} ranked by service relevance.`;
+      ? "No offer ladder yet — offers need a ticket level or landing page before a low-to-high flow can be built."
+      : `${ladders.length} offer ladder${ladders.length === 1 ? "" : "s"}, each a low-to-high flow that can combine several competitors.`;
 
   const ladderLlm = getOffersLlmClient();
   if (ladderLlm && ladders.length > 0) {
@@ -1106,11 +1130,10 @@ async function buildValueLadder(input: {
         messages: [
           {
             role: "system",
-            content: `You write short summaries for competitive offer value ladders.
-Each ladder already has a fixed coreOffer (landing-page offer) and mapped adOffers.
-Write details that name the product/service clearly (not just price or CTA).
-Return JSON: { "summary": string, "detailsByCoreId": { "<id>": "one sentence" } }.
-Do not invent new cores. For cores with empty adOffers, details must say they have no mapped ad-copy ladder.`,
+            content: `You write short summaries for competitive offer ladders.
+Each ladder is a low-ticket to high-ticket flow. Steps may come from different competitors.
+Return JSON: { "summary": string, "detailsByCoreId": { "<id>": "one sentence describing the flow from entry offer to premium offer" } }.
+Do not add or remove steps. Name the offers, not just the price.`,
           },
           {
             role: "user",
@@ -1125,12 +1148,12 @@ Do not invent new cores. For cores with empty adOffers, details must say they ha
                 : null,
               ladders: ladders.map((l) => ({
                 id: l.id,
-                coreOffer: l.coreOffer,
-                pricing: l.pricing,
-                ticketTier: l.ticketTier,
-                adOfferCount: l.adOffers.length,
-                sampleAdOffers: l.adOffers.slice(0, 4).map((a) => a.offer),
-                empty: Boolean(l.emptyMessage),
+                name: l.coreOffer,
+                steps: (l.steps || []).map((step) => ({
+                  tier: step.ticketTier,
+                  offer: step.offer,
+                  competitors: step.competitors || [],
+                })),
               })),
             }),
           },
@@ -1153,11 +1176,7 @@ Do not invent new cores. For cores with empty adOffers, details must say they ha
           for (const ladder of ladders) {
             const d = map[ladder.id]?.trim();
             if (!d) continue;
-            if (ladder.emptyMessage) {
-              ladder.details = EMPTY_LADDER_MSG;
-            } else {
-              ladder.details = d;
-            }
+            ladder.details = d;
           }
         }
       }
@@ -1536,6 +1555,7 @@ export async function buildLookupOffersReport(
     lpOffers,
     creatives,
     pages,
+    ads,
     signals,
   });
   const lookupJob = getLookupJob(lookupId);
@@ -1570,7 +1590,7 @@ export async function buildLookupOffersReport(
     `${lpBuckets.length} unique landing pages`,
     `${analyzedCount} LPs analyzed`,
     `${serviceNodes.length} services`,
-    `${filteredLadders.kept.length} core offer ladders`,
+    `${filteredLadders.kept.length} offer ladders`,
   ].join(" · ");
 
   return {

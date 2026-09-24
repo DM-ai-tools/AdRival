@@ -355,6 +355,13 @@ export async function generateRecreationContent(
         ctx.job.businessProfile?.businessName ||
         pending.businessName ||
         null,
+      knownProfile: ctx.job.businessProfile
+        ? {
+            description: ctx.job.businessProfile.description,
+            offerings: ctx.job.businessProfile.offerings,
+            positioningSummary: ctx.job.businessProfile.positioningSummary,
+          }
+        : null,
     });
     const intent = withClientMatch(pageIntent, evidence);
     assertCanDraft(evidence);

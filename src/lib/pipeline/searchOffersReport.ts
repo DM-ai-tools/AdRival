@@ -29,6 +29,7 @@ import type {
   CompetitorRecord,
   LookupAdRecord,
   LookupCoreOfferLadder,
+  OfferLadderStep,
   LookupJob,
   LookupOffersReport,
   SearchCompetitorAdRecord,
@@ -155,9 +156,13 @@ function dedupeLaddersWithSources(
     const existing = byCore.get(key);
     const refs = new Map<string, ReturnType<typeof adRefFromSource>>();
     const names = new Set<string>();
-    const lpKey = ladder.landingPageUrl
-      ? ladder.landingPageUrl.replace(/^https?:\/\//i, "").replace(/\/$/, "").toLowerCase()
-      : "";
+    const normalizeLp = (url?: string | null) =>
+      (url || "").replace(/^https?:\/\//i, "").replace(/\/$/, "").toLowerCase();
+    const lpKey = normalizeLp(ladder.landingPageUrl);
+    const stepUrls = new Set(
+      (ladder.steps || []).map((step) => normalizeLp(step.landingPageUrl)).filter(Boolean),
+    );
+    if (lpKey) stepUrls.add(lpKey);
 
     const addSrc = (src: SearchCompetitorAdRecord | undefined, lookupAdId: string) => {
       if (!src) return;
@@ -183,22 +188,30 @@ function dedupeLaddersWithSources(
       }
     }
 
-    if (lpKey) {
+    if (stepUrls.size) {
       for (const src of allAds) {
-        const srcLp = (src.landingPageUrl || "")
-          .replace(/^https?:\/\//i, "")
-          .replace(/\/$/, "")
-          .toLowerCase();
-        if (srcLp && srcLp === lpKey) addSrc(src, src.id);
+        const srcLp = normalizeLp(src.landingPageUrl);
+        if (srcLp && stepUrls.has(srcLp)) addSrc(src, src.id);
       }
     }
+    const stepsWithSources: OfferLadderStep[] = (ladder.steps || []).map((step) => {
+      const key = normalizeLp(step.landingPageUrl);
+      const extra = key
+        ? allAds.filter((src) => normalizeLp(src.landingPageUrl) === key).map((src) => src.pageName)
+        : [];
+      return {
+        ...step,
+        competitors: [...new Set([...(step.competitors || []), ...extra])].sort(),
+      };
+    });
 
     const withSources: LookupCoreOfferLadder = {
       ...ladder,
+      steps: stepsWithSources.length ? stepsWithSources : ladder.steps,
       sourceCompetitors: names.size
         ? Array.from(names).sort()
         : ladder.sourceCompetitors,
-      sourceAdRefs: Array.from(refs.values()).slice(0, 40),
+      sourceAdRefs: Array.from(refs.values()).slice(0, 80),
     };
     if (!existing) {
       byCore.set(key, withSources);
@@ -220,12 +233,28 @@ function dedupeLaddersWithSources(
     for (const r of [...(existing.sourceAdRefs || []), ...(withSources.sourceAdRefs || [])]) {
       srcRefs.set(`${r.competitorId}:${r.adId}`, r as ReturnType<typeof adRefFromSource>);
     }
+    const stepMap = new Map<string, OfferLadderStep>();
+    for (const step of [...(existing.steps || []), ...(withSources.steps || [])]) {
+      const stepKey = norm(step.offer);
+      const prev = stepMap.get(stepKey);
+      if (!prev) {
+        stepMap.set(stepKey, { ...step, competitors: [...(step.competitors || [])] });
+        continue;
+      }
+      stepMap.set(stepKey, {
+        ...prev,
+        competitors: [...new Set([...(prev.competitors || []), ...(step.competitors || [])])].sort(),
+      });
+    }
     byCore.set(key, {
       ...existing,
       adOffers,
+      steps: [...stepMap.values()]
+        .sort((a, b) => a.order - b.order)
+        .map((step, stepIndex) => ({ ...step, order: stepIndex + 1 })),
       adCount: Math.max(existing.adCount, withSources.adCount),
       sourceCompetitors: Array.from(srcNames).sort(),
-      sourceAdRefs: Array.from(srcRefs.values()).slice(0, 40),
+      sourceAdRefs: Array.from(srcRefs.values()).slice(0, 80),
     });
   }
 
@@ -237,7 +266,7 @@ function dedupeLaddersWithSources(
       ladders: merged,
       summary:
         merged.length < ladders.length
-          ? `${merged.length} unique core offer ladders after dedupe (${ladders.length - merged.length} merged).`
+          ? `${merged.length} offer ladders after combining similar flows (${ladders.length - merged.length} merged).`
           : report.valueLadder?.summary,
     },
   };
@@ -662,7 +691,7 @@ export async function runSearchOffersReportPhase(
     await runLookupOffersReportPhase(syntheticLookupId, {
       force: true,
       finalStatus: "completed",
-      maxLandingPages: 5,
+      maxLandingPages: 16,
       maxCreativeClusters: 24,
       relevance: {
         searchKeywords: job.keywords?.length

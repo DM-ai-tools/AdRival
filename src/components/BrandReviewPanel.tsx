@@ -26,12 +26,92 @@ function hasLinkedIn(b: BrandReview) {
   return Boolean(b.linkedinUrl);
 }
 
+type SortKey =
+  | "score"
+  | "name"
+  | "facebook"
+  | "instagram"
+  | "twitter"
+  | "youtube"
+  | "employees"
+  | "linkedin"
+  | "revenue";
+
+function hasSizeSignal(b: BrandReview | undefined): boolean {
+  if (!b) return false;
+  return (
+    b.facebookFollowers != null ||
+    b.instagramFollowers != null ||
+    b.twitterFollowers != null ||
+    b.youtubeSubscribers != null ||
+    b.linkedinFollowers != null ||
+    b.linkedinEmployees != null ||
+    Boolean(b.companyRevenue)
+  );
+}
+
+function revenueSortValue(raw?: string | null): number | null {
+  if (!raw) return null;
+  const text = raw.toLowerCase().replace(/[$,]/g, " ");
+  const unit = /\bbillion\b|\db\b/.test(text)
+    ? 1e9
+    : /\bmillion\b|\dm\b/.test(text)
+      ? 1e6
+      : /\bthousand\b|\dk\b/.test(text)
+        ? 1e3
+        : null;
+  const nums = [...text.matchAll(/(\d+(?:\.\d+)?)/g)].map((match) => Number(match[1]));
+  if (!nums.length || unit == null) return null;
+  const scaled = nums.map((n) => n * unit);
+  return scaled.length > 1 ? (scaled[0] + scaled[1]) / 2 : scaled[0];
+}
+
+function compareNullable(
+  a: number | string | null,
+  b: number | string | null,
+  dir: 1 | -1,
+): number {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;
+  if (b == null) return -1;
+  if (typeof a === "number" && typeof b === "number") return (a - b) * dir;
+  return String(a).localeCompare(String(b)) * dir;
+}
+
 type LocalProgress = {
   done: number;
   total: number;
   currentName: string | null;
   message: string;
 };
+
+function SortHeader({
+  label,
+  sortKey,
+  activeKey,
+  dir,
+  onSort,
+}: {
+  label: string;
+  sortKey: SortKey;
+  activeKey: SortKey;
+  dir: 1 | -1;
+  onSort: (key: SortKey) => void;
+}) {
+  const active = activeKey === sortKey;
+  return (
+    <th aria-sort={active ? (dir === 1 ? "ascending" : "descending") : "none"}>
+      <button
+        type="button"
+        className={active ? "brand-sort-btn is-active" : "brand-sort-btn"}
+        onClick={() => onSort(sortKey)}
+      >
+        {label}
+        {active ? (dir === 1 ? " ↑" : " ↓") : ""}
+      </button>
+    </th>
+  );
+}
 
 interface BrandReviewPanelProps {
   competitors: CompetitorRecord[];
@@ -50,7 +130,10 @@ export function BrandReviewPanel({
   showActions = true,
 }: BrandReviewPanelProps) {
   const [batchBusy, setBatchBusy] = useState(false);
+  const [scoreBusy, setScoreBusy] = useState(false);
   const [rowBusy, setRowBusy] = useState<string | null>(null);
+  const [sortKey, setSortKey] = useState<SortKey>("score");
+  const [sortDir, setSortDir] = useState<1 | -1>(-1);
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmRedoAll, setConfirmRedoAll] = useState(false);
@@ -59,6 +142,7 @@ export function BrandReviewPanel({
   );
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const autoScoreKey = useRef<string | null>(null);
 
   const resolvedRunId = runId || competitors[0]?.runId || null;
 
@@ -282,7 +366,97 @@ export function BrandReviewPanel({
     }
   }
 
+  async function runScores() {
+    if (!resolvedRunId || scoreBusy || batchBusy || liveBrandActive || rowBusy) return;
+    setScoreBusy(true);
+    setError(null);
+    setLocalProgress({
+      done: 0,
+      total: competitors.length,
+      currentName: null,
+      message: "Scoring brands from saved follower and size metrics…",
+    });
+    try {
+      const res = await fetch("/api/competitors/brand-score", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ runId: resolvedRunId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Brand score failed");
+      if (Array.isArray(data.competitors)) {
+        onCompetitorsUpdated?.(data.competitors);
+      }
+      setLocalProgress({
+        done: data.scored ?? competitors.length,
+        total: competitors.length,
+        currentName: null,
+        message: `Brand scores updated · ${data.scored ?? 0} scored`,
+      });
+      window.setTimeout(() => setLocalProgress(null), 2500);
+    } catch (err) {
+      setError((err as Error).message);
+      setLocalProgress(null);
+    } finally {
+      setScoreBusy(false);
+    }
+  }
+
   const reviewing = batchBusy || liveBrandActive || Boolean(rowBusy);
+  const controlsLocked = reviewing || scoreBusy;
+
+  const missingScores = competitors.some(
+    (c) => c.brand?.brandScore == null && hasSizeSignal(c.brand),
+  );
+
+  useEffect(() => {
+    if (!resolvedRunId || reviewing || scoreBusy || !missingScores) return;
+    const key = `${resolvedRunId}:${competitors.map((c) => c.id).join(",")}`;
+    if (autoScoreKey.current === key) return;
+    autoScoreKey.current = key;
+    void runScores();
+    // Score once when saved metrics exist and brand review is idle.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resolvedRunId, reviewing, scoreBusy, missingScores, competitors]);
+
+  function toggleSort(key: SortKey) {
+    if (sortKey === key) {
+      setSortDir((dir) => (dir === 1 ? -1 : 1));
+      return;
+    }
+    setSortKey(key);
+    setSortDir(key === "name" ? 1 : -1);
+  }
+
+  const sortedCompetitors = useMemo(() => {
+    const dir = sortDir;
+    const valueOf = (c: CompetitorRecord): number | string | null => {
+      const b = c.brand || {};
+      switch (sortKey) {
+        case "score":
+          return b.brandScore ?? null;
+        case "name":
+          return c.pageName || "";
+        case "facebook":
+          return b.facebookFollowers ?? null;
+        case "instagram":
+          return b.instagramFollowers ?? null;
+        case "twitter":
+          return b.twitterFollowers ?? null;
+        case "youtube":
+          return b.youtubeSubscribers ?? null;
+        case "employees":
+          return b.linkedinEmployees ?? null;
+        case "linkedin":
+          return b.linkedinFollowers ?? null;
+        case "revenue":
+          return revenueSortValue(b.companyRevenue);
+        default:
+          return null;
+      }
+    };
+    return [...competitors].sort((a, b) => compareNullable(valueOf(a), valueOf(b), dir));
+  }, [competitors, sortKey, sortDir]);
 
   if (competitors.length === 0) {
     return (
@@ -300,7 +474,7 @@ export function BrandReviewPanel({
           <button
             type="button"
             className="chip-btn"
-            disabled={reviewing}
+            disabled={controlsLocked}
             onClick={() => void runBatch(false)}
           >
             {batchBusy ? "Running…" : "Run brand review"}
@@ -308,10 +482,18 @@ export function BrandReviewPanel({
           <button
             type="button"
             className="chip-btn"
-            disabled={reviewing}
+            disabled={controlsLocked}
             onClick={() => setConfirmRedoAll(true)}
           >
             Redo all
+          </button>
+          <button
+            type="button"
+            className="chip-btn"
+            disabled={controlsLocked}
+            onClick={() => void runScores()}
+          >
+            {scoreBusy ? "Scoring…" : "Redo brand scores"}
           </button>
           {reviewing && (
             <button
@@ -333,7 +515,9 @@ export function BrandReviewPanel({
         >
           <div className="brand-review-progress-head">
             <span className="brand-review-progress-label">
-              {liveBrandActive && !batchBusy
+              {scoreBusy
+                ? "Brand scores"
+                : liveBrandActive && !batchBusy
                 ? "Brand review in progress"
                 : batchBusy
                   ? "Brand review running"
@@ -367,20 +551,21 @@ export function BrandReviewPanel({
         <table className="comp-table brand-review-table">
           <thead>
             <tr>
-              <th>Company</th>
+              <SortHeader label="Score" sortKey="score" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
+              <SortHeader label="Company" sortKey="name" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
               <th>Website</th>
-              <th>FB followers</th>
-              <th>IG followers</th>
-              <th>X followers</th>
-              <th>YouTube subs</th>
-              <th>LI employees</th>
-              <th>LI followers</th>
-              <th>Company revenue</th>
+              <SortHeader label="FB followers" sortKey="facebook" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
+              <SortHeader label="IG followers" sortKey="instagram" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
+              <SortHeader label="X followers" sortKey="twitter" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
+              <SortHeader label="YouTube subs" sortKey="youtube" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
+              <SortHeader label="LI employees" sortKey="employees" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
+              <SortHeader label="LI followers" sortKey="linkedin" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
+              <SortHeader label="Company revenue" sortKey="revenue" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
               {showActions && <th />}
             </tr>
           </thead>
           <tbody>
-            {competitors.map((c) => {
+            {sortedCompetitors.map((c) => {
               const b = c.brand || {};
               const busy = rowBusy === c.id;
               const isCurrent =
@@ -394,6 +579,18 @@ export function BrandReviewPanel({
                     busy || isCurrent ? "brand-review-row-active" : undefined
                   }
                 >
+                  <td className="brand-score-cell">
+                    {b.brandScore == null ? (
+                      "—"
+                    ) : (
+                      <>
+                        <strong className="brand-score-num">{b.brandScore}</strong>
+                        {b.brandScoreSummary && (
+                          <div className="brand-score-summary">{b.brandScoreSummary}</div>
+                        )}
+                      </>
+                    )}
+                  </td>
                   <td>
                     <strong>{c.pageName}</strong>
                     {b.category && <div className="muted">{b.category}</div>}
@@ -438,7 +635,7 @@ export function BrandReviewPanel({
                       <button
                         type="button"
                         className="linkish-btn"
-                        disabled={reviewing}
+                        disabled={controlsLocked}
                         onClick={() => void redoOne(c.id)}
                       >
                         {busy ? "…" : "Redo"}

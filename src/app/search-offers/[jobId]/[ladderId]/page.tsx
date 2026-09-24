@@ -8,6 +8,7 @@ import type {
   SearchCompetitorAdRecord,
   SearchJob,
 } from "@/lib/types";
+import { OfferLadderFlow, ladderSteps } from "@/components/OfferLadderFlow";
 
 function shortUrl(url: string): string {
   return url.replace(/^https?:\/\//i, "").replace(/\/$/, "");
@@ -114,9 +115,9 @@ export default function SearchOfferLadderPage() {
           <article className="offers-core-ladder">
             <header className="offers-core-ladder-head">
               <div className="offers-meta-row">
-                <span className="offers-card-kicker">Core {ladder.rank}</span>
+                <span className="offers-card-kicker">Ladder {ladder.rank}</span>
                 <span className="muted">
-                  {ladder.sourceCompetitors?.length || 0} competitor sources
+                  {ladderSteps(ladder).length} steps · {ladder.sourceCompetitors?.length || 0} competitor sources
                 </span>
               </div>
               <h2>{ladder.coreOffer}</h2>
@@ -129,6 +130,7 @@ export default function SearchOfferLadderPage() {
                 </a>
               ) : null}
             </header>
+            <OfferLadderFlow ladder={ladder} />
             {ladder.sourceCompetitors?.length ? (
               <div className="offers-tree-node">
                 <h3>Competitor sources</h3>
