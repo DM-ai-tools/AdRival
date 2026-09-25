@@ -9,6 +9,12 @@ export const OPENROUTER_OPENAI_MODEL =
 export const OPENROUTER_OPENAI_MINI_MODEL =
   process.env.OPENROUTER_OPENAI_MINI_MODEL || "openai/gpt-4o-mini";
 
+/** Cheap, fast model for ad-copy qualification and offer extraction. */
+export const OPENROUTER_FAST_MODEL =
+  process.env.OPENROUTER_FAST_MODEL?.trim() ||
+  process.env.OPENROUTER_OPENAI_MINI_MODEL?.trim() ||
+  "openai/gpt-4o-mini";
+
 /** Long-form content / design-fit model via OpenRouter */
 export const OPENROUTER_OPENAI_CONTENT_MODEL =
   process.env.OPENROUTER_OPENAI_CONTENT_MODEL || "openai/gpt-4.1";

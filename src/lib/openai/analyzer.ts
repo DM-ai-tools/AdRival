@@ -12,6 +12,7 @@ import {
 } from "../types";
 import {
   getOpenAICompatClient,
+  OPENROUTER_FAST_MODEL,
   resolveOpenAICompatModel,
 } from "../openrouter/openaiCompat";
 import { detectAgencySopRejectReason } from "../guardrails/industrySops";
@@ -124,10 +125,11 @@ async function jsonCompletion<T>(
   system: string,
   user: string,
   schemaHint: string,
+  model = "gpt-4o",
 ): Promise<T> {
   const client = getClient();
   const completion = await client.chat.completions.create({
-    model: resolveOpenAICompatModel("gpt-4o"),
+    model: resolveOpenAICompatModel(model),
     temperature: 0.2,
     response_format: { type: "json_object" },
     messages: [
@@ -156,6 +158,7 @@ export async function expandKeywordQueries(
     targetLocations?: BusinessLocation[] | null;
     selectedCategory?: BusinessCategory | null;
   },
+  model?: string,
 ): Promise<string[]> {
   const locLabels = (geoOptions?.targetLocations || [])
     .map((l) => l.suburb || l.city || l.label)
@@ -185,6 +188,7 @@ Prefer precise service phrases from the seed keyword and offerings — avoid gen
 Also consider these suggested competitor keywords: ${businessProfile.competitorKeywords.join(", ")}
 Return 4-6 high-yield search queries that tightly match the seed keyword / offerings.${wantLocal && locLabels.length ? ` Include 1-2 with city/suburb: ${locLabels.join(", ")}.` : ""}`,
       `{ "queries": string[] }`,
+      model,
     );
     const parsed = queryExpansionSchema.safeParse(raw);
     const queries = parsed.success ? parsed.data.queries : [keyword];
@@ -216,6 +220,7 @@ Avoid queries that surface random local businesses or product brands.`,
     `User keyword: "${keyword}"
 Return 4-6 high-yield Ad Library search queries for agencies. Always include "${keyword} agency" and "${keyword} marketing agency".`,
     `{ "queries": string[] }`,
+    model,
   );
 
   const parsed = queryExpansionSchema.safeParse(raw);
@@ -500,6 +505,7 @@ OUTPUT:
       2,
     ),
     `{ "relevant": boolean, "relevanceScore": number, "isMarketingAgency": boolean, "services": string[], "bodyEvidence": string, "reason": string }`,
+    OPENROUTER_FAST_MODEL,
   );
 
   const parsed = adFilterSchema.safeParse(raw);
@@ -801,6 +807,7 @@ export async function pickGoogleAdDomains(
     limit?: number;
     webSnippets?: Array<{ title?: string; url?: string; description?: string }>;
     businessProfile?: BusinessProfile | null;
+    model?: string;
   },
 ): Promise<{ domains: string[]; reason: string }> {
   const limit = opts?.limit ?? 12;
@@ -866,6 +873,7 @@ Return up to ${limit} domains EXACTLY as they appear in the candidate list (norm
       2,
     ),
     `{ "domains": string[], "reason": string }`,
+    opts?.model,
   );
 
   const parsed = googleDomainPickSchema.safeParse(raw);

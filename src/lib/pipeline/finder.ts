@@ -19,6 +19,7 @@ import {
   type AdFilterResult,
 } from "../openai/analyzer";
 import { newId } from "./brandReview";
+import { looksLikeEnglish } from "./adLanguage";
 import { isCreditError } from "../accounting/errors";
 import {
   isSearchJobSuppressed,
@@ -54,28 +55,6 @@ import {
 import type { AdPlatform } from "../platforms";
 import { parseKeywords, getPlatformAdThresholds, meetsDurationThreshold } from "../platforms";
 import { metaCountriesFromGeo } from "../geo";
-
-/** Lightweight English check — only drop obvious non-English creatives */
-function looksLikeEnglish(text: string): boolean {
-  const sample = text.replace(/\s+/g, " ").trim();
-  if (sample.length < 12) return true;
-
-  const accentHits = (sample.match(/[àâæçéèêëïîôœùûüÿäöüßñ¿¡]/gi) || [])
-    .length;
-  // Only reject dense foreign accent use
-  if (accentHits >= 8) return false;
-
-  const lower = sample.toLowerCase();
-  const foreignHints =
-    /\b(pour|avec|une|des|les|und|der|die|das|für|mit|nicht|não|você|obrigado|khoá|học|để|của)\b/i;
-  const englishHints =
-    /\b(the|and|for|your|you|with|our|free|get|ads|marketing|agency|business|google|seo|audit|grow|leads|campaign|ppc|facebook|instagram)\b/i;
-
-  const foreign = foreignHints.test(lower);
-  const english = englishHints.test(lower);
-  if (foreign && !english) return false;
-  return true;
-}
 
 function currentThresholds(acceptedCount: number, platform: AdPlatform) {
   // Keep LLM strict early; only relax after we have a solid local/relevant core

@@ -1045,6 +1045,11 @@ export interface DatabaseShape {
   lookupJobs?: LookupJob[];
   lookupAds?: LookupAdRecord[];
   searchCompetitorAds?: SearchCompetitorAdRecord[];
+  /**
+   * Ids of search and lookup runs the user deleted. Kept after the row is
+   * removed so an in-flight pipeline cannot write the run back.
+   */
+  deletedRunIds?: string[];
   users?: AppUser[];
   appSettings?: AppSettings;
   conversionRuleSets?: ConversionRuleSet[];

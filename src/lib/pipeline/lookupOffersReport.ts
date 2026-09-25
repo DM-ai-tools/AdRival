@@ -1,6 +1,11 @@
 import OpenAI from "openai";
 import { z } from "zod";
-import { getDirectOpenAIClient } from "../openrouter/openaiCompat";
+import {
+  getOpenAICompatClient,
+  OPENROUTER_FAST_MODEL,
+  resolveOpenAICompatModel,
+  hasOpenAICompatKey,
+} from "../openrouter/openaiCompat";
 import {
   getLookupAds,
   getLookupJob,
@@ -44,20 +49,20 @@ function getOffersLlmClient(): {
   client: OpenAI;
   model: string;
 } | null {
-  // Offers dashboard uses direct OpenAI (not OpenRouter).
-  const key = process.env.OPENAI_API_KEY?.trim();
-  if (key) {
-    return {
-      client: getDirectOpenAIClient(),
-      model: process.env.OFFERS_OPENAI_MODEL?.trim() || "gpt-4o-mini",
-    };
-  }
-  return null;
+  if (!hasOpenAICompatKey()) return null;
+  return {
+    client: getOpenAICompatClient(),
+    model: resolveOpenAICompatModel(
+      process.env.OFFERS_OPENAI_MODEL?.trim() || OPENROUTER_FAST_MODEL,
+    ),
+  };
 }
 
 const MAX_LP_TO_ANALYZE = 8;
 const MAX_CREATIVE_CLUSTERS = 40;
-const LP_CONCURRENCY = 2;
+const LP_CONCURRENCY = 4;
+const CREATIVE_CHUNK = 8;
+const CREATIVE_CONCURRENCY = 4;
 
 type OffersProgressHook = (update: {
   phase: string;
@@ -389,15 +394,21 @@ async function enrichCreativeClusters(
   const llm = getOffersLlmClient();
   if (!llm || clusters.length === 0) return map;
 
-  try {
-    const completion = await llm.client.chat.completions.create({
-      model: llm.model,
-      temperature: 0.2,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: `You analyze advertising creatives for a competitor offers report.
+  const chunks: CreativeCluster[][] = [];
+  for (let i = 0; i < clusters.length; i += CREATIVE_CHUNK) {
+    chunks.push(clusters.slice(i, i + CREATIVE_CHUNK));
+  }
+
+  await mapPool(chunks, CREATIVE_CONCURRENCY, async (chunk) => {
+    try {
+      const completion = await llm.client.chat.completions.create({
+        model: llm.model,
+        temperature: 0.2,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: `You analyze advertising creatives for a competitor offers report.
 For each creative cluster extract:
 - hook: attention-grabbing opening / pain / curiosity (1 short sentence)
 - offer: the CLEAR product/service/deal promise in ≤14 words. MUST say what the visitor gets (e.g. "Free Google Ads audit", "Car finance from $99/wk", "SEO retainer for local clinics"). NEVER return bare price+CTA like "$99 · Get offer" or "Learn more".
@@ -407,56 +418,57 @@ For each creative cluster extract:
 - funnelStage: TOFU (awareness), MOFU (consideration/lead magnet), BOFU (conversion), or unknown
 Keep wording concrete. Do not invent prices not in the copy.
 Return JSON: { "items": [{ "id", "hook", "offer", "pricing", "cta", "serviceTargeted", "funnelStage" }] }`,
-        },
-        {
-          role: "user",
-          content: JSON.stringify({
-            creatives: clusters.map((c) => ({
-              id: c.id,
-              title: c.title,
-              body: (c.body || "").slice(0, 500),
-              cta: c.cta,
-              adCount: c.ads.length,
-            })),
-          }),
-        },
-      ],
-    });
-    const raw = completion.choices[0]?.message?.content || "";
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (!match) return map;
-    const parsed = creativeLlmSchema.safeParse(JSON.parse(match[0]));
-    if (!parsed.success) return map;
-    for (const item of parsed.data.items) {
-      if (!item.id) continue;
-      const prev = map.get(item.id);
-      const cluster = clusters.find((c) => c.id === item.id);
-      const fallback = cluster
-        ? heuristicOfferParts(cluster.title, cluster.body, cluster.cta)
-        : { offer: prev?.offer || "—", pricing: prev?.pricing || null };
-      let offer = (item.offer || "").trim() || fallback.offer;
-      let pricing =
-        (item.pricing || "").trim() ||
-        fallback.pricing ||
-        prev?.pricing ||
-        null;
-      if (isWeakOfferLabel(offer)) {
-        offer = fallback.offer;
-        pricing = pricing || fallback.pricing;
-      }
-      map.set(item.id, {
-        hook: (item.hook || "").trim() || prev?.hook || "—",
-        offer,
-        cta: (item.cta || "").trim() || prev?.cta || null,
-        serviceTargeted:
-          (item.serviceTargeted || "").trim() || prev?.serviceTargeted || null,
-        funnelStage: item.funnelStage || prev?.funnelStage || "unknown",
-        pricing,
+          },
+          {
+            role: "user",
+            content: JSON.stringify({
+              creatives: chunk.map((c) => ({
+                id: c.id,
+                title: c.title,
+                body: (c.body || "").slice(0, 500),
+                cta: c.cta,
+                adCount: c.ads.length,
+              })),
+            }),
+          },
+        ],
       });
+      const raw = completion.choices[0]?.message?.content || "";
+      const match = raw.match(/\{[\s\S]*\}/);
+      if (!match) return;
+      const parsed = creativeLlmSchema.safeParse(JSON.parse(match[0]));
+      if (!parsed.success) return;
+      for (const item of parsed.data.items) {
+        if (!item.id) continue;
+        const prev = map.get(item.id);
+        const cluster = chunk.find((c) => c.id === item.id);
+        const fallback = cluster
+          ? heuristicOfferParts(cluster.title, cluster.body, cluster.cta)
+          : { offer: prev?.offer || "—", pricing: prev?.pricing || null };
+        let offer = (item.offer || "").trim() || fallback.offer;
+        let pricing =
+          (item.pricing || "").trim() ||
+          fallback.pricing ||
+          prev?.pricing ||
+          null;
+        if (isWeakOfferLabel(offer)) {
+          offer = fallback.offer;
+          pricing = pricing || fallback.pricing;
+        }
+        map.set(item.id, {
+          hook: (item.hook || "").trim() || prev?.hook || "—",
+          offer,
+          cta: (item.cta || "").trim() || prev?.cta || null,
+          serviceTargeted:
+            (item.serviceTargeted || "").trim() || prev?.serviceTargeted || null,
+          funnelStage: item.funnelStage || prev?.funnelStage || "unknown",
+          pricing,
+        });
+      }
+    } catch (err) {
+      console.warn("[lookupOffersReport] creative LLM failed", err);
     }
-  } catch (err) {
-    console.warn("[lookupOffersReport] creative LLM failed", err);
-  }
+  });
   return map;
 }
 

@@ -47,6 +47,20 @@ let memoryDbStamp = "";
  */
 const suppressedSearchJobIds = new Set<string>();
 const suppressedLookupJobIds = new Set<string>();
+const MAX_DELETED_RUN_IDS = 500;
+
+function rememberDeletedRun(db: DatabaseShape, id: string) {
+  if (!id) return;
+  if (!db.deletedRunIds) db.deletedRunIds = [];
+  if (!db.deletedRunIds.includes(id)) db.deletedRunIds.push(id);
+  if (db.deletedRunIds.length > MAX_DELETED_RUN_IDS) {
+    db.deletedRunIds.splice(0, db.deletedRunIds.length - MAX_DELETED_RUN_IDS);
+  }
+}
+
+function runWasDeleted(db: DatabaseShape, id: string): boolean {
+  return Boolean(id && db.deletedRunIds?.includes(id));
+}
 
 /**
  * Re-entrancy depth. Accounting composes several store mutations into one
@@ -129,7 +143,12 @@ export function readDb(): DatabaseShape {
 export function isSearchJobSuppressed(jobId: string): boolean {
   if (suppressedSearchJobIds.has(jobId)) return true;
   // Durable across duplicate Next.js module instances (in-memory Set is not shared).
-  const job = ensureDb().jobs.find((j) => j.id === jobId);
+  const db = ensureDb();
+  if (runWasDeleted(db, jobId)) {
+    suppressedSearchJobIds.add(jobId);
+    return true;
+  }
+  const job = db.jobs.find((j) => j.id === jobId);
   if (job?.progress?.stopRequested) {
     suppressedSearchJobIds.add(jobId);
     return true;
@@ -249,7 +268,12 @@ export function stopSearchJob(
 export function isLookupJobSuppressed(lookupId: string): boolean {
   if (suppressedLookupJobIds.has(lookupId)) return true;
   // Durable across duplicate Next.js module instances (in-memory Set is not shared).
-  const job = ensureDb().lookupJobs?.find((j) => j.id === lookupId);
+  const db = ensureDb();
+  if (runWasDeleted(db, lookupId)) {
+    suppressedLookupJobIds.add(lookupId);
+    return true;
+  }
+  const job = db.lookupJobs?.find((j) => j.id === lookupId);
   if (job?.progress?.stopRequested) {
     suppressedLookupJobIds.add(lookupId);
     return true;
@@ -342,7 +366,13 @@ const LOOKUP_IN_FLIGHT_STAGES = new Set([
 ]);
 
 export function isSearchWorkInFlight(job: SearchJob): boolean {
-  if (suppressedSearchJobIds.has(job.id) || job.progress?.stopRequested) return false;
+  if (
+    suppressedSearchJobIds.has(job.id) ||
+    job.progress?.stopRequested ||
+    runWasDeleted(ensureDb(), job.id)
+  ) {
+    return false;
+  }
   return (
     job.status === "running" ||
     SEARCH_IN_FLIGHT_STAGES.has(job.progress?.stage || "")
@@ -350,7 +380,13 @@ export function isSearchWorkInFlight(job: SearchJob): boolean {
 }
 
 export function isLookupWorkInFlight(job: LookupJob): boolean {
-  if (suppressedLookupJobIds.has(job.id) || job.progress?.stopRequested) return false;
+  if (
+    suppressedLookupJobIds.has(job.id) ||
+    job.progress?.stopRequested ||
+    runWasDeleted(ensureDb(), job.id)
+  ) {
+    return false;
+  }
   return (
     job.status === "running" ||
     LOOKUP_IN_FLIGHT_STAGES.has(job.progress?.stage || "")
@@ -433,6 +469,7 @@ function migrateDb(parsed: DatabaseShape): DatabaseShape {
   if (!parsed.lookupJobs) parsed.lookupJobs = [];
   if (!parsed.lookupAds) parsed.lookupAds = [];
   if (!parsed.searchCompetitorAds) parsed.searchCompetitorAds = [];
+  if (!parsed.deletedRunIds) parsed.deletedRunIds = [];
   if (!parsed.users) parsed.users = [];
 
   const from = parsed.schemaVersion ?? 1;
@@ -585,6 +622,7 @@ function normalizeDb(input: Partial<DatabaseShape> | null | undefined): Database
   if (Array.isArray(input.searchCompetitorAds)) {
     db.searchCompetitorAds = input.searchCompetitorAds;
   }
+  if (Array.isArray(input.deletedRunIds)) db.deletedRunIds = input.deletedRunIds;
   return db;
 }
 
@@ -642,6 +680,12 @@ export function mergeStore(payload: Partial<DatabaseShape>): {
       current.searchCompetitorAds ?? [],
       incoming.searchCompetitorAds ?? [],
     ),
+    deletedRunIds: Array.from(
+      new Set([
+        ...(current.deletedRunIds ?? []),
+        ...(incoming.deletedRunIds ?? []),
+      ]),
+    ).slice(-MAX_DELETED_RUN_IDS),
   };
 
   // Newest-first ordering for history UIs
@@ -680,9 +724,13 @@ export function saveJob(job: SearchJob): boolean {
   return withDbLock(() => {
     const db = ensureDb();
     const idx = db.jobs.findIndex((j) => j.id === job.id);
+    if (runWasDeleted(db, job.id) || suppressedSearchJobIds.has(job.id)) {
+      suppressedSearchJobIds.add(job.id);
+      return false;
+    }
     if (idx >= 0) {
       const existing = db.jobs[idx];
-      if (suppressedSearchJobIds.has(job.id) || existing.progress?.stopRequested) {
+      if (existing.progress?.stopRequested) {
         suppressedSearchJobIds.add(job.id);
         return false;
       }
@@ -701,7 +749,6 @@ export function saveJob(job: SearchJob): boolean {
         archivedAt: job.archivedAt !== undefined ? job.archivedAt : existing.archivedAt,
       };
     } else {
-      if (suppressedSearchJobIds.has(job.id)) return false;
       db.jobs.unshift(job);
     }
     writeDb(db);
@@ -722,7 +769,11 @@ export function updateJob(
     const idx = db.jobs.findIndex((j) => j.id === id);
     if (idx < 0) return null;
     const existing = db.jobs[idx];
-    if (suppressedSearchJobIds.has(id) || existing.progress?.stopRequested) {
+    if (
+      runWasDeleted(db, id) ||
+      suppressedSearchJobIds.has(id) ||
+      existing.progress?.stopRequested
+    ) {
       suppressedSearchJobIds.add(id);
       return null;
     }
@@ -755,6 +806,10 @@ export function listHistoryRuns(limit = 100): HistoryRunSummary[] {
 export function saveCompetitor(competitor: CompetitorRecord): boolean {
   if (suppressedSearchJobIds.has(competitor.runId)) return false;
   const db = ensureDb();
+  if (runWasDeleted(db, competitor.runId)) {
+    suppressedSearchJobIds.add(competitor.runId);
+    return false;
+  }
   // Don't orphan competitors onto a deleted / missing run
   if (!db.jobs.some((j) => j.id === competitor.runId)) return false;
   db.competitors.unshift(competitor);
@@ -803,48 +858,70 @@ export function deleteHistoryRun(runId: string): {
   ok: boolean;
   removedCompetitors: number;
 } {
-  // Tombstone first so an in-flight pipeline cannot recreate the row
   suppressedSearchJobIds.add(runId);
-  const db = ensureDb();
-  const jobIdx = db.jobs.findIndex((j) => j.id === runId);
-  if (jobIdx < 0) {
-    // Still ok — job may have been deleted already while pipeline kept running
-    return { ok: true, removedCompetitors: 0 };
-  }
+  return withDbLock(() => {
+    const db = ensureDb();
+    rememberDeletedRun(db, runId);
+    const offerPrefix = `search-offers:${runId}`;
+    for (const lookup of db.lookupJobs ?? []) {
+      if (!lookup.id.startsWith(offerPrefix)) continue;
+      suppressedLookupJobIds.add(lookup.id);
+      rememberDeletedRun(db, lookup.id);
+    }
+    if (db.lookupJobs) {
+      const removedLookupIds = new Set(
+        db.lookupJobs.filter((lookup) => lookup.id.startsWith(offerPrefix)).map((lookup) => lookup.id),
+      );
+      db.lookupJobs = db.lookupJobs.filter((lookup) => !removedLookupIds.has(lookup.id));
+      if (db.lookupAds) {
+        db.lookupAds = db.lookupAds.filter((ad) => !removedLookupIds.has(ad.lookupId));
+      }
+    }
 
-  const removed = db.competitors.filter((c) => c.runId === runId);
-  const removedPageIds = new Set(removed.map((c) => c.pageId));
+    const jobIdx = db.jobs.findIndex((j) => j.id === runId);
+    if (jobIdx < 0) {
+      writeDb(db);
+      return { ok: true, removedCompetitors: 0 };
+    }
 
-  db.competitors = db.competitors.filter((c) => c.runId !== runId);
-  if (db.searchCompetitorAds) {
-    db.searchCompetitorAds = db.searchCompetitorAds.filter((a) => a.runId !== runId);
-  }
-  db.jobs.splice(jobIdx, 1);
+    const removed = db.competitors.filter((c) => c.runId === runId);
+    const removedPageIds = new Set(removed.map((c) => c.pageId));
 
-  // Only un-see a pageId if no other stored competitor still uses it
-  const stillUsed = new Set(
-    db.competitors.map((c) => c.pageId).filter(Boolean),
-  );
-  db.seenPageIds = db.seenPageIds.filter(
-    (id) => !removedPageIds.has(id) || stillUsed.has(id),
-  );
+    db.competitors = db.competitors.filter((c) => c.runId !== runId);
+    if (db.searchCompetitorAds) {
+      db.searchCompetitorAds = db.searchCompetitorAds.filter((a) => a.runId !== runId);
+    }
+    db.jobs.splice(jobIdx, 1);
 
-  writeDb(db);
-  return { ok: true, removedCompetitors: removed.length };
+    const stillUsed = new Set(
+      db.competitors.map((c) => c.pageId).filter(Boolean),
+    );
+    db.seenPageIds = db.seenPageIds.filter(
+      (id) => !removedPageIds.has(id) || stillUsed.has(id),
+    );
+
+    writeDb(db);
+    return { ok: true, removedCompetitors: removed.length };
+  });
 }
 
 /** Delete every run + competitor + clear seen page ids */
 export function clearAllHistory(): { removedRuns: number; removedCompetitors: number } {
-  const db = ensureDb();
-  for (const job of db.jobs) suppressedSearchJobIds.add(job.id);
-  const removedRuns = db.jobs.length;
-  const removedCompetitors = db.competitors.length;
-  db.jobs = [];
-  db.competitors = [];
-  db.searchCompetitorAds = [];
-  db.seenPageIds = [];
-  writeDb(db);
-  return { removedRuns, removedCompetitors };
+  return withDbLock(() => {
+    const db = ensureDb();
+    for (const job of db.jobs) {
+      suppressedSearchJobIds.add(job.id);
+      rememberDeletedRun(db, job.id);
+    }
+    const removedRuns = db.jobs.length;
+    const removedCompetitors = db.competitors.length;
+    db.jobs = [];
+    db.competitors = [];
+    db.searchCompetitorAds = [];
+    db.seenPageIds = [];
+    writeDb(db);
+    return { removedRuns, removedCompetitors };
+  });
 }
 
 /* ── Competitor name lookup (separate from keyword search history) ── */
@@ -854,10 +931,14 @@ export function saveLookupJob(job: LookupJob): boolean {
     const db = ensureDb();
     if (!db.lookupJobs) db.lookupJobs = [];
     const idx = db.lookupJobs.findIndex((j) => j.id === job.id);
+    if (runWasDeleted(db, job.id) || suppressedLookupJobIds.has(job.id)) {
+      suppressedLookupJobIds.add(job.id);
+      return false;
+    }
     if (idx >= 0) {
       const existing = db.lookupJobs[idx];
       // Refuse to revive a stopped run (in-memory Set alone is not cross-bundle safe).
-      if (suppressedLookupJobIds.has(job.id) || existing.progress?.stopRequested) {
+      if (existing.progress?.stopRequested) {
         suppressedLookupJobIds.add(job.id);
         return false;
       }
@@ -875,7 +956,7 @@ export function saveLookupJob(job: LookupJob): boolean {
           job.archivedAt !== undefined ? job.archivedAt : existing.archivedAt,
       };
     } else {
-      if (suppressedLookupJobIds.has(job.id) || job.progress?.stopRequested) {
+      if (job.progress?.stopRequested) {
         suppressedLookupJobIds.add(job.id);
         return false;
       }
@@ -900,7 +981,11 @@ export function updateLookupJob(
     const idx = db.lookupJobs.findIndex((j) => j.id === id);
     if (idx < 0) return null;
     const existing = db.lookupJobs[idx];
-    if (suppressedLookupJobIds.has(id) || existing.progress?.stopRequested) {
+    if (
+      runWasDeleted(db, id) ||
+      suppressedLookupJobIds.has(id) ||
+      existing.progress?.stopRequested
+    ) {
       suppressedLookupJobIds.add(id);
       return null;
     }
@@ -1012,30 +1097,41 @@ export function deleteLookupHistoryRun(lookupId: string): {
   removedAds: number;
 } {
   suppressedLookupJobIds.add(lookupId);
-  const db = ensureDb();
-  if (!db.lookupJobs) db.lookupJobs = [];
-  if (!db.lookupAds) db.lookupAds = [];
-  const idx = db.lookupJobs.findIndex((j) => j.id === lookupId);
-  if (idx < 0) return { ok: true, removedAds: 0 };
-  const before = db.lookupAds.length;
-  db.lookupAds = db.lookupAds.filter((a) => a.lookupId !== lookupId);
-  db.lookupJobs.splice(idx, 1);
-  writeDb(db);
-  return { ok: true, removedAds: before - db.lookupAds.length };
+  return withDbLock(() => {
+    const db = ensureDb();
+    rememberDeletedRun(db, lookupId);
+    if (!db.lookupJobs) db.lookupJobs = [];
+    if (!db.lookupAds) db.lookupAds = [];
+    const idx = db.lookupJobs.findIndex((j) => j.id === lookupId);
+    if (idx < 0) {
+      writeDb(db);
+      return { ok: true, removedAds: 0 };
+    }
+    const before = db.lookupAds.length;
+    db.lookupAds = db.lookupAds.filter((a) => a.lookupId !== lookupId);
+    db.lookupJobs.splice(idx, 1);
+    writeDb(db);
+    return { ok: true, removedAds: before - db.lookupAds.length };
+  });
 }
 
 export function clearAllLookupHistory(): {
   removedRuns: number;
   removedAds: number;
 } {
-  const db = ensureDb();
-  for (const job of db.lookupJobs ?? []) suppressedLookupJobIds.add(job.id);
-  const removedRuns = db.lookupJobs?.length ?? 0;
-  const removedAds = db.lookupAds?.length ?? 0;
-  db.lookupJobs = [];
-  db.lookupAds = [];
-  writeDb(db);
-  return { removedRuns, removedAds };
+  return withDbLock(() => {
+    const db = ensureDb();
+    for (const job of db.lookupJobs ?? []) {
+      suppressedLookupJobIds.add(job.id);
+      rememberDeletedRun(db, job.id);
+    }
+    const removedRuns = db.lookupJobs?.length ?? 0;
+    const removedAds = db.lookupAds?.length ?? 0;
+    db.lookupJobs = [];
+    db.lookupAds = [];
+    writeDb(db);
+    return { removedRuns, removedAds };
+  });
 }
 
 export function saveSearchCompetitorAd(ad: SearchCompetitorAdRecord): boolean {

@@ -24,32 +24,39 @@ export function AuthHeaderActions() {
 
   const summary = credits.data?.credits ?? null;
 
+  const creditLabel = !summary
+    ? "Credits & usage"
+    : summary.unlimited
+      ? "Unlimited credits"
+      : `${formatCredits(summary.availableSubunits)} credits left`;
+
   return (
     <div className="auth-header-actions">
-      <Link
-        href="/credits"
-        className={
-          summary?.lowCredit && !summary.unlimited
-            ? "auth-credit-chip is-low"
-            : "auth-credit-chip"
-        }
-        title="Credits & usage"
-      >
-        {summary
-          ? summary.unlimited
-            ? "Unlimited"
-            : `${formatCredits(summary.availableSubunits)} credits`
-          : "Credits"}
-      </Link>
-      {user.role === "admin" ? (
-        <Link href="/admin" className="auth-user-link">
-          Admin
+      <p className="auth-signed-in">
+        Signed in as <strong>{user.displayName}</strong>
+      </p>
+      <div className="auth-header-links">
+        <Link
+          href="/credits"
+          className={
+            summary?.lowCredit && !summary.unlimited
+              ? "auth-credit-chip is-low"
+              : "auth-credit-chip"
+          }
+          title="Open credits and usage"
+        >
+          {creditLabel}
         </Link>
-      ) : null}
-      <Link href="/account" className="auth-user-link">
-        {user.displayName}
-      </Link>
-      <LogoutButton />
+        <Link href="/account" className="auth-user-link" title="Account settings">
+          Account settings
+        </Link>
+        {user.role === "admin" ? (
+          <Link href="/admin" className="auth-user-link" title="Admin dashboard">
+            Admin dashboard
+          </Link>
+        ) : null}
+        <LogoutButton />
+      </div>
     </div>
   );
 }

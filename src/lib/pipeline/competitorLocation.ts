@@ -25,6 +25,71 @@ export type ResolvedCompetitorLocation = {
   locationConfidence?: "high" | "medium" | "low" | null;
 };
 
+function cleanPlace(value?: string | null): string | null {
+  const trimmed = (value || "").replace(/\s+/g, " ").trim();
+  return trimmed || null;
+}
+
+const COUNTRY_NAMES: Record<string, string> = {
+  AU: "Australia",
+  US: "United States",
+  USA: "United States",
+  GB: "United Kingdom",
+  UK: "United Kingdom",
+  CA: "Canada",
+  NZ: "New Zealand",
+  IN: "India",
+  DE: "Germany",
+  SG: "Singapore",
+  AE: "United Arab Emirates",
+};
+
+function countryDisplay(value?: string | null): string | null {
+  const cleaned = cleanPlace(value);
+  if (!cleaned) return null;
+  if (cleaned.length <= 3) return COUNTRY_NAMES[cleaned.toUpperCase()] || cleaned.toUpperCase();
+  return cleaned;
+}
+
+/** Street plus city and country, skipping a part that is already written in an earlier part. */
+export function composeLocationLabel(parts: {
+  street?: string | null;
+  suburb?: string | null;
+  city?: string | null;
+  region?: string | null;
+  country?: string | null;
+}): {
+  label: string | null;
+  suburb: string | null;
+  city: string | null;
+  country: string | null;
+} {
+  const street = cleanPlace(parts.street);
+  const suburb = cleanPlace(parts.suburb);
+  const city = cleanPlace(parts.city);
+  const region = cleanPlace(parts.region);
+  const country = countryDisplay(parts.country);
+  const unique: string[] = [];
+  for (const part of [street, suburb, city, region, country]) {
+    if (!part) continue;
+    const lower = part.toLowerCase();
+    const already = unique.some((existing) =>
+      existing
+        .toLowerCase()
+        .split(",")
+        .some((segment) => segment.trim() === lower),
+    );
+    if (already) continue;
+    unique.push(part);
+  }
+  return {
+    label: unique.join(", ") || null,
+    suburb,
+    city,
+    country,
+  };
+}
+
 function normPlace(s: string | null | undefined): string {
   return (s || "")
     .toLowerCase()
@@ -636,6 +701,47 @@ function hostFromUrl(url: string | null | undefined): string | null {
   }
 }
 
+function inferPlaceFromSnippets(snippets: string[]): {
+  city: string | null;
+  region: string | null;
+  country: string | null;
+} {
+  const blob = snippets.join("\n");
+  let country: string | null = null;
+  const named = blob.match(
+    /\b(Australia|United States|United Kingdom|New Zealand|Canada|Singapore|India|Germany)\b/i,
+  );
+  if (named) country = named[1];
+  else if (/\b(QLD|NSW|VIC|SA|WA|TAS|ACT|NT)\b/.test(blob)) country = "Australia";
+  else if (/\bUSA\b|\bU\.S\./.test(blob)) country = "United States";
+
+  const streetTail =
+    /^(st|street|rd|road|ave|avenue|blvd|drive|dr|lane|ln|way|court|ct|place|pl|pmb)$/i;
+  let city: string | null = null;
+  let region: string | null = null;
+  for (const match of blob.matchAll(
+    /\b([A-Z][a-zA-Z]+(?:[ -][A-Z][a-zA-Z]+){0,2}),\s*([A-Z]{2})\b/g,
+  )) {
+    const name = match[1];
+    const last = name.split(/[\s-]/).pop() || "";
+    if (streetTail.test(last)) continue;
+    city = name;
+    region = match[2];
+  }
+  if (!city) {
+    const au = blob.match(
+      /\b([A-Z][a-zA-Z]+(?:\s[A-Z][a-zA-Z]+)?)\s+(QLD|NSW|VIC|SA|WA|TAS|ACT|NT)\b/,
+    );
+    const last = au?.[1].split(" ").pop() || "";
+    if (au && !streetTail.test(last)) {
+      city = au[1];
+      region = au[2];
+      country = country || "Australia";
+    }
+  }
+  return { city, region, country };
+}
+
 async function fromFirecrawlSearch(input: {
   pageName: string;
   website?: string | null;
@@ -696,13 +802,16 @@ async function fromFirecrawlSearch(input: {
       const completion = await client.chat.completions.create({
         model: resolveOpenAICompatModel("gpt-4o-mini"),
         temperature: 0.1,
-        max_tokens: 200,
+        max_tokens: 320,
         messages: [
           {
             role: "system",
             content: `Extract the company's real-world business address or HQ city from search snippets.
 Return JSON only: {"label":"street or city string or null","city":"string or null","suburb":"string or null","country":"string or null","confidence":"high|medium|low"}.
-If unknown, use nulls. Prefer a full street address when present.`,
+City and country are required whenever a snippet names them. Street belongs in label.
+Country must be the country name, such as Australia or United States.
+Do not stop at the street. Fill city and country in their own fields.
+Do not invent a city that is not in the snippets.`,
           },
           {
             role: "user",
@@ -711,6 +820,7 @@ If unknown, use nulls. Prefer a full street address when present.`,
               domain,
               website: input.website,
               landingPageUrl: input.landingPageUrl,
+              adMarket: input.countryHint || null,
               snippets: snippets.slice(0, 12),
             }),
           },
@@ -719,19 +829,27 @@ If unknown, use nulls. Prefer a full street address when present.`,
       });
       const raw = completion.choices[0]?.message?.content || "{}";
       const parsed = JSON.parse(raw) as {
+        street?: string | null;
         label?: string | null;
         city?: string | null;
         suburb?: string | null;
+        region?: string | null;
         country?: string | null;
       };
-      const label = (parsed.label || "").trim() || null;
-      const city = (parsed.city || "").trim() || null;
-      if (!label && !city) return null;
+      const inferred = inferPlaceFromSnippets(snippets);
+      const composed = composeLocationLabel({
+        street: parsed.street || parsed.label,
+        suburb: parsed.suburb,
+        city: parsed.city || inferred.city,
+        region: parsed.region || inferred.region,
+        country: parsed.country || inferred.country,
+      });
+      if (!composed.label) return null;
       return {
-        locationLabel: label || city,
-        locationCity: city || label,
-        locationSuburb: (parsed.suburb || "").trim() || null,
-        locationCountry: (parsed.country || "").trim() || null,
+        locationLabel: composed.label,
+        locationCity: composed.city,
+        locationSuburb: composed.suburb,
+        locationCountry: composed.country,
         locationStatus: "unknown",
         locationSource: "firecrawl",
         locationConfidence: "medium",
@@ -748,11 +866,18 @@ If unknown, use nulls. Prefer a full street address when present.`,
     ),
   );
   if (!placeLike) return null;
+  const inferred = inferPlaceFromSnippets(snippets);
+  const composed = composeLocationLabel({
+    street: placeLike.slice(0, 160),
+    city: inferred.city,
+    region: inferred.region,
+    country: inferred.country,
+  });
   return {
-    locationLabel: placeLike.slice(0, 160),
-    locationCity: null,
+    locationLabel: composed.label,
+    locationCity: composed.city,
     locationSuburb: null,
-    locationCountry: null,
+    locationCountry: composed.country,
     locationStatus: "unknown",
     locationSource: "firecrawl",
     locationConfidence: "low",

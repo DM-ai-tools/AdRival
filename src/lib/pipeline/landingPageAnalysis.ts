@@ -22,7 +22,7 @@ import {
   hasOpenRouterKey,
   OPENROUTER_PERPLEXITY_MODEL,
 } from "../openrouter/client";
-import { OPENROUTER_OPENAI_MODEL, resolveOpenAICompatModel } from "../openrouter/openaiCompat";
+import { OPENROUTER_FAST_MODEL, resolveOpenAICompatModel } from "../openrouter/openaiCompat";
 import {
   getAnthropicClient,
   getAnthropicModel,
@@ -771,9 +771,7 @@ async function analyzeWithLlm(input: {
       }
       const completion = await client.chat.completions.create({
         model: resolveOpenAICompatModel(
-          process.env.OFFERS_OPENAI_MODEL?.trim() ||
-            process.env.OPENROUTER_OPENAI_MODEL?.trim() ||
-            OPENROUTER_OPENAI_MODEL,
+          process.env.OFFERS_OPENAI_MODEL?.trim() || OPENROUTER_FAST_MODEL,
         ),
         temperature: 0.15,
         max_tokens: 6000,
@@ -912,7 +910,7 @@ async function analyzeWithLlm(input: {
       } else if (hasOpenRouterKey()) {
         const client = getOpenRouterClient();
         const completion = await client.chat.completions.create({
-          model: OPENROUTER_OPENAI_MODEL,
+          model: OPENROUTER_FAST_MODEL,
           temperature: 0.1,
           max_tokens: 3500,
           response_format: { type: "json_object" },

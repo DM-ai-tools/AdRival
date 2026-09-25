@@ -3155,9 +3155,9 @@ a.lp-recreate-link {
 .product-header-actions {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: flex-end;
   justify-content: flex-end;
-  gap: 10px;
+  gap: 14px;
   flex-shrink: 0;
   margin-top: 10px;
 }
@@ -3218,8 +3218,28 @@ a.lp-recreate-link {
 
 .auth-header-actions {
   display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.auth-signed-in {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.auth-signed-in strong {
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.auth-header-links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 .auth-user-link {

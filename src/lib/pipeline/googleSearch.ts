@@ -17,9 +17,14 @@ import {
   expandKeywordQueries,
   pickCompanyPageMatch,
   pickGoogleAdDomains,
-  proposeAgencyDomains,
   serviceKeywordOverlapScore,
 } from "../openai/analyzer";
+import { OPENROUTER_FAST_MODEL } from "../openrouter/openaiCompat";
+import {
+  firecrawlSearch,
+  flattenFirecrawlSearchResults,
+  hasFirecrawlKey,
+} from "../firecrawl/client";
 import {
   getJob,
   isSearchJobSuppressed,
@@ -28,13 +33,13 @@ import {
   saveJob,
   saveLookupAd,
   saveLookupJob,
+  updateCompetitor,
 } from "../db";
 import {
   buildGuardrailContext,
   guardCompetitorHeuristic,
 } from "../guardrails";
 import {
-  MAX_SEARCH_QUERIES_GOOGLE,
   TARGET_COMPETITORS,
   type AdCandidate,
   type BrandReview,
@@ -63,14 +68,37 @@ import {
   normalizeWebsiteUrl,
 } from "./linkGuards";
 import { enrichLookupPageMetrics } from "./lookupEnrichment";
+import { looksLikeEnglish } from "./adLanguage";
 
-const MAX_DOMAIN_AD_PAGES = 4;
 const MAX_ADS_PAGES = 6;
-const MAX_DOMAINS_PER_QUERY = 6;
 /** Transparency region that returns creatives across countries (US alone under-counts). */
 const GOOGLE_ADS_REGION = "all";
 /** Cap hard-verify calls per query — each is a SociaVault credit. */
 const MAX_DOMAIN_VERIFY = 4;
+/** How many advertisers to qualify at once. The next fetch waits until this batch is reviewed. */
+const AD_REVIEW_BATCH = 4;
+/** Detail calls per advertiser before the model runs. More copy is loaded after accept. */
+const DETAILS_PER_ADVERTISER = 1;
+/** User keywords always run. This many extra expansions are allowed after them. */
+const MAX_EXTRA_GOOGLE_QUERIES = 3;
+
+async function mapPool<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  }
+  const workers = Math.min(Math.max(concurrency, 1), items.length);
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+  return out;
+}
 
 function normalizeDomainQuery(query: string): string | null {
   const q = query
@@ -161,163 +189,122 @@ function domainFromUrl(url?: string | null): string | null {
   }
 }
 
-/** Web-search + Transparency domains, then LLM-rank + hard SociaVault verify. */
-async function discoverAndVerifyDomains(args: {
-  query: string;
+/** Organic domains only when Transparency has not filled the roster. One search per user keyword, then one company-ads check. */
+async function discoverGapDomains(args: {
+  queries: string[];
   platform: "google" | "youtube";
-  transparencyDomains: string[];
-  advertisers: Array<{ name: string; region?: string | null }>;
   businessProfile?: import("../types").BusinessProfile | null;
-  /** ISO country for web search bias (AU, US, …); Transparency ads still use "all". */
   webRegion?: string;
   onProgress: (message: string) => void;
-}): Promise<{ domains: string[]; reason: string; verifiedAdsSample: number }> {
-  const {
-    query,
-    platform,
-    transparencyDomains,
-    advertisers,
-    businessProfile,
-    webRegion,
-    onProgress,
-  } = args;
-
+}): Promise<Array<{ domain: string; ads: GoogleAdCreative[] }>> {
+  const { queries, platform, businessProfile, webRegion, onProgress } = args;
+  const profile = businessProfile || null;
+  const searchRegion =
+    webRegion && webRegion !== "all" ? webRegion.toUpperCase() : undefined;
   const snippets: Array<{ title?: string; url?: string; description?: string }> =
     [];
   const webDomains: string[] = [];
-  const profile = businessProfile || null;
-  const industry = profile?.industry || "";
-  const searchRegion =
-    webRegion && webRegion !== "all" ? webRegion.toUpperCase() : "US";
-
-  const searchQueries = profile
-    ? [
-        query,
-        `${query} ${industry}`.trim(),
-        ...(profile.offerings || []).slice(0, 2).map((o) => `${o} ${query}`.trim()),
-        platform === "youtube" ? `${query} YouTube ads` : `${query} Google ads`,
-      ].filter(Boolean)
-    : [
-        `${query} marketing agency`,
-        `${query} Google Ads agency`,
-        `${query} PPC agency`,
-        platform === "youtube"
-          ? `${query} YouTube ads agency`
-          : `${query} digital marketing agency`,
-      ];
 
   onProgress(
-    profile
-      ? `Web-searching competitor domains for "${query}"…`
-      : `Web-searching agency domains for "${query}"…`,
+    `Searching the web for more ${platform} competitor domains…`,
   );
-  for (const q of searchQueries.slice(0, 3)) {
+  await mapPool(queries.slice(0, 4), 4, async (query) => {
     try {
-      const res = await googleSearch(q, searchRegion);
+      if (hasFirecrawlKey()) {
+        const res = await firecrawlSearch(query, {
+          limit: 5,
+          country: searchRegion,
+        });
+        for (const hit of flattenFirecrawlSearchResults(res).slice(0, 5)) {
+          snippets.push({
+            title: hit.title || undefined,
+            url: hit.url,
+            description: hit.description || undefined,
+          });
+          const domain = domainFromUrl(hit.url);
+          if (!domain) continue;
+          const blob = `${hit.title || ""}\n${hit.description || ""}\n${hit.url || ""}`;
+          const overlap = serviceKeywordOverlapScore(blob, {
+            businessProfile: profile,
+            searchKeywords: queries,
+          });
+          if (overlap <= 0) continue;
+          webDomains.push(domain);
+        }
+        return;
+      }
+      const res = await googleSearch(query, searchRegion || "US");
       const results = normalizeList<{
         title?: string;
         url?: string;
         description?: string;
       }>(res.data?.results);
-      for (const r of results.slice(0, 10)) {
-        snippets.push(r);
-        const d = domainFromUrl(r.url);
-        if (d) webDomains.push(d);
+      for (const hit of results.slice(0, 5)) {
+        snippets.push(hit);
+        const domain = domainFromUrl(hit.url);
+        if (!domain) continue;
+        const blob = `${hit.title || ""}\n${hit.description || ""}\n${hit.url || ""}`;
+        if (
+          serviceKeywordOverlapScore(blob, {
+            businessProfile: profile,
+            searchKeywords: queries,
+          }) <= 0
+        ) {
+          continue;
+        }
+        webDomains.push(domain);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (/credit|quota|402|401|403|rate limited/i.test(msg)) throw err;
     }
-  }
+  });
 
-  let proposed: string[] = [];
+  const candidatePool = Array.from(new Set(webDomains));
+  if (candidatePool.length === 0) return [];
+
+  onProgress(`Ranking ${candidatePool.length} web domains…`);
+  let ranked = candidatePool.slice(0, MAX_DOMAIN_VERIFY);
   try {
-    const prop = await proposeAgencyDomains(query, platform, 8, profile);
-    proposed = prop.domains;
+    const pick = await pickGoogleAdDomains(
+      queries[0] || "",
+      candidatePool,
+      [],
+      {
+        platform,
+        limit: MAX_DOMAIN_VERIFY,
+        webSnippets: snippets,
+        businessProfile: profile,
+        model: OPENROUTER_FAST_MODEL,
+      },
+    );
+    if (pick.domains.length) ranked = pick.domains.slice(0, MAX_DOMAIN_VERIFY);
   } catch {
-    /* optional */
+    ranked = candidatePool.slice(0, MAX_DOMAIN_VERIFY);
   }
 
-  // Prefer Transparency websites first — they already advertise on Google
-  const candidatePool = Array.from(
-    new Set([
-      ...transparencyDomains.map((d) => domainFromUrl(d) || d).filter(Boolean),
-      ...webDomains,
-      ...proposed,
-    ]),
-  ) as string[];
-
-  onProgress(
-    `LLM ranking ${candidatePool.length} domains (Transparency + web)…`,
-  );
-  let ranked: string[] = [];
-  let reason = "";
-  try {
-    const pick = await pickGoogleAdDomains(query, candidatePool, advertisers, {
-      platform,
-      limit: MAX_DOMAINS_PER_QUERY,
-      webSnippets: snippets,
-      businessProfile: profile,
-    });
-    ranked = pick.domains;
-    reason = pick.reason;
-  } catch {
-    // Prefer transparency domains when LLM ranking fails
-    ranked = (
-      transparencyDomains.length
-        ? [
-            ...transparencyDomains,
-            ...candidatePool.filter((d) => !transparencyDomains.includes(d)),
-          ]
-        : candidatePool
-    ).slice(0, MAX_DOMAINS_PER_QUERY);
-    reason = "Fallback domain list (LLM ranking unavailable)";
-  }
-
-  // Hard verify: domain must return ≥1 public creative (any format).
-  // YouTube video filter applies later when accepting — requiring video here
-  // dropped lenders that only show video on later pages.
-  const toVerify = ranked.slice(0, MAX_DOMAIN_VERIFY);
-  onProgress(`Verifying ${toVerify.length} domains in Google Transparency…`);
-  const verified: string[] = [];
-  let verifiedAdsSample = 0;
-  for (const domain of toVerify) {
-    if (verified.length >= MAX_DOMAINS_PER_QUERY) break;
+  onProgress(`Checking ${ranked.length} domains for live ads…`);
+  const checked = await mapPool(ranked, AD_REVIEW_BATCH, async (domain) => {
     try {
       const adsRes = await getGoogleCompanyAds({
         domain,
         region: GOOGLE_ADS_REGION,
       });
-      const ads = extractGoogleAds(adsRes);
-      if (ads.length > 0) {
-        verified.push(domain);
-        verifiedAdsSample += ads.length;
+      let ads = extractGoogleAds(adsRes).slice(0, 8);
+      if (platform === "youtube") {
+        ads = ads.filter((ad) => isYouTubeCreative(ad));
       }
+      if (!ads.length) return null;
+      return { domain, ads };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (/credit|quota|402|401|403|rate limited/i.test(msg)) throw err;
-      // skip domains that error individually
+      return null;
     }
-  }
-
-  if (verified.length === 0) {
-    // Transparency domains already came from search-advertisers — try them raw
-    const fallback = transparencyDomains
-      .map((d) => domainFromUrl(d) || d)
-      .filter(Boolean)
-      .slice(0, 6) as string[];
-    return {
-      domains: fallback,
-      reason: `${reason} · 0/${toVerify.length} hard-verified — using Transparency website list`,
-      verifiedAdsSample: 0,
-    };
-  }
-
-  return {
-    domains: verified,
-    reason: `${reason} · verified ${verified.length}/${toVerify.length} with public ads`,
-    verifiedAdsSample,
-  };
+  });
+  return checked.filter((row): row is { domain: string; ads: GoogleAdCreative[] } =>
+    Boolean(row),
+  );
 }
 
 async function enrichGoogleAd(ad: GoogleAdCreative) {
@@ -398,21 +385,11 @@ function websiteUrl(domain: string): string {
   return `https://${d}`;
 }
 
-async function fetchAdsForDomain(domain: string, region = GOOGLE_ADS_REGION) {
-  const { ads } = await fetchGoogleAdsPages({
-    domain,
-    region,
-    maxPages: MAX_DOMAIN_AD_PAGES,
-  });
-  return ads;
-}
-
 /**
- * Domain-first Google / YouTube search:
- * 1) search-advertisers → websites + advertisers
- * 2) LLM picks domains likely running ads
- * 3) company-ads by domain
- * 4) YouTube keeps video-format creatives only
+ * Google / YouTube search:
+ * 1) Transparency advertisers for the user's keywords (plus up to 3 expansions)
+ * 2) Company ads fetched 4 at a time, then reviewed together
+ * 3) One web search only if the roster is still short — those ad results are reviewed directly
  */
 export async function runGoogleFamilySearch(
   jobId: string,
@@ -462,20 +439,55 @@ export async function runGoogleFamilySearch(
   const seenDomains = new Set<string>();
   const seenAdvertisers = new Set<string>();
   const thresholds = getPlatformAdThresholds(platform);
+  const pendingReview: Array<Parameters<typeof tryAcceptFromAds>[0]> = [];
+
+  async function flushReview() {
+    if (!pendingReview.length) return;
+    if (isSearchJobSuppressed(job.id)) {
+      pendingReview.length = 0;
+      return;
+    }
+    const batch = pendingReview.splice(0, pendingReview.length);
+    job.progress.stage = "analyzing_ad";
+    job.progress.message = `Reviewing ${batch.length} ad ${batch.length === 1 ? "copy" : "copies"} in parallel…`;
+    job.updatedAt = new Date().toISOString();
+    saveJob(job);
+    await mapPool(batch, AD_REVIEW_BATCH, async (args) => {
+      if (accepted.length >= TARGET_COMPETITORS) return;
+      if (isSearchJobSuppressed(job.id)) return;
+      await tryAcceptFromAds(args);
+    });
+  }
 
   try {
-    const queries = new Set<string>(keywords);
-    for (const kw of keywords) {
+    const seedQueries = keywords.map((kw) => kw.trim()).filter(Boolean);
+    const extraPool: string[] = [];
+    const rememberExtra = (query: string) => {
+      const trimmed = query.trim();
+      if (!trimmed) return;
+      const key = trimmed.toLowerCase();
+      if (seedQueries.some((seed) => seed.toLowerCase() === key)) return;
+      if (extraPool.some((existing) => existing.toLowerCase() === key)) return;
+      extraPool.push(trimmed);
+    };
+    const expandedLists = await mapPool(seedQueries, 4, async (kw) => {
       try {
-        for (const q of await expandKeywordQueries(kw, businessProfile, {
-          geoMode: job.geoMode,
-          targetLocations: job.targetLocations,
-          selectedCategory: job.selectedCategory,
-        }))
-          queries.add(q);
+        return await expandKeywordQueries(
+          kw,
+          businessProfile,
+          {
+            geoMode: job.geoMode,
+            targetLocations: job.targetLocations,
+            selectedCategory: job.selectedCategory,
+          },
+          OPENROUTER_FAST_MODEL,
+        );
       } catch {
-        /* keep seed */
+        return [kw];
       }
+    });
+    for (const list of expandedLists) {
+      for (const query of list) rememberExtra(query);
     }
     if (
       job.geoMode === "company_locations" ||
@@ -484,48 +496,46 @@ export async function runGoogleFamilySearch(
       for (const loc of (job.targetLocations || []).slice(0, 4)) {
         const place = loc.suburb || loc.city || loc.label;
         if (!place) continue;
-        for (const kw of keywords.slice(0, 3)) queries.add(`${kw} ${place}`);
+        for (const kw of seedQueries.slice(0, 3)) rememberExtra(`${kw} ${place}`);
       }
     }
+    const queries = [
+      ...seedQueries,
+      ...extraPool.slice(0, MAX_EXTRA_GOOGLE_QUERIES),
+    ];
 
-    outer: for (const query of Array.from(queries).slice(0, MAX_SEARCH_QUERIES_GOOGLE)) {
+    outer: for (const query of queries) {
       if (accepted.length >= TARGET_COMPETITORS) break;
       if (isSearchJobSuppressed(jobId)) break outer;
 
       job.progress.stage = "finding_domains";
-      job.progress.message = `Web + Transparency domain discovery for "${query}"…`;
+      job.progress.message = `Transparency search for "${query}"…`;
       job.updatedAt = new Date().toISOString();
       saveJob(job);
 
-      let transparencyDomains: string[] = [];
       let advertisersRaw: Awaited<
         ReturnType<typeof extractGoogleAdvertisers>
       > = [];
-      let advertisers: Array<{ name: string; region?: string | null }> = [];
       try {
         const res = await searchGoogleAdvertisers(query);
-        transparencyDomains = extractGoogleWebsites(res);
         advertisersRaw = extractGoogleAdvertisers(res);
-        advertisers = advertisersRaw.map((a) => ({
-          name: String(a.name || ""),
-          region: a.region ? String(a.region) : null,
-        }));
         job.progress.scannedPages += 1;
       } catch (err) {
         job.progress.message = `Transparency search warning: ${(err as Error).message}`;
         saveJob(job);
       }
 
-      // 1) Transparency advertiser IDs first — already keyword-matched, cheap vs domain verify
       const advertiserBatch = advertisersRaw.slice(0, 8);
-      if (advertiserBatch.length > 0) {
+      for (let i = 0; i < advertiserBatch.length; i += AD_REVIEW_BATCH) {
+        if (accepted.length >= TARGET_COMPETITORS) break outer;
+        if (isSearchJobSuppressed(jobId)) break outer;
+        const slice = advertiserBatch.slice(i, i + AD_REVIEW_BATCH);
         job.progress.stage = "fetching_ads";
-        job.progress.message = `Fetching ads for ${advertiserBatch.length} Transparency advertisers…`;
+        job.progress.message = `Fetching ads for ${slice.length} Transparency advertisers…`;
         saveJob(job);
-        for (const adv of advertiserBatch) {
-          if (accepted.length >= TARGET_COMPETITORS) break outer;
+        const rows = await mapPool(slice, AD_REVIEW_BATCH, async (adv) => {
           const id = String(adv.advertiser_id || "");
-          if (!id || seenAdvertisers.has(id)) continue;
+          if (!id || seenAdvertisers.has(id)) return null;
           seenAdvertisers.add(id);
           try {
             const adsRes = await getGoogleCompanyAds({
@@ -536,10 +546,11 @@ export async function runGoogleFamilySearch(
             if (platform === "youtube") {
               ads = ads.filter((ad) => isYouTubeCreative(ad));
             }
+            ads = ads.slice(0, 8);
             job.progress.scannedAds += ads.length;
             job.progress.scannedPages += 1;
-            if (ads.length === 0) continue;
-            await tryAcceptFromAds({
+            if (ads.length === 0) return null;
+            return {
               ads,
               job,
               accepted,
@@ -552,139 +563,78 @@ export async function runGoogleFamilySearch(
               pageName: String(adv.name || "Unknown"),
               country: adv.region ? String(adv.region) : String(job.geo || "US"),
               websiteHint: null,
-            });
+            };
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             if (/credit|quota|402|401|403|rate limited/i.test(msg)) throw err;
             job.progress.rejected += 1;
+            return null;
           }
-        }
-      }
-
-      if (accepted.length >= TARGET_COMPETITORS) break outer;
-
-      // Skip expensive domain verify when advertisers already filled most of the target
-      if (accepted.length >= Math.max(4, Math.ceil(TARGET_COMPETITORS * 0.6))) {
-        continue;
-      }
-
-      // 2) Domain discovery fills gaps when advertisers alone aren't enough
-      job.progress.stage = "ranking_domains";
-      let rankedDomains: string[] = [];
-      try {
-        const discovered = await discoverAndVerifyDomains({
-          query,
-          platform,
-          transparencyDomains,
-          advertisers,
-          businessProfile,
-          webRegion: geo,
-          onProgress: (message) => {
-            job.progress.stage = /Verifying/i.test(message)
-              ? "verifying_domains"
-              : "ranking_domains";
-            job.progress.message = message;
-            saveJob(job);
-          },
         });
-        rankedDomains = discovered.domains;
-        if (discovered.verifiedAdsSample > 0) {
-          job.progress.scannedAds += discovered.verifiedAdsSample;
+        for (const row of rows) {
+          if (row) pendingReview.push(row);
         }
-        job.progress.message = `Selected ${rankedDomains.length} domains — ${discovered.reason.slice(0, 180)}`;
-        saveJob(job);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (/credit|quota|402|401|403|rate limited/i.test(msg)) {
-          throw err;
-        }
-        rankedDomains = transparencyDomains.slice(0, MAX_DOMAINS_PER_QUERY);
-        job.progress.message = `Domain discovery fallback: ${msg}`;
-        saveJob(job);
+        await flushReview();
       }
+    }
 
-      if (
-        rankedDomains.length === 0 &&
-        accepted.length === 0 &&
-        advertiserBatch.length === 0
-      ) {
-        job.progress.message = `No verified domains/advertisers with ads for "${query}"`;
-        saveJob(job);
-        continue;
-      }
-
-      for (const domain of rankedDomains) {
-        if (accepted.length >= TARGET_COMPETITORS) break outer;
-        const key = domain.toLowerCase();
+    if (
+      accepted.length < TARGET_COMPETITORS &&
+      !isSearchJobSuppressed(jobId)
+    ) {
+      const gaps = await discoverGapDomains({
+        queries: seedQueries.length ? seedQueries : queries,
+        platform,
+        businessProfile,
+        webRegion: geo,
+        onProgress: (message) => {
+          job.progress.stage = /Checking/i.test(message)
+            ? "verifying_domains"
+            : "ranking_domains";
+          job.progress.message = message;
+          saveJob(job);
+        },
+      });
+      for (const gap of gaps) {
+        if (accepted.length >= TARGET_COMPETITORS) break;
+        if (isSearchJobSuppressed(jobId)) break;
+        const key = gap.domain.toLowerCase();
         if (seenDomains.has(key)) continue;
         seenDomains.add(key);
-
-        job.progress.stage = "fetching_ads";
-        job.progress.message = `Fetching ${platform} ads for ${domain}…`;
-        saveJob(job);
-
-        let ads: GoogleAdCreative[] = [];
-        try {
-          // Use "all" so AU/US geo doesn't hide creatives found during verify
-          ads = await fetchAdsForDomain(domain, GOOGLE_ADS_REGION);
-          job.progress.scannedPages += 1;
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          if (/credit|quota|402|401|403|rate limited/i.test(msg)) throw err;
-          job.progress.rejected += 1;
-          job.progress.message = `Domain ${domain} failed: ${msg}`;
-          saveJob(job);
-          continue;
-        }
-
-        // YouTube: only video-format creatives
-        if (platform === "youtube") {
-          ads = ads.filter((ad) => isYouTubeCreative(ad));
-        }
-
-        job.progress.scannedAds += ads.length;
-
-        if (ads.length === 0) {
-          job.progress.message = `No public creatives for ${domain}`;
-          saveJob(job);
-          continue;
-        }
-
-        // Group by advertiser so one domain can yield multiple competitors
+        job.progress.scannedAds += gap.ads.length;
+        job.progress.scannedPages += 1;
         const byAdvertiser = new Map<string, GoogleAdCreative[]>();
-        for (const ad of ads) {
+        for (const ad of gap.ads) {
           const aid =
             String(ad.advertiserId || "") ||
-            String(ad.advertiserName || domain);
+            String(ad.advertiserName || gap.domain);
           const list = byAdvertiser.get(aid) ?? [];
           list.push(ad);
           byAdvertiser.set(aid, list);
         }
-
         for (const [pageId, advAds] of byAdvertiser) {
-          if (accepted.length >= TARGET_COMPETITORS) break outer;
           if (seenAdvertisers.has(pageId)) continue;
           seenAdvertisers.add(pageId);
-
-          const pageName =
-            String(advAds[0]?.advertiserName || domain).trim() || domain;
-
-          await tryAcceptFromAds({
+          pendingReview.push({
             ads: advAds,
             job,
             accepted,
             keywords,
-            query,
+            query: seedQueries[0] || gap.domain,
             platform,
             thresholds,
-            domain,
+            domain: gap.domain,
             pageId,
-            pageName,
+            pageName:
+              String(advAds[0]?.advertiserName || gap.domain).trim() ||
+              gap.domain,
             country: String(job.geo || "US"),
-            websiteHint: websiteUrl(domain),
+            websiteHint: websiteUrl(gap.domain),
           });
+          if (pendingReview.length >= AD_REVIEW_BATCH) await flushReview();
         }
       }
+      if (pendingReview.length) await flushReview();
     }
 
     job.status =
@@ -768,19 +718,30 @@ async function tryAcceptFromAds(args: {
   const sampleSource =
     durationQualified.length > 0 ? durationQualified : pool;
 
-  const enriched: AdCandidate[] = [];
-  for (const ad of sampleSource.slice(0, 3)) {
+  const sample = sampleSource.slice(0, DETAILS_PER_ADVERTISER);
+  const detailed = await mapPool(sample, DETAILS_PER_ADVERTISER, async (ad) => {
+    if (isSearchJobSuppressed(job.id)) return null;
     const details = await enrichGoogleAd(ad);
-    if (platform === "youtube" && !isYouTubeCreative(ad, details)) continue;
-    enriched.push(mapGoogleCreativeToCandidate(ad, details));
+    return { ad, details };
+  });
+  const english: AdCandidate[] = [];
+  for (const row of detailed) {
+    if (!row) continue;
+    if (platform === "youtube" && !isYouTubeCreative(row.ad, row.details)) continue;
+    const candidate = mapGoogleCreativeToCandidate(row.ad, row.details);
+    const copy = `${candidate.title}\n${candidate.body}\n${candidate.fullText}`;
+    if (!looksLikeEnglish(copy)) continue;
+    english.push(candidate);
   }
 
-  if (enriched.length === 0) {
+  if (english.length === 0) {
     job.progress.rejected += 1;
+    job.progress.message = `Skipped ${pageName}: ad copy is not English`;
+    saveJob(job);
     return;
   }
 
-  const primary = [...enriched].sort((a, b) => {
+  const primary = [...english].sort((a, b) => {
     const score = (c: AdCandidate) => {
       const text = `${c.title}\n${c.body}\n${c.fullText}`;
       const hasCopy = (c.body || c.fullText || c.title || "").trim().length;
@@ -815,10 +776,29 @@ async function tryAcceptFromAds(args: {
     return;
   }
 
+  const hasSignals =
+    keywords.some((kw) => kw.trim().length >= 3) || Boolean(job.businessProfile);
+  if (
+    hasSignals &&
+    primaryCopy.length >= 40 &&
+    serviceKeywordOverlapScore(primaryCopy, {
+      businessProfile: job.businessProfile,
+      searchKeywords: keywords,
+      selectedCategory: job.selectedCategory,
+    }) === 0
+  ) {
+    job.progress.rejected += 1;
+    job.progress.message = `Skipped ${pageName}: ad copy does not match the keywords`;
+    saveJob(job);
+    return;
+  }
+
   if (!meetsDurationThreshold(primary.daysRunning, thresholds)) {
     job.progress.rejected += 1;
     return;
   }
+
+  if (isSearchJobSuppressed(job.id) || accepted.length >= TARGET_COMPETITORS) return;
 
   let filter;
   try {
@@ -829,7 +809,7 @@ async function tryAcceptFromAds(args: {
       keywords[0] || query,
       primary,
       null,
-      enriched.filter((a) => a.adArchiveId !== primary.adArchiveId).slice(0, 5),
+      english.filter((a) => a.adArchiveId !== primary.adArchiveId).slice(0, 5),
       {
         relaxed: accepted.length >= 2,
         businessProfile: job.businessProfile,
@@ -940,26 +920,31 @@ async function tryAcceptFromAds(args: {
   job.competitorIds.push(competitor.id);
   job.progress.accepted = accepted.length;
 
-  try {
-    const { enrichCompetitorSociavaultAddress } = await import("./competitorLocation");
-    const loc = await enrichCompetitorSociavaultAddress({
-      competitorId: competitor.id,
-      facebookUrl: brand.facebookUrl || null,
-      linkedinUrl: brand.linkedinUrl || null,
-      geoMode: job.geoMode || "countrywide",
-      targetLocations: job.targetLocations || [],
-    });
-    if (loc) {
-      competitor.locationLabel = loc.locationLabel;
-      competitor.locationCity = loc.locationCity;
-      competitor.locationSuburb = loc.locationSuburb;
-      competitor.locationCountry = loc.locationCountry;
-      competitor.locationStatus = loc.locationStatus;
-      competitor.locationSource = loc.locationSource;
+  const competitorId = competitor.id;
+  const restForLanding = sampleSource.slice(DETAILS_PER_ADVERTISER, DETAILS_PER_ADVERTISER + 2);
+  void (async () => {
+    try {
+      const { enrichCompetitorSociavaultAddress } = await import("./competitorLocation");
+      await enrichCompetitorSociavaultAddress({
+        competitorId,
+        facebookUrl: brand.facebookUrl || null,
+        linkedinUrl: brand.linkedinUrl || null,
+        geoMode: job.geoMode || "countrywide",
+        targetLocations: job.targetLocations || [],
+      });
+    } catch {
+      /* provisional location stays */
     }
-  } catch {
-    /* keep provisional */
-  }
+    if (primary.landingPageUrl || restForLanding.length === 0) return;
+    for (const ad of restForLanding) {
+      const details = await enrichGoogleAd(ad);
+      const candidate = mapGoogleCreativeToCandidate(ad, details);
+      if (!candidate.landingPageUrl) continue;
+      const richer = sampleAdFromGoogleCandidate(candidate, platform, domainHint);
+      updateCompetitor(competitorId, { sampleAd: richer });
+      break;
+    }
+  })();
 
   const locNote = competitor.locationLabel
     ? ` · ${competitor.locationLabel}`

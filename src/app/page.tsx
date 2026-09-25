@@ -86,6 +86,8 @@ export default function HomePage() {
     null,
   );
   const historyReportRef = useRef<HTMLDivElement | null>(null);
+  const liveSearchId = useRef<string | null>(null);
+  const liveLookupId = useRef<string | null>(null);
 
   const scrollToHistoryReport = useCallback(() => {
     // Wait a frame so the report panel has content before scrolling
@@ -99,8 +101,19 @@ export default function HomePage() {
 
   const pollSearch = useCallback(async (id: string) => {
     const res = await fetch(`/api/search/status?jobId=${id}`);
+    if (liveSearchId.current !== id) return;
+    if (res.status === 404) {
+      liveSearchId.current = null;
+      setJobId(null);
+      setJob(null);
+      setCompetitors([]);
+      setSearchCredits(null);
+      setGeneratingSearchOffers(false);
+      return;
+    }
     if (!res.ok) return;
     const data = await res.json();
+    if (liveSearchId.current !== id) return;
     setJob(data.job);
     setCompetitors(data.competitors ?? []);
     setSearchCredits((data.credits as RunCredits) ?? null);
@@ -123,8 +136,18 @@ export default function HomePage() {
 
   const pollLookup = useCallback(async (id: string) => {
     const res = await fetch(`/api/lookup/status?lookupId=${id}`);
+    if (liveLookupId.current !== id) return;
+    if (res.status === 404) {
+      liveLookupId.current = null;
+      setLookupId(null);
+      setLookupJob(null);
+      setLookupAds([]);
+      setLookupCredits(null);
+      return;
+    }
     if (!res.ok) return;
     const data = await res.json();
+    if (liveLookupId.current !== id) return;
     setLookupJob(data.job);
     setLookupCredits((data.credits as RunCredits) ?? null);
     const incoming = (data.ads ?? []) as LookupAdRecord[];
@@ -218,10 +241,27 @@ export default function HomePage() {
     async (run: UnifiedHistoryItem) => {
       setDeletingId(`${run.kind}:${run.id}`);
       try {
-        await fetch(
+        const res = await fetch(
           `/api/history/unified?runId=${encodeURIComponent(run.id)}&kind=${run.kind}`,
           { method: "DELETE" },
         );
+        if (!res.ok) return;
+        if (run.kind === "search" && (jobId === run.id || liveSearchId.current === run.id)) {
+          liveSearchId.current = null;
+          setJobId(null);
+          setJob(null);
+          setCompetitors([]);
+          setSearchCredits(null);
+          setGeneratingSearchOffers(false);
+          setSearchOffersError(null);
+        }
+        if (run.kind === "lookup" && (lookupId === run.id || liveLookupId.current === run.id)) {
+          liveLookupId.current = null;
+          setLookupId(null);
+          setLookupJob(null);
+          setLookupAds([]);
+          setLookupCredits(null);
+        }
         if (selectedHistory?.id === run.id && selectedHistory.kind === run.kind) {
           setSelectedHistory(null);
           setHistoryJob(null);
@@ -234,7 +274,7 @@ export default function HomePage() {
         setDeletingId(null);
       }
     },
-    [selectedHistory, loadHistory],
+    [selectedHistory, loadHistory, jobId, lookupId],
   );
 
   const startLookupForCandidate = useCallback(
@@ -254,6 +294,7 @@ export default function HomePage() {
         if (!res.ok) throw new Error(data.error || "Lookup failed");
         setMode("lookup");
         setPlatform(plat);
+        liveLookupId.current = data.lookupId;
         setLookupId(data.lookupId);
         setLookupQuery(data.queryName || candidate.name);
         setLookupJob(null);
@@ -273,6 +314,17 @@ export default function HomePage() {
     setDeletingId("__all__");
     try {
       await fetch("/api/history/unified?all=1", { method: "DELETE" });
+      liveSearchId.current = null;
+      liveLookupId.current = null;
+      setJobId(null);
+      setJob(null);
+      setCompetitors([]);
+      setSearchCredits(null);
+      setGeneratingSearchOffers(false);
+      setLookupId(null);
+      setLookupJob(null);
+      setLookupAds([]);
+      setLookupCredits(null);
       setSelectedHistory(null);
       setHistoryRuns([]);
       setHistoryJob(null);
@@ -286,6 +338,7 @@ export default function HomePage() {
   }, [loadHistory]);
 
   useEffect(() => {
+    liveSearchId.current = jobId;
     if (!jobId) return;
     void pollSearch(jobId);
     const t = setInterval(() => void pollSearch(jobId), 2500);
@@ -311,6 +364,7 @@ export default function HomePage() {
   ]);
 
   useEffect(() => {
+    liveLookupId.current = lookupId;
     if (!lookupId) return;
     void pollLookup(lookupId);
     const t = setInterval(() => void pollLookup(lookupId), 2500);
@@ -449,6 +503,7 @@ export default function HomePage() {
               platform={platform}
               disabled={searchRunning}
               onStarted={(id, kws, p) => {
+                liveSearchId.current = id;
                 setJobId(id);
                 setKeywords(kws);
                 setPlatform(p);
@@ -619,6 +674,7 @@ export default function HomePage() {
               platform={platform}
               disabled={lookupRunning}
               onStarted={(id, name, p) => {
+                liveLookupId.current = id;
                 setLookupId(id);
                 setLookupQuery(name);
                 setPlatform(p);

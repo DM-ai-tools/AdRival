@@ -20,6 +20,30 @@ function countryLabel(c?: string | null) {
   return c;
 }
 
+function formatFoundAddress(c: CompetitorRecord): string | null {
+  const parts = [
+    c.locationLabel,
+    c.locationSuburb,
+    c.locationCity,
+    c.locationCountry,
+  ];
+  const unique: string[] = [];
+  for (const raw of parts) {
+    const part = (raw || "").replace(/\s+/g, " ").trim();
+    if (!part) continue;
+    const lower = part.toLowerCase();
+    const already = unique.some((existing) =>
+      existing
+        .toLowerCase()
+        .split(",")
+        .some((segment) => segment.trim() === lower),
+    );
+    if (already) continue;
+    unique.push(part);
+  }
+  return unique.join(", ") || null;
+}
+
 function locationCell(
   c: CompetitorRecord,
   opts?: {
@@ -27,10 +51,7 @@ function locationCell(
     onRefresh?: () => void;
   },
 ) {
-  const label =
-    c.locationLabel ||
-    [c.locationSuburb, c.locationCity].filter(Boolean).join(", ") ||
-    null;
+  const label = formatFoundAddress(c);
   const status = c.locationStatus || null;
   return (
     <div className="location-cell">
