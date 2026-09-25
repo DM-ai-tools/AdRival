@@ -8,7 +8,7 @@ import type {
   SearchCompetitorAdRecord,
   SearchJob,
 } from "@/lib/types";
-import { OfferLadderFlow, ladderSteps } from "@/components/OfferLadderFlow";
+import { OfferLadderFlow, ladderSteps, splitLaddersByOffer } from "@/components/OfferLadderFlow";
 
 function shortUrl(url: string): string {
   return url.replace(/^https?:\/\//i, "").replace(/\/$/, "");
@@ -88,7 +88,7 @@ export default function SearchOfferLadderPage() {
   }, [jobId]);
 
   const ladder = useMemo<LookupCoreOfferLadder | null>(() => {
-    const ladders = job?.offersReport?.valueLadder?.ladders || [];
+    const ladders = splitLaddersByOffer(job?.offersReport?.valueLadder?.ladders || []);
     return ladders.find((l) => l.id === ladderId) || null;
   }, [job?.offersReport?.valueLadder?.ladders, ladderId]);
 

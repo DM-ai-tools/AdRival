@@ -10,6 +10,7 @@ import type {
   LookupUniqueLandingPage,
   OfferTicketTier,
 } from "@/lib/types";
+import { splitLaddersByOffer } from "./OfferLadderFlow";
 
 type DashSection =
   | "overview"
@@ -341,7 +342,7 @@ export function LookupOffersDashboard({
   const coreLadders = useMemo(() => {
     const ladders = report.valueLadder?.ladders || [];
     if (ladders.length > 0) {
-      return [...ladders].sort((a, b) => a.rank - b.rank);
+      return splitLaddersByOffer([...ladders].sort((a, b) => a.rank - b.rank));
     }
     // Legacy flat steps → synthetic single-rung ladders
     const steps = report.valueLadder?.steps || [];

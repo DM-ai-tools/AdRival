@@ -10,7 +10,11 @@ import type {
   SearchCompetitorAdRecord,
   SearchJob,
 } from "@/lib/types";
-import { OfferLadderFlow, ladderSteps } from "./OfferLadderFlow";
+import { OfferLadderFlow, ladderSteps, splitLaddersByOffer } from "./OfferLadderFlow";
+import {
+  offerFitsSearchedService,
+  searchedServiceFocus,
+} from "@/lib/pipeline/offerServiceFocus";
 
 function shortUrl(url: string): string {
   return url.replace(/^https?:\/\//i, "").replace(/\/$/, "");
@@ -513,9 +517,8 @@ export function SearchOffersDashboard({
   const [ads, setAds] = useState<SearchCompetitorAdRecord[]>([]);
   const [adsLoaded, setAdsLoaded] = useState(false);
   const [section, setSection] = useState<
-    "ads" | "pages" | "creatives" | "services" | "ladders"
+    "ads" | "pages" | "creatives" | "ladders"
   >("pages");
-  const [selectedService, setSelectedService] = useState<string | null>(null);
   const [selectedOffer, setSelectedOffer] = useState<string | null>(null);
   const [selectedPageKey, setSelectedPageKey] = useState<string | null>(null);
   const [funnelFilter, setFunnelFilter] = useState<FunnelStage | "all">("all");
@@ -553,21 +556,62 @@ export function SearchOffersDashboard({
     setAds([]);
   }, [job.id, report?.updatedAt]);
 
-  const adIndexes = useMemo(() => buildAdIndexes(ads), [ads]);
-
-  const ladders = useMemo(
+  const serviceFocus = useMemo(
     () =>
-      (report?.valueLadder?.ladders || []).slice().sort((a, b) => a.rank - b.rank),
-    [report?.valueLadder?.ladders],
+      searchedServiceFocus(
+        job.keywords?.length ? job.keywords : job.keyword ? [job.keyword] : [],
+        job.selectedCategory?.label || null,
+      ),
+    [job.keywords, job.keyword, job.selectedCategory?.label],
   );
+
+  const visibleAds = useMemo(
+    () =>
+      ads.filter((ad) =>
+        offerFitsSearchedService(
+          `${ad.title || ""} ${ad.body || ""} ${ad.ctaText || ""}`,
+          serviceFocus,
+        ),
+      ),
+    [ads, serviceFocus],
+  );
+
+  const adIndexes = useMemo(() => buildAdIndexes(visibleAds), [visibleAds]);
+
+  const ladders = useMemo(() => {
+    const filtered = (report?.valueLadder?.ladders || [])
+      .map((ladder) => {
+        const originalSteps = ladder.steps || [];
+        const steps = originalSteps.filter((step) =>
+          offerFitsSearchedService(
+            `${step.offer} ${step.pricing || ""} ${step.cta || ""}`,
+            serviceFocus,
+            { requireMatch: true },
+          ),
+        );
+        const coreFits = offerFitsSearchedService(ladder.coreOffer, serviceFocus, {
+          requireMatch: true,
+        });
+        if (originalSteps.length > 0 && steps.length === 0) return null;
+        if (!coreFits && steps.length === 0) return null;
+        if (!steps.length) return coreFits ? ladder : null;
+        return {
+          ...ladder,
+          steps,
+          coreOffer: coreFits ? ladder.coreOffer : steps[0].offer,
+        };
+      })
+      .filter((ladder): ladder is LookupCoreOfferLadder => Boolean(ladder));
+    return splitLaddersByOffer(filtered);
+  }, [report?.valueLadder?.ladders, serviceFocus]);
 
   const ladderAdsById = useMemo(() => {
     const map = new Map<string, SearchCompetitorAdRecord[]>();
     for (const ladder of ladders) {
-      map.set(ladder.id, adsForLadder(ladder, adIndexes, ads));
+      map.set(ladder.id, adsForLadder(ladder, adIndexes, visibleAds));
     }
     return map;
-  }, [ladders, adIndexes, ads]);
+  }, [ladders, adIndexes, visibleAds]);
 
   const groups = useMemo(() => {
     const selected =
@@ -578,7 +622,7 @@ export function SearchOffersDashboard({
       string,
       { id: string; name: string; ads: SearchCompetitorAdRecord[] }
     >();
-    for (const ad of ads) {
+    for (const ad of visibleAds) {
       if (selected && !selected.has(ad.competitorId)) continue;
       const key = ad.competitorId || ad.pageName;
       const existing = map.get(key);
@@ -586,12 +630,43 @@ export function SearchOffersDashboard({
       else map.set(key, { id: key, name: ad.pageName, ads: [ad] });
     }
     return Array.from(map.values()).sort((a, b) => b.ads.length - a.ads.length);
-  }, [ads, job.offersCompetitorIds]);
+  }, [visibleAds, job.offersCompetitorIds]);
 
-  const creatives = report?.adCopy?.creatives || [];
-  const uniqueOffers = report?.adCopy?.uniqueOffers || [];
-  const serviceNodes = report?.services?.nodes || [];
-  const reportPages = report?.landingPages?.pages || [];
+  const creatives = useMemo(
+    () =>
+      (report?.adCopy?.creatives || []).filter((creative) =>
+        offerFitsSearchedService(
+          `${creative.offer} ${creative.hook} ${creative.serviceTargeted || ""} ${creative.sampleCopy || ""} ${creative.cta || ""}`,
+          serviceFocus,
+          { requireMatch: true },
+        ),
+      ),
+    [report?.adCopy?.creatives, serviceFocus],
+  );
+  const uniqueOffers = useMemo(
+    () =>
+      (report?.adCopy?.uniqueOffers || []).filter((line) =>
+        offerFitsSearchedService(
+          `${line.offer} ${line.pricing || ""} ${line.cta || ""} ${(line.sampleHooks || []).join(" ")}`,
+          serviceFocus,
+          { requireMatch: true },
+        ),
+      ),
+    [report?.adCopy?.uniqueOffers, serviceFocus],
+  );
+  const reportPages = useMemo(
+    () =>
+      (report?.landingPages?.pages || []).filter((page) =>
+        offerFitsSearchedService(
+          `${page.primaryOffer || ""} ${page.headline || ""} ${page.serviceTargeted || ""} ${page.summary || ""} ${page.cta || ""}`,
+          serviceFocus,
+          {
+            requireMatch: page.status === "completed" && Boolean(page.primaryOffer),
+          },
+        ),
+      ),
+    [report?.landingPages?.pages, serviceFocus],
+  );
 
   const offerPages = useMemo(() => {
     const list = reportPages.filter(
@@ -710,14 +785,6 @@ export function SearchOffersDashboard({
     return list.slice(0, 48);
   }, [creatives, funnelFilter, selectedOffer]);
 
-  const selectedServiceNode = useMemo(() => {
-    if (!serviceNodes.length) return null;
-    if (!selectedService) return serviceNodes[0];
-    return (
-      serviceNodes.find((n) => n.service === selectedService) || serviceNodes[0]
-    );
-  }, [selectedService, serviceNodes]);
-
   if (!report || report.status !== "completed") {
     return (
       <section className="panel">
@@ -726,9 +793,7 @@ export function SearchOffersDashboard({
     );
   }
 
-  const uniqueLpCount =
-    report.landingPages?.uniqueUrls ||
-    pageListOffer.length + pageListOther.length;
+  const uniqueLpCount = pageListOffer.length + pageListOther.length;
 
   return (
     <section className="panel">
@@ -738,7 +803,7 @@ export function SearchOffersDashboard({
           <span className="muted-inline">
             {" "}
             · {groups.length || "—"} competitors ·{" "}
-            {adsLoaded ? ads.length : report.adsAnalyzed} ads ·{" "}
+            {adsLoaded ? visibleAds.length : report.adsAnalyzed} ads ·{" "}
             {creatives.length} creatives · {uniqueLpCount} landing pages ·{" "}
             {ladders.length} ladders
           </span>
@@ -804,14 +869,6 @@ export function SearchOffersDashboard({
           onClick={() => setSection("creatives")}
         >
           Creatives & offers
-        </button>
-        <button
-          type="button"
-          role="tab"
-          className={`tab-btn ${section === "services" ? "active" : ""}`}
-          onClick={() => setSection("services")}
-        >
-          By service
         </button>
         <button
           type="button"
@@ -1167,7 +1224,7 @@ export function SearchOffersDashboard({
           <aside className="offers-page-list panel">
             <h2>Unique offers</h2>
             <p className="muted offers-block-lead">
-              Filter creatives by offer / service promise (not just price)
+              Offers that match the service in your keyword
             </p>
             <ul>
               <li>
@@ -1265,136 +1322,6 @@ export function SearchOffersDashboard({
                     ) : null}
                   </article>
                 ))}
-              </div>
-            )}
-          </section>
-        </div>
-      ) : null}
-
-      {section === "services" ? (
-        <div className="offers-pages-layout">
-          <aside className="offers-page-list panel">
-            <h2>Services</h2>
-            <p className="muted offers-block-lead">
-              {serviceNodes.length} service
-              {serviceNodes.length === 1 ? "" : "s"} detected
-            </p>
-            {serviceNodes.length === 0 ? (
-              <p className="empty-hint">
-                No service tree yet. Re-analyze offers to rebuild it.
-              </p>
-            ) : (
-              <ul>
-                {serviceNodes.map((n) => (
-                  <li key={n.service}>
-                    <button
-                      type="button"
-                      className={`offers-page-row ${selectedServiceNode?.service === n.service ? "active" : ""}`}
-                      onClick={() => setSelectedService(n.service)}
-                    >
-                      <span className="offers-page-row-url">{n.service}</span>
-                      <span className="muted">
-                        {n.landingPageCount} LP
-                        {n.landingPageCount === 1 ? "" : "s"} · {n.adCount} ad
-                        {n.adCount === 1 ? "" : "s"}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </aside>
-          <section className="offers-page-detail panel">
-            {!selectedServiceNode ? (
-              <p className="empty-hint">Select a service to browse offers.</p>
-            ) : (
-              <div className="offers-tree">
-                <div className="offers-tree-node">
-                  <h2>{selectedServiceNode.service}</h2>
-                  <div className="offers-meta-row">
-                    <span>
-                      {selectedServiceNode.adCount} ad
-                      {selectedServiceNode.adCount === 1 ? "" : "s"}
-                    </span>
-                    <span>
-                      {selectedServiceNode.landingPageCount} landing page
-                      {selectedServiceNode.landingPageCount === 1 ? "" : "s"}
-                    </span>
-                    {selectedServiceNode.funnelStages
-                      ? (
-                          Object.entries(selectedServiceNode.funnelStages) as [
-                            FunnelStage,
-                            number,
-                          ][]
-                        )
-                          .filter(([, count]) => count > 0)
-                          .map(([stage, count]) => (
-                            <span key={stage} className="offers-meta-row">
-                              <FunnelBadge stage={stage} />
-                              <span className="muted">{count}</span>
-                            </span>
-                          ))
-                      : null}
-                  </div>
-                </div>
-                <div className="offers-tree-branch">
-                  {selectedServiceNode.landingPages.length === 0 ? (
-                    <p className="empty-hint">No landing pages under this service.</p>
-                  ) : (
-                    selectedServiceNode.landingPages.map((lp) => (
-                      <div key={lp.matchKey} className="offers-tree-node">
-                        <div className="offers-meta-row">
-                          <a href={lp.url} target="_blank" rel="noreferrer">
-                            {shortUrl(lp.url).slice(0, 64)}
-                          </a>
-                          <FunnelBadge stage={lp.funnelStage} />
-                          <span className="muted">
-                            {lp.adCount} ad{lp.adCount === 1 ? "" : "s"}
-                          </span>
-                        </div>
-                        {lp.primaryOffer ? (
-                          <p className="offers-page-offer-inline">{lp.primaryOffer}</p>
-                        ) : null}
-                        {lp.cta ? <p className="muted">CTA: {lp.cta}</p> : null}
-                        <div className="offers-tree-branch">
-                          {!lp.ads || lp.ads.length === 0 ? (
-                            <p className="muted">No ads attached.</p>
-                          ) : (
-                            <div className="offers-card-grid">
-                              {lp.ads.map((ad) => (
-                                <article
-                                  key={`${lp.matchKey}-${ad.creativeId}`}
-                                  className="offers-card"
-                                >
-                                  <div className="offers-meta-row">
-                                    <FunnelBadge stage={ad.funnelStage} />
-                                    <span className="offers-count">
-                                      {ad.adCount} ad
-                                      {ad.adCount === 1 ? "" : "s"}
-                                    </span>
-                                  </div>
-                                  {ad.hook ? <h4>{ad.hook}</h4> : null}
-                                  {ad.offer ? (
-                                    <p className="offers-card-offer">{ad.offer}</p>
-                                  ) : null}
-                                  {ad.sampleCopy ? (
-                                    <p className="offers-ad-body">{ad.sampleCopy}</p>
-                                  ) : null}
-                                  <div className="offers-meta-row">
-                                    {ad.cta ? <span>CTA: {ad.cta}</span> : null}
-                                    {ad.serviceTargeted ? (
-                                      <span>Service: {ad.serviceTargeted}</span>
-                                    ) : null}
-                                  </div>
-                                </article>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
               </div>
             )}
           </section>

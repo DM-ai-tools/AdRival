@@ -44,6 +44,10 @@ import {
   serviceKeywordOverlapScore,
   type ServiceSignalOptions,
 } from "../openai/analyzer";
+import {
+  offerFitsSearchedService,
+  searchedServiceFocus,
+} from "./offerServiceFocus";
 
 function getOffersLlmClient(): {
   client: OpenAI;
@@ -879,9 +883,8 @@ function namesForUrl(url: string | null, ads: LookupAdRecord[]): string[] {
 }
 
 /**
- * Build offer ladders as low-ticket → high-ticket flows.
- * A flow groups related offers and can include steps from several competitors.
- * There is no fixed cap on how many flows are returned.
+ * Build one offer ladder per distinct offer that matches the searched service.
+ * Identical wording is combined. Different offers stay separate ladders.
  */
 async function buildValueLadder(input: {
   adOffers: LookupUniqueOfferLine[];
@@ -978,6 +981,20 @@ async function buildValueLadder(input: {
     });
   }
 
+  const serviceFocus = searchedServiceFocus(
+    input.signals?.searchKeywords || [],
+    input.signals?.selectedCategory?.label || null,
+  );
+  const focusedNodes = nodes.filter((node) =>
+    offerFitsSearchedService(
+      `${node.offer} ${node.pricing || ""} ${node.cta || ""} ${node.service}`,
+      serviceFocus,
+      { requireMatch: true },
+    ),
+  );
+  nodes.length = 0;
+  nodes.push(...focusedNodes);
+
   const offerTokens = (value: string) =>
     new Set(
       normalizeOfferKey(value)
@@ -993,36 +1010,41 @@ async function buildValueLadder(input: {
     return hit / Math.max(left.size, right.size);
   };
 
-  const groups = new Map<string, LadderNode[]>();
-  const loose: LadderNode[] = [];
+  const identical = new Map<string, LadderNode>();
   for (const node of nodes) {
-    if (node.service) {
-      const key = normalizeServiceKey(node.service);
-      const bucket = groups.get(key) || [];
-      bucket.push(node);
-      groups.set(key, bucket);
-    } else {
-      loose.push(node);
+    const key = normalizeOfferKey(node.offer);
+    const prev = identical.get(key);
+    if (!prev) {
+      identical.set(key, { ...node, competitors: [...node.competitors] });
+      continue;
     }
+    prev.adCount += node.adCount;
+    prev.competitors = [...new Set([...prev.competitors, ...node.competitors])];
+    if (!prev.pricing && node.pricing) prev.pricing = node.pricing;
+    if (!prev.cta && node.cta) prev.cta = node.cta;
+    if (!prev.landingPageUrl && node.landingPageUrl) prev.landingPageUrl = node.landingPageUrl;
+    if (flowTierOrder(node.ticketTier, node.funnelStage) > flowTierOrder(prev.ticketTier, prev.funnelStage)) {
+      prev.ticketTier = node.ticketTier;
+      prev.funnelStage = node.funnelStage;
+    }
+    prev.relevance = Math.max(prev.relevance, node.relevance);
   }
-  for (const node of loose) {
-    let bestKey = "";
-    let best = 0;
-    for (const [key, bucket] of groups) {
-      const sample = bucket[0]?.offer || key;
-      const score = Math.max(overlapScore(node.offer, sample), overlapScore(node.offer, key));
-      if (score > best) {
-        best = score;
-        bestKey = key;
-      }
+  const distinct: LadderNode[] = [];
+  for (const node of identical.values()) {
+    const twin = distinct.find((item) => overlapScore(item.offer, node.offer) >= 0.9);
+    if (!twin) {
+      distinct.push(node);
+      continue;
     }
-    if (bestKey && best >= 0.22) {
-      groups.get(bestKey)!.push({ ...node, service: groups.get(bestKey)![0].service });
-    } else {
-      const key = `offer:${normalizeOfferKey(node.offer)}`;
-      groups.set(key, [{ ...node, service: node.offer }]);
-    }
+    twin.adCount += node.adCount;
+    twin.competitors = [...new Set([...twin.competitors, ...node.competitors])];
+    if (!twin.pricing && node.pricing) twin.pricing = node.pricing;
+    if (!twin.cta && node.cta) twin.cta = node.cta;
   }
+  const groups = new Map<string, LadderNode[]>();
+  distinct.forEach((node, index) => {
+    groups.set(`offer-${index}`, [node]);
+  });
 
   const ladders: LookupCoreOfferLadder[] = [...groups.values()]
     .map((bucket) => {
@@ -1075,12 +1097,10 @@ async function buildValueLadder(input: {
       );
     })
     .map((steps, index) => {
-      const service = steps.find((step) => step.service && !step.service.includes(steps[0].offer))?.service || steps[0].service;
-      const title = service && !normalizeOfferKey(service).startsWith(normalizeOfferKey(steps[0].offer))
-        ? service
-        : steps.length > 1
-          ? `${steps[0].offer} → ${steps[steps.length - 1].offer}`
-          : steps[0].offer;
+      const service = steps[0].service;
+      const title = steps.length > 1
+        ? `${steps[0].offer} → ${steps[steps.length - 1].offer}`
+        : steps[0].offer;
       const competitors = [...new Set(steps.flatMap((step) => step.competitors))].sort();
       const top = steps[steps.length - 1];
       const flowSteps: OfferLadderStep[] = steps.map((step, stepIndex) => ({
@@ -1130,7 +1150,7 @@ async function buildValueLadder(input: {
   let summary: string | null =
     ladders.length === 0
       ? "No offer ladder yet — offers need a ticket level or landing page before a low-to-high flow can be built."
-      : `${ladders.length} offer ladder${ladders.length === 1 ? "" : "s"}, each a low-to-high flow that can combine several competitors.`;
+      : `${ladders.length} offer ladder${ladders.length === 1 ? "" : "s"} for offers that match the searched service.`;
 
   const ladderLlm = getOffersLlmClient();
   if (ladderLlm && ladders.length > 0) {
@@ -1554,7 +1574,40 @@ export async function buildLookupOffersReport(
       })),
   );
 
-  const serviceNodes = buildServiceNodes(pages, creatives);
+  const serviceFocus = searchedServiceFocus(
+    signals?.searchKeywords || [],
+    signals?.selectedCategory?.label || null,
+  );
+  const focusedCreatives = creatives.filter((creative) =>
+    offerFitsSearchedService(
+      `${creative.offer} ${creative.hook} ${creative.serviceTargeted || ""} ${creative.sampleCopy || ""} ${creative.cta || ""}`,
+      serviceFocus,
+      { requireMatch: true },
+    ),
+  );
+  const focusedAdOffers = adCopyOffers.filter((line) =>
+    offerFitsSearchedService(
+      `${line.offer} ${line.pricing || ""} ${line.cta || ""} ${(line.sampleHooks || []).join(" ")}`,
+      serviceFocus,
+      { requireMatch: true },
+    ),
+  );
+  const focusedPages = pages.filter((page) =>
+    offerFitsSearchedService(
+      `${page.primaryOffer || ""} ${page.headline || ""} ${page.serviceTargeted || ""} ${page.summary || ""} ${page.cta || ""}`,
+      serviceFocus,
+      { requireMatch: page.status === "completed" && Boolean(page.primaryOffer) },
+    ),
+  );
+  const focusedLpOffers = lpOffers.filter((line) =>
+    offerFitsSearchedService(
+      `${line.offer} ${line.pricing || ""} ${line.cta || ""} ${(line.sampleHooks || []).join(" ")}`,
+      serviceFocus,
+      { requireMatch: true },
+    ),
+  );
+
+  const serviceNodes = buildServiceNodes(focusedPages, focusedCreatives);
   doneUnits = 1 + toAnalyze.length;
   tick(
     "ladder",
@@ -1563,10 +1616,10 @@ export async function buildLookupOffersReport(
     0,
   );
   const ladder = await buildValueLadder({
-    adOffers: adCopyOffers,
-    lpOffers,
-    creatives,
-    pages,
+    adOffers: focusedAdOffers,
+    lpOffers: focusedLpOffers,
+    creatives: focusedCreatives,
+    pages: focusedPages,
     ads,
     signals,
   });
@@ -1592,16 +1645,15 @@ export async function buildLookupOffersReport(
     .join(" ");
   tick("ladder", "Offer value ladder ready", null, 1);
 
-  const analyzedCount = pages.filter((p) => p.status === "completed").length;
-  const failedCount = pages.filter((p) => p.status === "failed").length;
+  const analyzedCount = focusedPages.filter((p) => p.status === "completed").length;
+  const failedCount = focusedPages.filter((p) => p.status === "failed").length;
 
   const summary = [
     `${ads.length} ads`,
-    `${creatives.length} unique creatives`,
-    `${adCopyOffers.length} unique ad offers`,
-    `${lpBuckets.length} unique landing pages`,
+    `${focusedCreatives.length} unique creatives`,
+    `${focusedAdOffers.length} unique ad offers`,
+    `${focusedPages.length} unique landing pages`,
     `${analyzedCount} LPs analyzed`,
-    `${serviceNodes.length} services`,
     `${filteredLadders.kept.length} offer ladders`,
   ].join(" · ");
 
@@ -1613,16 +1665,16 @@ export async function buildLookupOffersReport(
     summary,
     adsAnalyzed: ads.length,
     adCopy: {
-      uniqueCreatives: creatives.length,
-      creatives,
-      uniqueOffers: adCopyOffers,
+      uniqueCreatives: focusedCreatives.length,
+      creatives: focusedCreatives,
+      uniqueOffers: focusedAdOffers,
     },
     landingPages: {
-      uniqueUrls: lpBuckets.length,
+      uniqueUrls: focusedPages.length,
       analyzed: analyzedCount,
       failed: failedCount,
-      pages,
-      uniqueOffers: lpOffers,
+      pages: focusedPages,
+      uniqueOffers: focusedLpOffers,
     },
     services: {
       uniqueServices: serviceNodes.length,
