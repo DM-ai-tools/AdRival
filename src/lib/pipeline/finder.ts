@@ -31,6 +31,7 @@ import {
   cheapLocationFromText,
   locationRankScore,
 } from "./competitorLocation";
+import { compactGeoSearchQueries } from "./keywordSuggestions";
 import type { SearchDispatchOptions } from "./searchOptions";
 import {
   buildGuardrailContext,
@@ -518,54 +519,58 @@ export async function runCompetitorSearch(
   };
 
   try {
-    const querySet = new Set<string>();
-    for (const kw of keywords.length ? keywords : [primaryKeyword]) {
-      querySet.add(kw);
-      try {
-        const expanded = await expandKeywordQueries(kw, businessProfile, {
-          geoMode,
-          targetLocations,
-          selectedCategory,
-        });
-        for (const q of expanded) querySet.add(q);
-      } catch (err) {
-        if (isCreditError(err)) throw err;
-        // keep seed keyword
-      }
-    }
-    // Seed geo-qualified variants even if expansion failed
-    if (preferLocalGeo && targetLocations.length) {
-      for (const loc of targetLocations.slice(0, 4)) {
-        const place = loc.suburb || loc.city || loc.label;
-        if (!place) continue;
-        for (const kw of keywords.slice(0, 4)) {
-          querySet.add(`${kw} ${place}`);
+    const preferPlaces = preferLocalGeo && targetLocations.length > 0;
+    const multiPlace = preferLocalGeo && targetLocations.length > 1;
+    const pageCap = multiPlace ? 2 : MAX_PAGES_PER_QUERY;
+    const acceptSlot = multiPlace
+      ? Math.max(2, Math.ceil(TARGET_COMPETITORS / Math.min(targetLocations.length, 4)))
+      : TARGET_COMPETITORS;
+    let queries: string[];
+    if (preferPlaces) {
+      queries = compactGeoSearchQueries({
+        keywords: keywords.length ? keywords : [primaryKeyword],
+        locations: targetLocations,
+        categoryLabel: selectedCategory?.label || null,
+        maxQueries: 6,
+      });
+    } else {
+      const querySet = new Set<string>();
+      for (const kw of keywords.length ? keywords : [primaryKeyword]) {
+        querySet.add(kw);
+        try {
+          const expanded = await expandKeywordQueries(kw, businessProfile, {
+            geoMode,
+            targetLocations,
+            selectedCategory,
+          });
+          for (const q of expanded) querySet.add(q);
+        } catch (err) {
+          if (isCreditError(err)) throw err;
         }
-        if (selectedCategory?.label) {
-          querySet.add(`${selectedCategory.label} ${place}`);
-        }
       }
+      queries = Array.from(querySet).slice(0, MAX_SEARCH_QUERIES_META);
     }
-    const queries = Array.from(querySet).slice(0, MAX_SEARCH_QUERIES_META);
     setProgress(job, {
       stage: "searching_ads",
-      message: `Searching ${platform} Ad Library with ${queries.length} queries${
-        preferLocalGeo ? " (geo-prefer)" : ""
-      }…`,
+      message: `Searching ${platform} Ad Library with ${queries.length} ${
+        preferPlaces ? "location" : ""
+      } queries…`.replace("  ", " "),
     });
 
     let pageBudget = 0;
 
     outer: for (const query of queries) {
+      const acceptedAtStart = accepted.length;
           for (const country of countries as SearchCountry[]) {
         let cursor: string | null = null;
         let pagesForQuery = 0;
 
         do {
           if (accepted.length >= TARGET_COMPETITORS) break outer;
+          if (accepted.length - acceptedAtStart >= acceptSlot) break;
           if (isSearchJobSuppressed(job.id)) break outer;
           if (pageBudget >= MAX_SEARCH_PAGES) break outer;
-          if (pagesForQuery >= MAX_PAGES_PER_QUERY) break;
+          if (pagesForQuery >= pageCap) break;
 
           setProgress(job, {
             stage: "searching_ads",

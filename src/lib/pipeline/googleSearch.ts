@@ -20,6 +20,7 @@ import {
   serviceKeywordOverlapScore,
 } from "../openai/analyzer";
 import { OPENROUTER_FAST_MODEL } from "../openrouter/openaiCompat";
+import { compactGeoSearchQueries } from "./keywordSuggestions";
 import {
   firecrawlSearch,
   flattenFirecrawlSearchResults,
@@ -460,7 +461,18 @@ export async function runGoogleFamilySearch(
   }
 
   try {
-    const seedQueries = keywords.map((kw) => kw.trim()).filter(Boolean);
+    const allKeywords = keywords.map((kw) => kw.trim()).filter(Boolean);
+    const localSearch =
+      job.geoMode === "company_locations" || job.geoMode === "keyword_location";
+    const multiPlace = localSearch && (job.targetLocations || []).length > 1;
+    const seedQueries = localSearch
+      ? compactGeoSearchQueries({
+          keywords: allKeywords,
+          locations: job.targetLocations || [],
+          categoryLabel: job.selectedCategory?.label || null,
+          maxQueries: 6,
+        })
+      : allKeywords;
     const extraPool: string[] = [];
     const rememberExtra = (query: string) => {
       const trimmed = query.trim();
@@ -470,39 +482,32 @@ export async function runGoogleFamilySearch(
       if (extraPool.some((existing) => existing.toLowerCase() === key)) return;
       extraPool.push(trimmed);
     };
-    const expandedLists = await mapPool(seedQueries, 4, async (kw) => {
-      try {
-        return await expandKeywordQueries(
-          kw,
-          businessProfile,
-          {
-            geoMode: job.geoMode,
-            targetLocations: job.targetLocations,
-            selectedCategory: job.selectedCategory,
-          },
-          OPENROUTER_FAST_MODEL,
-        );
-      } catch {
-        return [kw];
-      }
-    });
-    for (const list of expandedLists) {
-      for (const query of list) rememberExtra(query);
-    }
-    if (
-      job.geoMode === "company_locations" ||
-      job.geoMode === "keyword_location"
-    ) {
-      for (const loc of (job.targetLocations || []).slice(0, 4)) {
-        const place = loc.suburb || loc.city || loc.label;
-        if (!place) continue;
-        for (const kw of seedQueries.slice(0, 3)) rememberExtra(`${kw} ${place}`);
+    if (!localSearch) {
+      const expandedLists = await mapPool(seedQueries, 4, async (kw) => {
+        try {
+          return await expandKeywordQueries(
+            kw,
+            businessProfile,
+            {
+              geoMode: job.geoMode,
+              targetLocations: job.targetLocations,
+              selectedCategory: job.selectedCategory,
+            },
+            OPENROUTER_FAST_MODEL,
+          );
+        } catch {
+          return [kw];
+        }
+      });
+      for (const list of expandedLists) {
+        for (const query of list) rememberExtra(query);
       }
     }
-    const queries = [
-      ...seedQueries,
-      ...extraPool.slice(0, MAX_EXTRA_GOOGLE_QUERIES),
-    ];
+    const queries = localSearch
+      ? seedQueries
+      : [...seedQueries, ...extraPool.slice(0, MAX_EXTRA_GOOGLE_QUERIES)];
+    const advertiserCap = multiPlace ? 4 : 8;
+    const heldMismatches: CompetitorRecord[] = [];
 
     outer: for (const query of queries) {
       if (accepted.length >= TARGET_COMPETITORS) break;
@@ -525,7 +530,7 @@ export async function runGoogleFamilySearch(
         saveJob(job);
       }
 
-      const advertiserBatch = advertisersRaw.slice(0, 8);
+      const advertiserBatch = advertisersRaw.slice(0, advertiserCap);
       for (let i = 0; i < advertiserBatch.length; i += AD_REVIEW_BATCH) {
         if (accepted.length >= TARGET_COMPETITORS) break outer;
         if (isSearchJobSuppressed(jobId)) break outer;
@@ -563,6 +568,7 @@ export async function runGoogleFamilySearch(
               pageName: String(adv.name || "Unknown"),
               country: adv.region ? String(adv.region) : String(job.geo || "US"),
               websiteHint: null,
+              heldMismatches,
             };
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -576,6 +582,24 @@ export async function runGoogleFamilySearch(
         }
         await flushReview();
       }
+    }
+
+    if (
+      heldMismatches.length > 0 &&
+      accepted.length < TARGET_COMPETITORS &&
+      !isSearchJobSuppressed(jobId)
+    ) {
+      job.progress.message = `Adding competitors from outside the company locations to fill the list…`;
+      saveJob(job);
+      for (const competitor of heldMismatches) {
+        if (accepted.length >= TARGET_COMPETITORS) break;
+        saveCompetitor(competitor);
+        accepted.push(competitor);
+        job.competitorIds.push(competitor.id);
+        job.progress.accepted = accepted.length;
+        queueAddressEnrich(job, competitor);
+      }
+      saveJob(job);
     }
 
     if (
@@ -630,6 +654,7 @@ export async function runGoogleFamilySearch(
               gap.domain,
             country: String(job.geo || "US"),
             websiteHint: websiteUrl(gap.domain),
+            heldMismatches,
           });
           if (pendingReview.length >= AD_REVIEW_BATCH) await flushReview();
         }
@@ -667,6 +692,26 @@ export async function runGoogleFamilySearch(
   }
 }
 
+function queueAddressEnrich(job: SearchJob, competitor: CompetitorRecord) {
+  const competitorId = competitor.id;
+  void (async () => {
+    try {
+      const { enrichCompetitorSociavaultAddress } = await import(
+        "./competitorLocation"
+      );
+      await enrichCompetitorSociavaultAddress({
+        competitorId,
+        facebookUrl: competitor.brand?.facebookUrl || null,
+        linkedinUrl: competitor.brand?.linkedinUrl || null,
+        geoMode: job.geoMode || "countrywide",
+        targetLocations: job.targetLocations || [],
+      });
+    } catch {
+      /* provisional location stays */
+    }
+  })();
+}
+
 async function tryAcceptFromAds(args: {
   ads: GoogleAdCreative[];
   job: SearchJob;
@@ -680,6 +725,7 @@ async function tryAcceptFromAds(args: {
   pageName: string;
   country: string;
   websiteHint: string | null;
+  heldMismatches?: CompetitorRecord[];
 }) {
   const {
     ads,
@@ -694,6 +740,7 @@ async function tryAcceptFromAds(args: {
     pageName,
     country,
     websiteHint,
+    heldMismatches,
   } = args;
 
   if (isSearchJobSuppressed(job.id)) return;
@@ -915,33 +962,36 @@ async function tryAcceptFromAds(args: {
     createdAt: new Date().toISOString(),
   };
 
+  const preferLocal =
+    job.geoMode === "company_locations" || job.geoMode === "keyword_location";
+  if (
+    preferLocal &&
+    provisional.locationStatus === "mismatch" &&
+    heldMismatches &&
+    accepted.filter((c) => c.locationStatus !== "mismatch").length <
+      TARGET_COMPETITORS
+  ) {
+    heldMismatches.push(competitor);
+    job.progress.message = `Holding ${pageName}: outside the company locations — searching the other branches first`;
+    saveJob(job);
+    return;
+  }
+
   saveCompetitor(competitor);
   accepted.push(competitor);
   job.competitorIds.push(competitor.id);
   job.progress.accepted = accepted.length;
 
-  const competitorId = competitor.id;
   const restForLanding = sampleSource.slice(DETAILS_PER_ADVERTISER, DETAILS_PER_ADVERTISER + 2);
+  queueAddressEnrich(job, competitor);
   void (async () => {
-    try {
-      const { enrichCompetitorSociavaultAddress } = await import("./competitorLocation");
-      await enrichCompetitorSociavaultAddress({
-        competitorId,
-        facebookUrl: brand.facebookUrl || null,
-        linkedinUrl: brand.linkedinUrl || null,
-        geoMode: job.geoMode || "countrywide",
-        targetLocations: job.targetLocations || [],
-      });
-    } catch {
-      /* provisional location stays */
-    }
     if (primary.landingPageUrl || restForLanding.length === 0) return;
     for (const ad of restForLanding) {
       const details = await enrichGoogleAd(ad);
       const candidate = mapGoogleCreativeToCandidate(ad, details);
       if (!candidate.landingPageUrl) continue;
       const richer = sampleAdFromGoogleCandidate(candidate, platform, domainHint);
-      updateCompetitor(competitorId, { sampleAd: richer });
+      updateCompetitor(competitor.id, { sampleAd: richer });
       break;
     }
   })();

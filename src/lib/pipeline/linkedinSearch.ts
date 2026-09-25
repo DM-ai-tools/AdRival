@@ -9,6 +9,7 @@ import {
   expandKeywordQueries,
   hasServiceKeywordSignal,
 } from "../openai/analyzer";
+import { compactGeoSearchQueries } from "./keywordSuggestions";
 import {
   getJob,
   isSearchJobSuppressed,
@@ -168,28 +169,32 @@ export async function runLinkedInSearch(
   }> = [];
 
   try {
-    const queries = new Set<string>(keywords);
-    for (const kw of keywords) {
-      try {
-        for (const q of await expandKeywordQueries(kw, businessProfile, {
-          geoMode,
-          targetLocations,
-          selectedCategory,
-        }))
-          queries.add(q);
-      } catch {
-        /* seed only */
-      }
-    }
-    if (preferLocalGeo) {
-      for (const loc of targetLocations.slice(0, 4)) {
-        const place = loc.suburb || loc.city || loc.label;
-        if (!place) continue;
-        for (const kw of keywords.slice(0, 3)) queries.add(`${kw} ${place}`);
-      }
-    }
+    const localSearch = preferLocalGeo && targetLocations.length > 0;
+    const queries = localSearch
+      ? compactGeoSearchQueries({
+          keywords,
+          locations: targetLocations,
+          categoryLabel: selectedCategory?.label || null,
+          maxQueries: 6,
+        })
+      : await (async () => {
+          const expanded = new Set<string>(keywords);
+          for (const kw of keywords) {
+            try {
+              for (const q of await expandKeywordQueries(kw, businessProfile, {
+                geoMode,
+                targetLocations,
+                selectedCategory,
+              }))
+                expanded.add(q);
+            } catch {
+              /* seed only */
+            }
+          }
+          return Array.from(expanded).slice(0, MAX_SEARCH_QUERIES_LINKEDIN);
+        })();
 
-    outer: for (const query of Array.from(queries).slice(0, MAX_SEARCH_QUERIES_LINKEDIN)) {
+    outer: for (const query of queries) {
       if (isSearchJobSuppressed(jobId)) break outer;
       let token: string | null = null;
       let pages = 0;
