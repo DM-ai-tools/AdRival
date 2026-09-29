@@ -4814,3 +4814,15 @@ select.search-input {
   background: rgba(99, 102, 241, 0.12);
   color: inherit;
 }
+
+/* Offers dashboard — Excel downloads */
+.offers-export-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0 16px;
+}
+.offers-export-row .muted {
+  font-size: 0.85rem;
+}

@@ -440,6 +440,32 @@ export function LookupOffersDashboard({
         ))}
       </nav>
 
+      <div className="offers-export-row">
+        {section === "creatives" || section === "pages" || section === "ladder" ? (
+          <a
+            className="ghost-btn"
+            href={`/api/lookup/offers-report/export?lookupId=${encodeURIComponent(job.id)}&part=${section === "ladder" ? "ladders" : section}`}
+            download
+          >
+            Download {section === "ladder" ? "value ladders" : section === "pages" ? "landing pages" : "creatives & offers"} (Excel)
+          </a>
+        ) : null}
+        <a
+          className="ghost-btn"
+          href={`/api/lookup/offers-report/export?lookupId=${encodeURIComponent(job.id)}&part=ads`}
+          download
+        >
+          Download all ads (Excel)
+        </a>
+        <a
+          className="ghost-btn"
+          href={`/api/lookup/offers-report/export?lookupId=${encodeURIComponent(job.id)}&part=all`}
+          download
+        >
+          Download full report (Excel)
+        </a>
+      </div>
+
       {section === "overview" ? (
         <div className="offers-dash-body offers-overview">
           <section className="offers-block">
