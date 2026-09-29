@@ -176,7 +176,10 @@ export function inventoryFromLandingOutline(input: {
   hasForm?: boolean;
   formFields?: string[];
 }): PageInventory {
-  const headings = input.headings || [];
+  // Only page-level headings mark sections; H3+ are cards inside a section.
+  const allHeadings = input.headings || [];
+  const topLevel = allHeadings.filter((h) => h.level <= 2);
+  const headings = topLevel.length >= 2 ? topLevel : allHeadings;
   const architecture = (input.architecture || []).filter(
     (section) => (section.name || section.summary || section.purpose || "").trim(),
   );
@@ -193,7 +196,10 @@ export function inventoryFromLandingOutline(input: {
     seenCta.add(key);
     return true;
   });
-  const count = Math.max(architecture.length, headings.length, input.heroCandidates?.length ? 1 : 0);
+  // The analysed architecture is the section list when it exists; headings only label it.
+  const count = architecture.length >= 2
+    ? architecture.length
+    : Math.max(headings.length, input.heroCandidates?.length ? 1 : 0);
   const sections: InventorySection[] = [];
   for (let index = 0; index < count; index += 1) {
     const arch = architecture[index];

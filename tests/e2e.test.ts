@@ -292,6 +292,10 @@ describe("privilege escalation", () => {
       "/api/admin/usage",
       "/api/admin/projects",
       "/api/admin/settings",
+      "/api/admin/audit",
+      "/api/admin/runs",
+      "/api/admin/alerts",
+      "/api/admin/spaces",
     ]) {
       const res = await bob.get(path);
       assert.equal(res.status, 403, `${path} returned ${res.status}`);
@@ -745,6 +749,138 @@ describe("soft deletion", () => {
       list.users.some((u) => u.id === user.id && u.status === "deleted"),
       "the soft-deleted account is still on record",
     );
+
+    // A deleted account can't be revived or credited through the admin API.
+    const revive = await admin.patch(`/api/admin/users/${user.id}`, { status: "active" });
+    assert.equal(revive.status, 409);
+    const credit = await admin.post(`/api/admin/users/${user.id}/credits`, {
+      action: "add_credits",
+      credits: "5",
+      reason: "e2e",
+    });
+    assert.equal(credit.status, 409);
+  });
+});
+
+describe("admin safety", () => {
+  test("an admin cannot demote or suspend their own account", async () => {
+    const admin = await loggedIn("rootadmin");
+    // A second admin, so the last-admin rule is not what blocks it.
+    const created = await admin.post("/api/admin/users", {
+      username: "secondadmin",
+      displayName: "Second Admin",
+      role: "admin",
+    });
+    assert.equal(created.status, 200);
+
+    for (const body of [{ role: "user" }, { status: "suspended" }]) {
+      const res = await admin.patch(`/api/admin/users/${ids.admin}`, body);
+      assert.equal(res.status, 409);
+      assert.equal(((await res.json()) as { code: string }).code, "self_lockout");
+    }
+    assert.equal((await admin.get("/api/admin/overview")).status, 200, "still an admin");
+  });
+});
+
+describe("stopping work", () => {
+  test("stopping a finished run leaves it untouched so its reports can still run", async () => {
+    const alice = await loggedIn("alice");
+    const res = await alice.post("/api/stop", { all: true, jobId: ids.aliceSearch });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { searchJobIds: string[] };
+    assert.deepEqual(body.searchJobIds, []);
+
+    const status = (await (
+      await alice.get(`/api/search/status?jobId=${ids.aliceSearch}`)
+    ).json()) as { job: { status: string; progress: { stopRequested?: boolean } } };
+    assert.equal(status.job.status, "completed");
+    assert.notEqual(status.job.progress.stopRequested, true);
+  });
+});
+
+describe("admin tools", () => {
+  test("bulk top-ups reach every chosen user and show in the audit log", async () => {
+    const admin = await loggedIn("rootadmin");
+    const alice = await loggedIn("alice");
+    const before = (await (await alice.get("/api/credits/summary")).json()) as {
+      credits?: { availableSubunits: number };
+      availableSubunits?: number;
+    };
+    const res = await admin.post("/api/admin/credits/bulk", {
+      userIds: [ids.alice, ids.bob],
+      credits: "3",
+      reason: "e2e bulk",
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { updated: unknown[]; skipped: unknown[] };
+    assert.equal(body.updated.length, 2);
+    const after = (await (await alice.get("/api/credits/summary")).json()) as typeof before;
+    const avail = (x: typeof before) => x.credits?.availableSubunits ?? x.availableSubunits ?? 0;
+    assert.equal(avail(after) - avail(before), 30_000, "3 credits added");
+
+    const audit = (await (await admin.get(`/api/admin/audit?target=${ids.alice}`)).json()) as {
+      entries: Array<{ actionLabel: string; details: string }>;
+    };
+    assert.ok(audit.entries.some((e) => e.actionLabel === "Added credits" && /3 credits/.test(e.details)));
+    const csv = await admin.get("/api/admin/audit?format=csv");
+    assert.match(csv.headers.get("content-type") || "", /text\/csv/);
+
+    // A regular user cannot top anyone up.
+    const bob = await loggedIn("bob");
+    assert.equal((await bob.post("/api/admin/credits/bulk", { userIds: [ids.bob], credits: "5", reason: "x" })).status, 403);
+  });
+
+  test("the runs list shows every user's runs with their owner", async () => {
+    const admin = await loggedIn("rootadmin");
+    const body = (await (await admin.get("/api/admin/runs")).json()) as {
+      runs: Array<{ id: string; ownerUsername: string | null }>;
+    };
+    const run = body.runs.find((r) => r.id === ids.aliceSearch);
+    assert.ok(run, "alice's search is listed");
+    assert.equal(run?.ownerUsername, "alice");
+  });
+
+  test("sign-ins are recorded and a locked-out account can be unlocked", async () => {
+    const admin = await loggedIn("rootadmin");
+    const list = (await (await admin.get("/api/admin/users")).json()) as {
+      users: Array<{ id: string; lastLoginAt: string | null; loginLocked: boolean }>;
+    };
+    assert.ok(list.users.find((u) => u.id === ids.alice)?.lastLoginAt, "alice's last sign-in is recorded");
+    assert.equal(list.users.find((u) => u.id === ids.throttled)?.loginLocked, true, "the throttled account is locked");
+
+    const unlock = await admin.patch(`/api/admin/users/${ids.throttled}`, { unlockLogin: true });
+    assert.equal(unlock.status, 200);
+    const again = client();
+    assert.equal((await again.login("throttled", PASSWORD)).status, 200, "can sign in after unlock");
+  });
+
+  test("a client space can be renamed, archived and restored", async () => {
+    const admin = await loggedIn("rootadmin");
+    const created = await admin.post("/api/admin/spaces", { action: "create", clientName: "E2E Client", ownerUserId: ids.alice });
+    assert.equal(created.status, 200);
+    const { spaceId } = (await created.json()) as { spaceId: string };
+
+    assert.equal((await admin.post("/api/admin/spaces", { action: "rename", spaceId, clientName: "E2E Client Renamed" })).status, 200);
+    assert.equal((await admin.post("/api/admin/spaces", { action: "delete", spaceId })).status, 200);
+    // Archived spaces refuse changes until restored.
+    assert.equal((await admin.post("/api/admin/spaces", { action: "rename", spaceId, clientName: "Nope" })).status, 409);
+    const listed = (await (await admin.get("/api/admin/spaces")).json()) as {
+      archived: Array<{ id: string; clientName: string }>;
+    };
+    assert.equal(listed.archived.find((s) => s.id === spaceId)?.clientName, "E2E Client Renamed");
+    assert.equal((await admin.post("/api/admin/spaces", { action: "restore", spaceId })).status, 200);
+    const after = (await (await admin.get("/api/admin/spaces")).json()) as { spaces: Array<{ id: string }> };
+    assert.ok(after.spaces.some((s) => s.id === spaceId), "restored space is live again");
+  });
+
+  test("malformed conversion rules are refused before they go live", async () => {
+    const admin = await loggedIn("rootadmin");
+    const res = await admin.post("/api/admin/settings", {
+      rates: { openai: { default: { perRequest: -5 } }, madeup: { default: {} } },
+      perCallReservationCeiling: { openai: 100 },
+      note: "e2e bad rules",
+    });
+    assert.equal(res.status, 400);
   });
 });
 
@@ -791,6 +927,10 @@ describe("existing functionality still works", () => {
       "/api/admin/usage",
       "/api/admin/projects",
       "/api/admin/settings",
+      "/api/admin/audit",
+      "/api/admin/runs",
+      "/api/admin/alerts",
+      "/api/admin/spaces",
     ]) {
       const res = await admin.get(path);
       assert.equal(res.status, 200, `${path} returned ${res.status}`);

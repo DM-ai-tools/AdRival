@@ -12,6 +12,8 @@ import {
   listUsers,
   readDb,
   removeSpaceMembership,
+  renameProjectSpace,
+  restoreProjectSpace,
   setProjectSpaceOwner,
   upsertSpaceMembership,
 } from "@/lib/db";
@@ -108,6 +110,15 @@ export async function GET() {
     return NextResponse.json({
       spaces: spaces.filter((space) => !space.archivedAt),
       archivedCount: spaces.filter((space) => space.archivedAt).length,
+      archived: spaces
+        .filter((space) => space.archivedAt)
+        .map((space) => ({
+          id: space.id,
+          clientName: space.clientName,
+          ownerDisplayName: space.ownerDisplayName,
+          ownerUsername: space.ownerUsername,
+          archivedAt: space.archivedAt,
+        })),
       unassigned,
       users: users.map((u) => ({
         id: u.id,
@@ -161,6 +172,37 @@ export async function POST(request: Request) {
     const space = getProjectSpace(String(body.spaceId ?? ""));
     if (!space) throw new HttpError(404, "Client space not found", "not_found");
 
+    if (body.action === "restore") {
+      const result = restoreProjectSpace(space.id);
+      if (!result.ok) throw new HttpError(409, "This client space is not archived");
+      recordAudit({
+        actorUserId: admin.id,
+        actorUsername: admin.username,
+        action: "admin.space.restore",
+        targetUserId: space.ownerUserId,
+        details: { spaceId: space.id, clientName: space.clientName, runsRestored: result.runsRestored },
+      });
+      return NextResponse.json({ ok: true, runsRestored: result.runsRestored });
+    }
+    // Everything else works on live spaces only.
+    if (space.archivedAt) {
+      throw new HttpError(409, "This client space is archived. Restore it first.", "space_archived");
+    }
+
+    if (body.action === "rename") {
+      const clientName = String(body.clientName ?? "").trim();
+      if (clientName.length < 2) throw new HttpError(400, "Enter a client name");
+      renameProjectSpace(space.id, clientName);
+      recordAudit({
+        actorUserId: admin.id,
+        actorUsername: admin.username,
+        action: "admin.space.rename",
+        targetUserId: space.ownerUserId,
+        details: { spaceId: space.id, from: space.clientName, to: clientName },
+      });
+      return NextResponse.json({ ok: true });
+    }
+
     if (body.action === "share") {
       const target = getUserById(String(body.userId ?? ""));
       if (!target || target.status !== "active") {
@@ -187,7 +229,10 @@ export async function POST(request: Request) {
     }
 
     if (body.action === "revoke") {
-      removeSpaceMembership(space.id, String(body.userId ?? ""));
+      const removed = removeSpaceMembership(space.id, String(body.userId ?? ""));
+      if (!removed) {
+        throw new HttpError(404, "That user did not have access to this space", "not_found");
+      }
       recordAudit({
         actorUserId: admin.id,
         actorUsername: admin.username,
@@ -204,6 +249,8 @@ export async function POST(request: Request) {
         throw new HttpError(400, "Choose an active user");
       }
       setProjectSpaceOwner(space.id, target.id);
+      // The new owner no longer needs a separate sharing entry.
+      removeSpaceMembership(space.id, target.id);
       recordAudit({
         actorUserId: admin.id,
         actorUsername: admin.username,

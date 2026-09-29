@@ -4,7 +4,8 @@ import {
   hasFirecrawlKey,
 } from "../firecrawl/client";
 
-const MAX_HTML_CHARS = 350_000;
+/** Framer and page-builder sites often exceed 350K before their lower sections and forms. */
+const MAX_HTML_CHARS = 2_000_000;
 
 const BROWSER_HEADERS: Record<string, string> = {
   "User-Agent":
@@ -278,11 +279,38 @@ async function fetchViaPlaywright(url: string): Promise<{
   }
 }
 
+function urlPath(url: string): string {
+  try {
+    return new URL(url).pathname.replace(/\/+$/, "") || "/";
+  } catch {
+    return "/";
+  }
+}
+
 /**
  * Fetch landing-page HTML with URL cleanup + retries for common 403/blocked cases.
  * Fallback order: direct fetch → Firecrawl → Playwright.
+ *
+ * homepageFallback is true when a specific page was asked for but what came
+ * back is the site's homepage (the page is gone, or the site redirects there).
+ * Callers that need that exact page, like the offers report, can reject it.
  */
 export async function fetchRawLandingHtml(url: string): Promise<{
+  finalUrl: string;
+  title: string | null;
+  html: string;
+  source: "direct" | "firecrawl" | "playwright";
+  homepageFallback: boolean;
+}> {
+  const page = await fetchRawLandingHtmlFromCandidates(url);
+  const asked = urlPath(normalizeLandingUrl(url) || url);
+  return {
+    ...page,
+    homepageFallback: asked !== "/" && urlPath(page.finalUrl) === "/",
+  };
+}
+
+async function fetchRawLandingHtmlFromCandidates(url: string): Promise<{
   finalUrl: string;
   title: string | null;
   html: string;

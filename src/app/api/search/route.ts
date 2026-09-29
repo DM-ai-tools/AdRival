@@ -5,7 +5,7 @@ import { errorResponse, requireUser, resolveSpaceAccess } from "@/lib/authz";
 import { runBillable, precheckRun } from "@/lib/accounting/run";
 import { isCreditError } from "@/lib/accounting/errors";
 import { maskClientFacingText } from "@/lib/clientFacing";
-import { saveJob, updateJob } from "@/lib/db";
+import { getJob, saveJob, updateJob } from "@/lib/db";
 import { dispatchPlatformSearch } from "@/lib/pipeline/dispatch";
 import { resolveSearchGeoContext } from "@/lib/pipeline/keywordSuggestions";
 import { AD_PLATFORMS, parseKeywords, type AdPlatform } from "@/lib/platforms";
@@ -221,16 +221,20 @@ export async function POST(request: Request) {
           ? (err as Error).message
           : maskClientFacingText(`Search failed: ${(err as Error).message}`) ||
             "Search failed";
+        // Keep the counts the run reached, so the user can see how far it got.
+        const reached = getJob(jobId)?.progress;
         updateJob(jobId, {
           status: "failed",
           error: message,
           progress: {
+            ...(reached ?? {
+              scannedAds: 0,
+              scannedPages: 0,
+              accepted: 0,
+              target: 0,
+              rejected: 0,
+            }),
             stage: "failed",
-            scannedAds: 0,
-            scannedPages: 0,
-            accepted: 0,
-            target: 0,
-            rejected: 0,
             message,
           },
         });

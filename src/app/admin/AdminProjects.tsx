@@ -1,7 +1,28 @@
 "use client";
 
+import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { formatDate, formatDateTime } from "@/lib/credits/display";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { statusLabel } from "@/lib/progressLabels";
+
+interface ArchivedSpace {
+  id: string;
+  clientName: string;
+  ownerDisplayName: string | null;
+  ownerUsername: string | null;
+  archivedAt: string;
+}
+
+type PendingAction = {
+  title: string;
+  description: string;
+  label: string;
+  tone: "default" | "danger";
+  body: Record<string, unknown>;
+  key: string;
+  after?: () => void;
+};
 
 interface Share {
   userId: string;
@@ -69,6 +90,10 @@ export default function AdminProjects() {
   const [browseOwnerId, setBrowseOwnerId] = useState("");
   const [openSpaceId, setOpenSpaceId] = useState<string | null>(null);
   const [spaceQuery, setSpaceQuery] = useState("");
+  const [archived, setArchived] = useState<ArchivedSpace[]>([]);
+  const [pending, setPending] = useState<PendingAction | null>(null);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [newName, setNewName] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -84,6 +109,7 @@ export default function AdminProjects() {
         })),
       );
       setUnassigned(json.unassigned ?? []);
+      setArchived(json.archived ?? []);
       setUsers(json.users ?? []);
       setError(null);
     } catch (err) {
@@ -109,15 +135,18 @@ export default function AdminProjects() {
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || "Request failed");
-      if (body.action === "delete") {
-        setNotice(
-          `Deleted the client space and archived ${json.runsArchived ?? 0} run(s).`,
-        );
-      }
-      if (body.action === "move-runs") {
-        setNotice(`Moved ${json.moved ?? 0} run(s) into the client space.`);
-        setSelectedRuns([]);
-      }
+      const messages: Record<string, string> = {
+        create: "Client space created.",
+        delete: `Client space archived with ${json.runsArchived ?? 0} run(s). You can restore it below.`,
+        "move-runs": `Moved ${json.moved ?? 0} run(s) into the client space.`,
+        share: "Shared.",
+        revoke: "Access removed.",
+        transfer: "Ownership transferred.",
+        rename: "Renamed.",
+        restore: `Client space restored with ${json.runsRestored ?? 0} run(s).`,
+      };
+      setNotice(messages[String(body.action)] ?? "Saved.");
+      if (body.action === "move-runs") setSelectedRuns([]);
       await load();
       return true;
     } catch (err) {
@@ -160,8 +189,27 @@ export default function AdminProjects() {
 
   return (
     <>
+      {pending ? (
+        <ConfirmDialog
+          open
+          title={pending.title}
+          description={pending.description}
+          confirmLabel={pending.label}
+          tone={pending.tone}
+          busy={busyId === pending.key}
+          onConfirm={() => {
+            const current = pending;
+            void act(current.body, current.key).then((ok) => {
+              setPending(null);
+              if (ok) current.after?.();
+            });
+          }}
+          onCancel={() => setPending(null)}
+        />
+      ) : null}
       <section className="panel glow-panel admin-panel">
         <h2>Client spaces</h2>
+        {loading && !spaces.length ? <p className="muted">Loading…</p> : null}
         <p className="muted">
           A client space holds that client’s search and lookup history. Sharing
           or deleting the space covers the whole history, not one run at a time.
@@ -206,7 +254,7 @@ export default function AdminProjects() {
       </section>
 
       <section className="panel glow-panel admin-panel">
-        <h2>Client spaces</h2>
+        <h2>Find a client space</h2>
         <p className="muted">
           Open a client space directly, or choose an owner first. Either way
           shows every run in that space. Sharing and deleting still cover the
@@ -298,7 +346,39 @@ export default function AdminProjects() {
         <section className="panel glow-panel admin-panel">
           <div className="progress-head">
             <div>
-              <h2>{openSpace.clientName}</h2>
+              {renaming === openSpace.id ? (
+                <form
+                  className="admin-inline-form"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void act({ action: "rename", spaceId: openSpace.id, clientName: newName }, openSpace.id).then(
+                      (ok) => ok && setRenaming(null),
+                    );
+                  }}
+                >
+                  <input className="search-input" value={newName} onChange={(e) => setNewName(e.target.value)} aria-label="Client name" autoFocus />
+                  <button type="submit" className="chip-btn" disabled={newName.trim().length < 2}>
+                    Save
+                  </button>
+                  <button type="button" className="link-btn" onClick={() => setRenaming(null)}>
+                    Cancel
+                  </button>
+                </form>
+              ) : (
+                <h2>
+                  {openSpace.clientName}{" "}
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => {
+                      setRenaming(openSpace.id);
+                      setNewName(openSpace.clientName);
+                    }}
+                  >
+                    Rename
+                  </button>
+                </h2>
+              )}
               <p className="muted">
                 Owned by {openSpace.ownerDisplayName} (@{openSpace.ownerUsername}) ·{" "}
                 {openSpace.runCount} run{openSpace.runCount === 1 ? "" : "s"}
@@ -308,20 +388,27 @@ export default function AdminProjects() {
               type="button"
               className="danger-btn"
               disabled={busyId === openSpace.id}
-              onClick={() => {
-                if (
-                  window.confirm(
-                    `Delete “${openSpace.clientName}” and archive all ${openSpace.runCount} runs inside it? Shared users lose access immediately.`,
-                  )
-                ) {
-                  void act({ action: "delete", spaceId: openSpace.id }, openSpace.id);
-                  setOpenSpaceId(null);
-                }
-              }}
+              onClick={() =>
+                setPending({
+                  title: `Archive “${openSpace.clientName}”?`,
+                  description: `Its ${openSpace.runCount} run(s) are archived with it and shared users lose access at once. You can restore it later from the archived list.`,
+                  label: "Archive space",
+                  tone: "danger",
+                  body: { action: "delete", spaceId: openSpace.id },
+                  key: openSpace.id,
+                  after: () => setOpenSpaceId(null),
+                })
+              }
             >
-              Delete space
+              Archive space
             </button>
           </div>
+          {notice ? <p className="credits-pending" role="status">{notice}</p> : null}
+          {error ? (
+            <p className="error-text" role="alert">
+              {error}
+            </p>
+          ) : null}
 
           <h3>Runs in this space</h3>
           {openSpace.runs.length === 0 ? (
@@ -330,9 +417,17 @@ export default function AdminProjects() {
             <ul className="space-run-list">
               {openSpace.runs.map((run) => (
                 <li key={`${run.kind}:${run.id}`}>
-                  <strong>{run.title}</strong>
+                  <Link
+                    href={
+                      run.kind === "lookup"
+                        ? `/?mode=lookup&lookup=${encodeURIComponent(run.id)}`
+                        : `/?mode=search&run=${encodeURIComponent(run.id)}&tab=preview`
+                    }
+                  >
+                    <strong>{run.title}</strong>
+                  </Link>
                   <span className="muted">
-                    {run.kind === "search" ? "Search" : "Lookup"} · {run.status}
+                    {run.kind === "search" ? "Search" : "Lookup"} · {statusLabel(run.status)}
                     {" · "}
                     Created {formatDateTime(run.createdAt)}
                     {run.updatedAt && run.updatedAt !== run.createdAt
@@ -420,17 +515,17 @@ export default function AdminProjects() {
                         type="button"
                         className="chip-btn"
                         onClick={() =>
-                          void act(
-                            {
-                              action: "revoke",
-                              spaceId: openSpace.id,
-                              userId: share.userId,
-                            },
-                            openSpace.id,
-                          )
+                          setPending({
+                            title: `Remove @${share.username}’s access?`,
+                            description: `They can no longer open “${openSpace.clientName}” or any run in it.`,
+                            label: "Remove access",
+                            tone: "danger",
+                            body: { action: "revoke", spaceId: openSpace.id, userId: share.userId },
+                            key: openSpace.id,
+                          })
                         }
                       >
-                        Revoke
+                        Remove access
                       </button>
                     </li>
                   ))}
@@ -453,21 +548,16 @@ export default function AdminProjects() {
                     e.currentTarget.value = "";
                     if (!value) return;
                     const next = users.find((user) => user.id === value);
-                    if (
-                      next &&
-                      window.confirm(
-                        `Transfer “${openSpace.clientName}” to ${userLabel(next)}?`,
-                      )
-                    ) {
-                      setBrowseOwnerId(value);
-                      void act(
-                        {
-                          action: "transfer",
-                          spaceId: openSpace.id,
-                          ownerUserId: value,
-                        },
-                        openSpace.id,
-                      );
+                    if (next) {
+                      setPending({
+                        title: `Give “${openSpace.clientName}” to ${userLabel(next)}?`,
+                        description: "They become the owner of the space and every run in it. Past charges stay with whoever ran them.",
+                        label: "Transfer",
+                        tone: "default",
+                        body: { action: "transfer", spaceId: openSpace.id, ownerUserId: value },
+                        key: openSpace.id,
+                        after: () => setBrowseOwnerId(value),
+                      });
                     }
                   }}
                 >
@@ -555,6 +645,32 @@ export default function AdminProjects() {
           </>
         )}
       </section>
+      {archived.length ? (
+        <section className="panel glow-panel admin-panel">
+          <h2>Archived client spaces</h2>
+          <p className="muted">Restoring a space also brings back the runs that were archived with it.</p>
+          <ul className="admin-alert-list">
+            {archived.map((space) => (
+              <li key={space.id} className="admin-alert-row">
+                <span>
+                  <strong>{space.clientName}</strong>{" "}
+                  <span className="muted">
+                    · {space.ownerDisplayName ?? "Unknown owner"} · archived {formatDate(space.archivedAt)}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  className="chip-btn"
+                  disabled={busyId === space.id}
+                  onClick={() => void act({ action: "restore", spaceId: space.id }, space.id)}
+                >
+                  Restore
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
     </>
   );
 }

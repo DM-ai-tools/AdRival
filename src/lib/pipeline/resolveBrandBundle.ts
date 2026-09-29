@@ -205,6 +205,34 @@ function emptyAssets(finalUrl: string, siteName: string | null): BrandSiteAssets
   };
 }
 
+function brandBundleUrl(raw: string): string {
+  return (
+    normalizeLandingUrl(raw) ||
+    (/^https?:\/\//i.test(raw) ? raw.trim() : `https://${raw.trim()}`)
+  );
+}
+
+export type BrandBrandingPrefetch = {
+  businessUrl: string;
+  result: Promise<{ ok: true; value: Awaited<ReturnType<typeof extractColorsViaFirecrawl>> } | { ok: false; error: unknown }>;
+};
+
+/**
+ * Start the site-branding read (the slow first step of resolveBrandBundle)
+ * early, e.g. while the business profile is still being analyzed. Pass the
+ * result to resolveBrandBundle; it is used only for the same URL.
+ */
+export function prefetchBrandBranding(rawUrl: string): BrandBrandingPrefetch {
+  const businessUrl = brandBundleUrl(rawUrl);
+  return {
+    businessUrl,
+    result: extractColorsViaFirecrawl(businessUrl).then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    ),
+  };
+}
+
 /**
  * Resolve brand colors + assets + design system from the business URL.
  * Primary: Firecrawl branding format (colors, fonts, logo, components, links).
@@ -213,13 +241,10 @@ function emptyAssets(finalUrl: string, siteName: string | null): BrandSiteAssets
 export async function resolveBrandBundle(input: {
   businessUrl: string;
   profile?: BusinessProfile | null;
+  prefetched?: BrandBrandingPrefetch | null;
 }): Promise<BrandBundle> {
   const warnings: string[] = [];
-  const businessUrl =
-    normalizeLandingUrl(input.businessUrl) ||
-    (/^https?:\/\//i.test(input.businessUrl)
-      ? input.businessUrl.trim()
-      : `https://${input.businessUrl.trim()}`);
+  const businessUrl = brandBundleUrl(input.businessUrl);
 
   let html: string | null = null;
   let finalUrl = businessUrl;
@@ -230,7 +255,14 @@ export async function resolveBrandBundle(input: {
   let design: BrandDesignSystem | null = null;
 
   // 1) Firecrawl branding — primary source
-  const fc = await extractColorsViaFirecrawl(businessUrl);
+  let fc: Awaited<ReturnType<typeof extractColorsViaFirecrawl>>;
+  if (input.prefetched && input.prefetched.businessUrl === businessUrl) {
+    const early = await input.prefetched.result;
+    if (!early.ok) throw early.error;
+    fc = early.value;
+  } else {
+    fc = await extractColorsViaFirecrawl(businessUrl);
+  }
   warnings.push(...fc.warnings);
   pageEvidence = fc.markdown || pageEvidence;
   if (fc.html && !isChallengeOrEmptyHtml(fc.html)) {

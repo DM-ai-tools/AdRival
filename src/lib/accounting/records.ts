@@ -251,6 +251,11 @@ export function queryAudit(filter?: {
   actorUserId?: string;
   targetUserId?: string;
   action?: string;
+  /** e.g. "admin.credits" matches every credit action. */
+  actionPrefix?: string;
+  excludeActions?: Set<string>;
+  from?: string;
+  to?: string;
   limit?: number;
 }): AuditLogEntry[] {
   const rows = (readDb().auditLogs ?? []).filter((e) => {
@@ -259,6 +264,10 @@ export function queryAudit(filter?: {
       return false;
     }
     if (filter?.action && e.action !== filter.action) return false;
+    if (filter?.actionPrefix && !e.action.startsWith(filter.actionPrefix)) return false;
+    if (filter?.excludeActions?.has(e.action)) return false;
+    if (filter?.from && e.createdAt < filter.from) return false;
+    if (filter?.to && e.createdAt > filter.to) return false;
     return true;
   });
   rows.sort((a, b) => b.seq - a.seq);

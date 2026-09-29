@@ -1,16 +1,16 @@
 "use client";
 
-import Link from "next/link";
+import { offersPhaseLabel, statusLabel } from "@/lib/progressLabels";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   FunnelStage,
-  LookupCoreOfferLadder,
   LookupOffersReport,
   LookupUniqueLandingPage,
   SearchCompetitorAdRecord,
   SearchJob,
 } from "@/lib/types";
-import { OfferLadderFlow, ladderSteps, splitLaddersByOffer } from "./OfferLadderFlow";
+import { visibleOfferLadders } from "./OfferLadderFlow";
+import { OfferWorkspace } from "./OfferWorkspace";
 import {
   offerFitsSearchedService,
   searchedServiceFocus,
@@ -95,10 +95,6 @@ function competitorAnchorId(id: string): string {
   return `ads-competitor-${String(id).replace(/[^a-zA-Z0-9_-]+/g, "_")}`;
 }
 
-function ladderAnchorId(id: string): string {
-  return `offer-ladder-${String(id).replace(/[^a-zA-Z0-9_-]+/g, "_")}`;
-}
-
 function buildAdIndexes(ads: SearchCompetitorAdRecord[]) {
   const byId = new Map<string, SearchCompetitorAdRecord>();
   const byArchive = new Map<string, SearchCompetitorAdRecord>();
@@ -113,50 +109,6 @@ function buildAdIndexes(ads: SearchCompetitorAdRecord[]) {
     else byLp.set(key, [ad]);
   }
   return { byId, byArchive, byLp };
-}
-
-function adsForLadder(
-  ladder: LookupCoreOfferLadder,
-  indexes: ReturnType<typeof buildAdIndexes>,
-  ads: SearchCompetitorAdRecord[],
-): SearchCompetitorAdRecord[] {
-  const seen = new Set<string>();
-  const out: SearchCompetitorAdRecord[] = [];
-
-  const push = (ad?: SearchCompetitorAdRecord | null) => {
-    if (!ad || seen.has(ad.id)) return;
-    seen.add(ad.id);
-    out.push(ad);
-  };
-
-  for (const ref of ladder.sourceAdRefs || []) {
-    push(
-      indexes.byId.get(ref.adId) ||
-        (ref.adArchiveId ? indexes.byArchive.get(ref.adArchiveId) : undefined),
-    );
-  }
-
-  if (out.length) return out;
-
-  const names = new Set(
-    (ladder.sourceCompetitors || []).map((n) => n.toLowerCase()),
-  );
-  const targetLp = lpKey(ladder.landingPageUrl);
-  const fromNames = names.size
-    ? ads.filter((a) => names.has(a.pageName.toLowerCase()))
-    : ads;
-  if (targetLp) {
-    const matched =
-      indexes.byLp.get(targetLp) ||
-      fromNames.filter((a) => lpKey(a.landingPageUrl) === targetLp);
-    if (matched.length) {
-      for (const ad of matched) {
-        if (!names.size || names.has(ad.pageName.toLowerCase())) push(ad);
-      }
-      if (out.length) return out;
-    }
-  }
-  return fromNames;
 }
 
 function AdCopyBlock({
@@ -232,6 +184,9 @@ export function SearchOffersTeaser({
   const storageKey = `offers-comp-sel:${job.id}`;
 
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  // Once a report exists the picker folds to one line; it opens again on demand.
+  const reportReady = job.offersReport?.status === "completed";
+  const [pickerOpen, setPickerOpen] = useState(false);
   const hydratedJobRef = useRef<string | null>(null);
 
   // Restore selection when returning to this tab / remounting.
@@ -395,7 +350,19 @@ export function SearchOffersTeaser({
         </div>
       </div>
 
-      {selectCompetitors && roster.length > 0 && !running ? (
+      {selectCompetitors && roster.length > 0 && !running && reportReady && !pickerOpen ? (
+        <div className="offers-competitor-picker offers-competitor-picker-collapsed">
+          <span>
+            {selectedIds.length || lastAnalyzedIds.length} competitor
+            {(selectedIds.length || lastAnalyzedIds.length) === 1 ? "" : "s"} analysed
+          </span>
+          <button type="button" className="link-btn" onClick={() => setPickerOpen(true)}>
+            Change competitors
+          </button>
+        </div>
+      ) : null}
+
+      {selectCompetitors && roster.length > 0 && !running && (!reportReady || pickerOpen) ? (
         <div className="offers-competitor-picker">
           <div className="offers-competitor-picker-bar">
             <span className="search-label" style={{ margin: 0 }}>
@@ -481,7 +448,7 @@ export function SearchOffersTeaser({
         <div className="offers-analysis-progress" aria-live="polite">
           <div className="offers-analysis-progress-head">
             <span className="offers-analysis-progress-label">
-              {job.progress.offersPhase || "Offers analysis"}
+              {offersPhaseLabel(job.progress.offersPhase) || "Offers analysis"}
               {job.progress.offersCurrentName
                 ? ` · ${job.progress.offersCurrentName}`
                 : ""}
@@ -518,14 +485,13 @@ export function SearchOffersDashboard({
   const [adsLoaded, setAdsLoaded] = useState(false);
   const [section, setSection] = useState<
     "ads" | "pages" | "creatives" | "ladders"
-  >("pages");
+  >("ladders");
   const [selectedOffer, setSelectedOffer] = useState<string | null>(null);
   const [selectedPageKey, setSelectedPageKey] = useState<string | null>(null);
   const [funnelFilter, setFunnelFilter] = useState<FunnelStage | "all">("all");
   const [activeCompetitorJump, setActiveCompetitorJump] = useState<string | null>(
     null,
   );
-  const [activeLadderJump, setActiveLadderJump] = useState<string | null>(null);
   const [expandedCompetitors, setExpandedCompetitors] = useState<
     Record<string, boolean>
   >({});
@@ -578,40 +544,10 @@ export function SearchOffersDashboard({
 
   const adIndexes = useMemo(() => buildAdIndexes(visibleAds), [visibleAds]);
 
-  const ladders = useMemo(() => {
-    const filtered = (report?.valueLadder?.ladders || [])
-      .map((ladder) => {
-        const originalSteps = ladder.steps || [];
-        const steps = originalSteps.filter((step) =>
-          offerFitsSearchedService(
-            `${step.offer} ${step.pricing || ""} ${step.cta || ""}`,
-            serviceFocus,
-            { requireMatch: true },
-          ),
-        );
-        const coreFits = offerFitsSearchedService(ladder.coreOffer, serviceFocus, {
-          requireMatch: true,
-        });
-        if (originalSteps.length > 0 && steps.length === 0) return null;
-        if (!coreFits && steps.length === 0) return null;
-        if (!steps.length) return coreFits ? ladder : null;
-        return {
-          ...ladder,
-          steps,
-          coreOffer: coreFits ? ladder.coreOffer : steps[0].offer,
-        };
-      })
-      .filter((ladder): ladder is LookupCoreOfferLadder => Boolean(ladder));
-    return splitLaddersByOffer(filtered);
-  }, [report?.valueLadder?.ladders, serviceFocus]);
-
-  const ladderAdsById = useMemo(() => {
-    const map = new Map<string, SearchCompetitorAdRecord[]>();
-    for (const ladder of ladders) {
-      map.set(ladder.id, adsForLadder(ladder, adIndexes, visibleAds));
-    }
-    return map;
-  }, [ladders, adIndexes, visibleAds]);
+  const ladders = useMemo(
+    () => visibleOfferLadders(report?.valueLadder?.ladders || [], serviceFocus),
+    [report?.valueLadder?.ladders, serviceFocus],
+  );
 
   const groups = useMemo(() => {
     const selected =
@@ -956,7 +892,7 @@ export function SearchOffersDashboard({
                           </span>
                         ) : null}
                         <span className={`status-pill status-${p.status}`}>
-                          {p.status}
+                          {statusLabel(p.status)}
                         </span>
                       </span>
                     </button>
@@ -982,7 +918,7 @@ export function SearchOffersDashboard({
                       </a>
                     </div>
                     <span className={`status-pill status-${selectedPage.status}`}>
-                      {selectedPage.status}
+                      {statusLabel(selectedPage.status)}
                     </span>
                   </div>
                   <p className="muted">
@@ -1329,146 +1265,12 @@ export function SearchOffersDashboard({
       ) : null}
 
       {section === "ladders" ? (
-        <div className="offers-core-ladders offers-core-ladders-wide">
-          {ladders.length === 0 ? (
-            <p className="empty-hint">No offer ladders for this run yet.</p>
-          ) : (
-            <>
-              <nav
-                className="offers-competitor-jump"
-                aria-label="Jump to core offer ladder"
-              >
-                {ladders.map((ladder) => (
-                  <button
-                    key={ladder.id}
-                    type="button"
-                    className={`offers-competitor-jump-box${
-                      activeLadderJump === ladder.id ? " active" : ""
-                    }`}
-                    onClick={() => {
-                      setActiveLadderJump(ladder.id);
-                      document
-                        .getElementById(ladderAnchorId(ladder.id))
-                        ?.scrollIntoView({ behavior: "smooth", block: "start" });
-                    }}
-                  >
-                    <span className="offers-competitor-jump-name">
-                      {ladder.coreOffer}
-                    </span>
-                    <span className="offers-competitor-jump-count">
-                      Ladder {ladder.rank}
-                      {` · ${ladderSteps(ladder).length} steps`}
-                    </span>
-                  </button>
-                ))}
-              </nav>
-              {ladders.map((ladder) => {
-            const refs = ladderAdsById.get(ladder.id) || [];
-            const fallbackRefs = ladder.sourceAdRefs || [];
-            return (
-              <article
-                key={ladder.id}
-                id={ladderAnchorId(ladder.id)}
-                className="offers-core-ladder"
-              >
-                <header className="offers-core-ladder-head">
-                  <div className="offers-meta-row">
-                    <span className="offers-card-kicker">Ladder {ladder.rank}</span>
-                    <span className="muted">
-                      {ladderSteps(ladder).length} steps ·{" "}
-                      {ladder.sourceCompetitors?.length || 0} competitor
-                      {(ladder.sourceCompetitors?.length || 0) === 1 ? "" : "s"}
-                      {refs.length ? ` · ${refs.length} referenced ads` : ""}
-                    </span>
-                  </div>
-                  <h3>{ladder.coreOffer}</h3>
-                  {ladder.details ? <p>{ladder.details}</p> : null}
-                  <div className="offers-meta-row">
-                    {ladder.cta ? <span>CTA: {ladder.cta}</span> : null}
-                    {ladder.pricing ? <span>Pricing: {ladder.pricing}</span> : null}
-                    {ladder.landingPageUrl ? (
-                      <a href={ladder.landingPageUrl} target="_blank" rel="noreferrer">
-                        {shortUrl(ladder.landingPageUrl)}
-                      </a>
-                    ) : null}
-                  </div>
-                  {ladder.sourceCompetitors?.length ? (
-                    <p className="muted">
-                      Sources: {ladder.sourceCompetitors.join(", ")}
-                    </p>
-                  ) : null}
-                </header>
-
-                <OfferLadderFlow ladder={ladder} />
-
-                {ladder.adOffers?.length ? (
-                  <div className="offers-core-ladder-ads">
-                    <p className="muted offers-block-lead">Mapped ad-copy offers</p>
-                    {ladder.adOffers.map((ad) => (
-                      <AdCopyBlock
-                        key={`${ladder.id}-${ad.creativeId}`}
-                        title={ad.hook || ad.offer}
-                        body={ad.sampleCopy || ad.offer}
-                        cta={ad.cta}
-                        landingPageUrl={ad.landingPageUrl}
-                      />
-                    ))}
-                  </div>
-                ) : (
-                  <p className="offers-core-ladder-empty">
-                    {ladder.emptyMessage || "No mapped ad-copy offers."}
-                  </p>
-                )}
-
-                <div className="offers-core-ladder-ads">
-                  <p className="muted offers-block-lead">Ad references</p>
-                  {refs.length ? (
-                    <div className="offers-ad-copy-list">
-                      {refs.map((ad) => (
-                        <AdCopyBlock
-                          key={ad.id}
-                          competitorName={ad.pageName}
-                          title={ad.title}
-                          body={ad.body}
-                          cta={ad.ctaText}
-                          landingPageUrl={ad.landingPageUrl}
-                          adLibraryUrl={ad.adLibraryUrl}
-                        />
-                      ))}
-                    </div>
-                  ) : fallbackRefs.length ? (
-                    <div className="offers-ad-copy-list">
-                      {fallbackRefs.map((r) => (
-                        <AdCopyBlock
-                          key={`${r.competitorId}:${r.adId}`}
-                          competitorName={r.competitorName}
-                          title={r.title}
-                          body={r.body}
-                          cta={r.ctaText}
-                          landingPageUrl={r.landingPageUrl}
-                          adLibraryUrl={r.adLibraryUrl}
-                        />
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="empty-hint">No ad references attached to this ladder.</p>
-                  )}
-                </div>
-
-                <div className="offers-meta-row">
-                  <Link
-                    className="ghost-btn"
-                    href={`/search-offers/${encodeURIComponent(job.id)}/${encodeURIComponent(ladder.id)}`}
-                  >
-                    Open ladder details
-                  </Link>
-                </div>
-              </article>
-            );
-              })}
-            </>
-          )}
-        </div>
+        <OfferWorkspace
+          jobId={job.id}
+          offers={ladders}
+          ads={visibleAds}
+          adsLoading={needsRawAds && !adsLoaded}
+        />
       ) : null}
     </section>
   );

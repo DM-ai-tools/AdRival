@@ -234,6 +234,7 @@ export function buildHeroBrief(base: UnifiedBrief, spineCss: string): UnifiedBri
     campaignOffer: payload.campaignOffer,
     competitor: payload.competitor,
     competitorSections: heroSections,
+    competitorForm: payload.competitorForm || null,
     measuredLayout: measured
       ? {
           ...measured,
@@ -243,7 +244,7 @@ export function buildHeroBrief(base: UnifiedBrief, spineCss: string): UnifiedBri
     clientFacts: Array.isArray(payload.clientFacts) ? payload.clientFacts.slice(0, 8) : [],
     assetRegistry: leanAssetRegistry(payload.assetRegistry),
     destinationRegistry: payload.destinationRegistry,
-    imageBudget: Math.min(Number(payload.imageBudget) || 1, 1),
+    imageBudget: Math.min(Number(payload.imageBudget) || 1, 2),
     userFeedback: payload.userFeedback || null,
     rules: [
       "Screenshot (when attached) is AUTHORITATIVE for nav/hero composition — never a generic SaaS template.",
@@ -311,6 +312,12 @@ export function buildBodyBatchBrief(input: {
       priorSections: input.priorSectionSummaries.slice(-6),
     },
     competitorSections: input.batchSections,
+    competitorForm: input.batchSections.some((section) =>
+      Array.isArray(section.components) &&
+      (section.components as Array<{ kind?: string }>).some((component) => component.kind === "form"),
+    )
+      ? payload.competitorForm || null
+      : null,
     measuredLayout: { sections: measuredSlice, incomplete: Boolean((measured as { incomplete?: boolean } | undefined)?.incomplete) },
     clientFacts: Array.isArray(payload.clientFacts) ? payload.clientFacts.slice(0, 10) : [],
     assetRegistry: leanAssetRegistry({
@@ -490,7 +497,7 @@ export function buildUnifiedBrief(input: {
   const inventoryCount = input.inventory.sections.length;
   const maxSections = compact
     ? Math.min(inventoryCount || 12, 12)
-    : Math.min(inventoryCount || 20, 20);
+    : Math.min(inventoryCount || 20, 40);
   const maxComponents = compact ? 6 : 14;
   const maxFacts = compact ? 16 : 40;
   // Keep enough competitor copy so rebuilds match section density (was truncating to ~240 chars).

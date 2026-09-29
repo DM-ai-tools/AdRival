@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getCompetitor } from "@/lib/db";
+import { competitorForList } from "@/lib/competitorView";
 import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
 import { runBillable } from "@/lib/accounting/run";
 import { isCreditError } from "@/lib/accounting/errors";
@@ -39,7 +40,7 @@ export async function POST(request: Request) {
       existing.pageAnalysis.sameLandingPageAds
     ) {
       // Cached: no provider call, so nothing to charge.
-      return NextResponse.json({ competitor: existing, cached: true });
+      return NextResponse.json({ competitor: competitorForList(existing), cached: true });
     }
 
     const competitor = await runBillable(
@@ -53,7 +54,7 @@ export async function POST(request: Request) {
       () => analyzeCompetitorLandingPage(competitorId),
     );
     return NextResponse.json({
-      competitor,
+      competitor: competitor && competitorForList(competitor),
       cached: false,
       chargedTo: user.username,
       sharedProject: access.role !== "owner",

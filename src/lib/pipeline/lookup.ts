@@ -12,8 +12,9 @@ import {
 import { pickCompanyPageMatch } from "../openai/analyzer";
 import { isCreditError } from "../accounting/errors";
 import {
-  saveLookupAd,
+  saveLookupAds,
   saveLookupJob,
+  saveLookupJobProgress,
   isLookupJobSuppressed,
 } from "../db";
 import {
@@ -44,7 +45,7 @@ function updateLookup(job: LookupJob, patch: Partial<LookupJob>) {
 function setProgress(job: LookupJob, progress: Partial<LookupJobProgress>) {
   job.progress = { ...job.progress, ...progress };
   job.updatedAt = new Date().toISOString();
-  saveLookupJob(job);
+  saveLookupJobProgress(job);
 }
 
 function haltIfStopped(job: LookupJob): boolean {
@@ -270,6 +271,7 @@ export async function runCompetitorLookup(
         pages += 1;
         job.progress.pagesScanned += 1;
         const ads = extractAds(response);
+        const pageRecords: LookupAdRecord[] = [];
         cursor = extractCursor(response);
 
         for (const ad of ads) {
@@ -304,10 +306,12 @@ export async function runCompetitorLookup(
             raw: ad as Record<string, unknown>,
             createdAt: new Date().toISOString(),
           };
-          saveLookupAd(record);
+          pageRecords.push(record);
           stored.push(record);
           if (!job.adIds.includes(record.id)) job.adIds.push(record.id);
         }
+        // One store write per page of ads instead of one per ad.
+        saveLookupAds(pageRecords);
 
         setProgress(job, {
           adsFetched: stored.length,

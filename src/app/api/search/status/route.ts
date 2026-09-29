@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getCompetitorsByRun, getJob, getSearchCompetitorAdsByRun } from "@/lib/db";
+import { competitorForList } from "@/lib/competitorView";
 import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
 import { reportRunCredits } from "@/lib/accounting/run";
 import { redactProviderCreditText } from "@/lib/accounting/errors";
@@ -27,7 +28,7 @@ export async function GET(request: Request) {
     }
 
     const competitors = getCompetitorsByRun(jobId).map((competitor) => ({
-      ...competitor,
+      ...competitorForList(competitor),
       pageAnalysis: maskPageAnalysis(competitor.pageAnalysis),
     }));
     const ads = getSearchCompetitorAdsByRun(jobId).map((ad) => ({

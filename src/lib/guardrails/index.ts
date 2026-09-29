@@ -12,6 +12,8 @@ export {
   guardCompetitorLlm,
   guardOfferLadderHeuristic,
   listIndustrySopSummaries,
+  precheckCompetitor,
+  foreignCountryDomain,
   type GuardrailContext,
   type GuardrailDecision,
   type GuardrailMode,

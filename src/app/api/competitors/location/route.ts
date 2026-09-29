@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getCompetitor, getCompetitorsByRun, getJob } from "@/lib/db";
+import { competitorForList } from "@/lib/competitorView";
 import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
 import { runBillable } from "@/lib/accounting/run";
 import { isCreditError } from "@/lib/accounting/errors";
@@ -65,7 +66,7 @@ export async function POST(request: Request) {
         mode: "single",
         competitorId: body.competitorId,
         location,
-        competitor: updated,
+        competitor: updated && competitorForList(updated),
       });
     }
 
@@ -94,7 +95,7 @@ export async function POST(request: Request) {
         mode: "batch",
         runId,
         ...result,
-        competitors: getCompetitorsByRun(runId),
+        competitors: getCompetitorsByRun(runId).map(competitorForList),
       });
     }
 

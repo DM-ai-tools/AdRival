@@ -1,5 +1,38 @@
 # Recreate for my brand — current setup
 
+## How a page is built now (blueprint build)
+
+Building a page runs `runUnifiedRecreation` in `src/lib/pipeline/unified/run.ts`. The steps below come first. The older sections further down describe the earlier content/design paths. They still apply to the review screen and to the fallback used when the competitor page cannot be opened in a browser.
+
+1. **Capture the competitor page** (`unified/blueprint.ts`). One Chromium pass at 1280px wide:
+   - Scrolls the page so lazy content loads, and reveals content that animates in on scroll.
+   - Hides cookie bars and pop-ups.
+   - Records the real sections: hidden modals are skipped, and card titles stay inside their section. For each section it keeps the full text, the number of columns and cards, where images sit, the kind of background (page, tint, soft wash, dark, gradient, photo), the alignment and a readable screenshot crop.
+   - Records the design "shape": heading and body sizes, weights and spacing, section padding, container width, button shape, card corners and shadows, and form field style.
+   - Records the header and footer.
+   - Records every form after its scripts have loaded, including forms inside embedded frames and custom dropdowns. It keeps the real labels (a placeholder like "John" becomes "First name"), dropdown options and radio or checkbox choices. It drops spam-trap fields. It tells a grouped form from a multi-step form (one step at a time), and a booking widget from a normal form.
+   - If this capture fails, the older outline path is used.
+2. **Design system** (`unified/designSystem.ts`). One stylesheet: the competitor's shape with the client's colours and fonts, and the fonts are loaded from Google Fonts. It defines one set of classes for sections, bands, grids, cards, buttons, FAQ, header, footer and form fields. Every section uses it, so the page reads as one design.
+3. **Write the page** (`unified/generateBlueprint.ts`).
+   - One call writes the header, hero and footer from their crops.
+   - Body sections are written two at a time, three calls in parallel. Each call gets its own crops, the competitor's text for structure and length only, word and card targets, its own share of the client facts, and a list of competitor headings and button labels it must not reuse.
+   - A section may add a little layout CSS. It is scoped to that section and cannot change colours or fonts elsewhere (`unified/fragmentCss.ts`).
+4. **Form** (`unified/leadForm.ts`).
+   - Rebuilt from the captured fields, with the shared form styles, in the section where the competitor had it.
+   - Multi-step forms keep their steps, with Next and Back and a check on each step.
+   - Submitting checks required fields and shows a thank-you message. Set `data-endpoint` on the form to send submissions as JSON to a CRM.
+5. **Images**. One image slot wherever the competitor shows a photo, hero first, at most 6 per page, generated 3 at a time. A missing image becomes a brand-coloured panel, not a grey box.
+6. **Header, footer and packaging**.
+   - The model's header and footer are kept unless they are weak.
+   - Menu links point to this page's own sections (Services, How it works, Results, FAQ, Contact), using the competitor's number of menu items. After those come the client's real site links. The competitor's menu labels are never reused.
+7. **Compare with the competitor** (`unified/fidelity.ts`).
+   - The finished page is rendered and each section is measured the same way the competitor's was.
+   - Each section is flagged if it is missing, much shorter, or has too little copy. It is also flagged for the wrong card or column count, a light band where the competitor's is dark (or the reverse), a missing or short form, or wording copied from the competitor.
+   - Up to 4 of the worst sections are rewritten with those problems as feedback. The rewrite is kept only if the score does not drop.
+   - The result is saved as `qualityReport` and shown on the recreate page as "Match with the competitor page".
+
+---
+
 This file describes what the app does today, from the moment someone clicks **Recreate for my brand** until a landing page can be copied or downloaded.
 
 The work has two phases:

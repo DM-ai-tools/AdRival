@@ -1,16 +1,18 @@
 "use client";
 
+import { statusLabel } from "@/lib/progressLabels";
 import { useMemo, useState } from "react";
 import type {
   FunnelStage,
+  LookupCoreOfferLadder,
   LookupJob,
   LookupOfferAdLeaf,
   LookupOffersReport,
   LookupServiceOfferingNode,
   LookupUniqueLandingPage,
-  OfferTicketTier,
 } from "@/lib/types";
 import { splitLaddersByOffer } from "./OfferLadderFlow";
+import { OfferWorkspace } from "./OfferWorkspace";
 
 type DashSection =
   | "overview"
@@ -45,11 +47,6 @@ function FunnelBadge({ stage }: { stage?: FunnelStage | null }) {
   return (
     <span className={`offers-funnel-badge ${mod}`.trim()}>{value}</span>
   );
-}
-
-function TicketBadge({ tier }: { tier?: OfferTicketTier | null }) {
-  const value = tier || "unknown";
-  return <span className="offers-ticket-badge">{value}</span>;
 }
 
 function AdLeafCard({ ad }: { ad: LookupOfferAdLeaf }) {
@@ -383,7 +380,7 @@ export function LookupOffersDashboard({
         </div>
         <div className="offers-dash-actions">
           <span className={`status-pill status-${report.status}`}>
-            {report.status}
+            {statusLabel(report.status)}
           </span>
           {onRegenerate ? (
             <button
@@ -676,7 +673,7 @@ export function LookupOffersDashboard({
                     <span className="offers-page-row-meta">
                       <FunnelBadge stage={p.funnelStage} />
                       <span className={`status-pill status-${p.status}`}>
-                        {p.status}
+                        {statusLabel(p.status)}
                       </span>
                     </span>
                   </button>
@@ -704,7 +701,7 @@ export function LookupOffersDashboard({
                   <span
                     className={`status-pill status-${selectedPage.status}`}
                   >
-                    {selectedPage.status}
+                    {statusLabel(selectedPage.status)}
                   </span>
                 </div>
                 <p className="muted">
@@ -911,73 +908,30 @@ export function LookupOffersDashboard({
           <section className="offers-block">
             <h2>Offer value ladders</h2>
             <p className="muted offers-block-lead">
-              One ladder per unique landing-page (core) offer. Ad-copy offers are
-              mapped under each core.
-              {report.valueLadder?.summary
-                ? ` · ${report.valueLadder.summary}`
-                : ""}
+              Every offer found, cheapest first. Select one to see its details and the ad copy behind it.
+              {report.valueLadder?.summary ? ` ${report.valueLadder.summary}` : ""}
             </p>
             {coreLadders.length === 0 ? (
               <EmptyRefreshHint label="No value ladder found." />
             ) : (
-              <div className="offers-core-ladders">
-                {coreLadders.map((ladder) => (
-                  <article key={ladder.id} className="offers-core-ladder">
-                    <header className="offers-core-ladder-head">
-                      <div className="offers-meta-row">
-                        <span className="offers-card-kicker">
-                          Core {ladder.rank}
-                        </span>
-                        <TicketBadge tier={ladder.ticketTier} />
-                        <FunnelBadge stage={ladder.funnelStage} />
-                        <span className="muted">
-                          {ladder.adCount} ad
-                          {ladder.adCount === 1 ? "" : "s"} on LP
-                        </span>
-                      </div>
-                      <h3>{ladder.coreOffer}</h3>
-                      {ladder.details ? <p>{ladder.details}</p> : null}
-                      <div className="offers-meta-row">
-                        {ladder.cta ? <span>CTA: {ladder.cta}</span> : null}
-                        {ladder.pricing ? (
-                          <span>Pricing: {ladder.pricing}</span>
-                        ) : null}
-                        {ladder.landingPageUrl ? (
-                          <a
-                            href={ladder.landingPageUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            {shortUrl(ladder.landingPageUrl).slice(0, 48)}
-                          </a>
-                        ) : null}
-                      </div>
-                    </header>
-
-                    {ladder.emptyMessage || ladder.adOffers.length === 0 ? (
-                      <p className="offers-core-ladder-empty">
-                        {ladder.emptyMessage ||
-                          "No value ladder found for this core offer"}
-                      </p>
-                    ) : (
-                      <div className="offers-ladder offers-core-ladder-ads">
-                        <p className="muted offers-block-lead">
-                          Mapped ad-copy offers
-                        </p>
-                        {ladder.adOffers.map((ad) => (
-                          <div key={`${ladder.id}-${ad.creativeId}`}>
-                            <div
-                              className="offers-ladder-connector"
-                              aria-hidden
-                            />
-                            <AdLeafCard ad={ad} />
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </article>
-                ))}
-              </div>
+              <OfferWorkspace
+                offers={coreLadders.map((l) => {
+                  // Older reports store flat steps without these fields.
+                  const ladder = l as LookupCoreOfferLadder;
+                  return ladder.sourceCompetitors?.length
+                    ? ladder
+                    : { ...ladder, sourceCompetitors: [job.selectedPage?.name || job.queryName] };
+                })}
+                getAds={(offer) =>
+                  (offer.adOffers || []).map((ad) => ({
+                    id: `${offer.id}-${ad.creativeId}`,
+                    title: ad.hook || ad.offer,
+                    body: ad.sampleCopy || ad.offer,
+                    ctaText: ad.cta,
+                    offerMatch: true,
+                  }))
+                }
+              />
             )}
           </section>
         </div>

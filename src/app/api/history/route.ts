@@ -5,6 +5,7 @@ import {
   getJob,
   listHistoryRuns,
 } from "@/lib/db";
+import { competitorForList } from "@/lib/competitorView";
 import {
   errorResponse,
   requireUser,
@@ -27,7 +28,7 @@ export async function GET(request: Request) {
       if (!job) {
         return NextResponse.json({ error: "Run not found" }, { status: 404 });
       }
-      const competitors = getCompetitorsByRun(runId);
+      const competitors = getCompetitorsByRun(runId).map(competitorForList);
       return NextResponse.json({
         job,
         competitors,

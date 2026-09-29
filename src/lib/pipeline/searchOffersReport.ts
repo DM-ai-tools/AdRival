@@ -21,6 +21,7 @@ import {
   getLookupJob,
   isSearchJobSuppressed,
   saveJob,
+  saveJobProgress,
   saveLookupAds,
   saveLookupJob,
   saveSearchCompetitorAds,
@@ -39,6 +40,9 @@ import type { AdPlatform } from "../platforms";
 import { adRunsOnFacebook, adRunsOnInstagram } from "../sociavault/client";
 import { mapGoogleCreativeToCandidate, mapLinkedInAdToCandidate } from "./adMappers";
 import { runLookupOffersReportPhase } from "./lookupOffersReport";
+import { searchedServiceFocus, type ServiceFocus } from "./offerServiceFocus";
+import { isJunkAdCopy, junkLandingReason, offerRelevance } from "./offerRelevance";
+import { isCreditError } from "../accounting/errors";
 import {
   buildGuardrailContext,
   filterOfferLaddersWithGuardrail,
@@ -46,6 +50,12 @@ import {
 
 const MAX_COMPETITORS = 10;
 const MAX_ADS_PER_COMPETITOR = 18;
+/** Meta returns plenty of ads per page, so fetch more and analyse the best. */
+const META_MAX_ADS_PER_COMPETITOR = 36;
+/** Keep at least this many ads per competitor even when few match well. */
+const MIN_ADS_PER_COMPETITOR = 3;
+/** Identical copy beyond this many copies only crowds out other offers. */
+const MAX_SAME_COPY = 2;
 const ADS_PER_COMPETITOR_FOR_ANALYSIS = 12;
 const FETCH_CONCURRENCY = 4;
 const META_PAGES_PER_COUNTRY = 3;
@@ -82,7 +92,9 @@ function updateProgress(
 ) {
   job.progress = { ...job.progress, ...patch };
   job.updatedAt = new Date().toISOString();
-  saveJob(job);
+  // Throttled; the final "done"/failed update changes the stage and is
+  // written at once.
+  saveJobProgress(job);
 }
 
 function toLookupAd(
@@ -286,9 +298,11 @@ async function fetchMetaAds(
     let cursor: string | null = null;
     let pages = 0;
     do {
-      let response;
-      try {
-        response = await getCompanyAds({
+      // Active ads only: the report is about what they sell now. A failed
+      // request is retried once; after that this competitor keeps the ads
+      // already fetched instead of falling back to old, inactive ones.
+      const request = () =>
+        getCompanyAds({
           pageId: competitor.pageId,
           status: "ACTIVE",
           country,
@@ -296,15 +310,18 @@ async function fetchMetaAds(
           cursor,
           trim: false,
         });
-      } catch {
-        response = await getCompanyAds({
-          pageId: competitor.pageId,
-          status: "ALL",
-          country,
-          language: "EN",
-          cursor,
-          trim: false,
-        });
+      let response;
+      try {
+        response = await request();
+      } catch (err) {
+        if (isCreditError(err)) throw err;
+        try {
+          response = await request();
+        } catch (retryErr) {
+          if (isCreditError(retryErr)) throw retryErr;
+          console.warn("[searchOffers] ad fetch failed for", competitor.pageName, retryErr);
+          break;
+        }
       }
       pages += 1;
       const ads = extractAds(response);
@@ -339,11 +356,11 @@ async function fetchMetaAds(
           },
           createdAt: new Date().toISOString(),
         });
-        if (out.length >= MAX_ADS_PER_COMPETITOR) break;
+        if (out.length >= META_MAX_ADS_PER_COMPETITOR) break;
       }
-      if (out.length >= MAX_ADS_PER_COMPETITOR) break;
+      if (out.length >= META_MAX_ADS_PER_COMPETITOR) break;
     } while (cursor && pages < META_PAGES_PER_COUNTRY);
-    if (out.length >= MAX_ADS_PER_COMPETITOR) break;
+    if (out.length >= META_MAX_ADS_PER_COMPETITOR) break;
   }
   return out;
 }
@@ -515,18 +532,50 @@ async function fetchAndCacheAdsForCompetitor(
   return ads;
 }
 
-function pickAdsForAnalysis(
+/**
+ * Choose which of a competitor's ads are analysed. Ads that sell the searched
+ * service come first; hiring posts, social-profile destinations and ads for a
+ * different service go to the back, and repeated copy is capped so the slots
+ * cover different offers. Active, recent ads with a real landing page win ties.
+ */
+export function pickAdsForAnalysis(
   ads: SearchCompetitorAdRecord[],
+  focus: ServiceFocus,
   limit = ADS_PER_COMPETITOR_FOR_ANALYSIS,
 ): SearchCompetitorAdRecord[] {
-  return [...ads]
-    .sort((a, b) => {
-      const lp = (x: SearchCompetitorAdRecord) => (x.landingPageUrl ? 1 : 0);
-      const copy = (x: SearchCompetitorAdRecord) =>
-        (x.body?.length || 0) + (x.title?.length || 0);
-      return lp(b) - lp(a) || copy(b) - copy(a);
-    })
-    .slice(0, limit);
+  const now = Date.now();
+  const scored = ads.map((ad) => {
+    const copy = `${ad.title || ""} ${ad.body || ""}`;
+    const lpPath = (ad.landingPageUrl || "").replace(/^https?:\/\/[^/]+/i, "").replace(/[-_/]+/g, " ");
+    const relevance = offerRelevance(`${copy} ${ad.ctaText || ""} ${lpPath}`, focus);
+    const junk = isJunkAdCopy(copy) || Boolean(junkLandingReason(ad.landingPageUrl));
+    const started = Date.parse(ad.startDateString || "");
+    const recent = Number.isFinite(started) && now - started < 90 * 86_400_000;
+    const score =
+      relevance * 2 +
+      (junk ? -2 : 0) +
+      (ad.isActive ? 0.3 : 0) +
+      (ad.landingPageUrl && !junk ? 0.4 : 0) +
+      (recent ? 0.2 : 0) +
+      (copy.trim().length >= 40 ? 0.1 : 0);
+    const key = copy.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim().slice(0, 120);
+    return { ad, score, relevance, junk, key };
+  });
+  scored.sort((a, b) => b.score - a.score);
+
+  const picked: typeof scored = [];
+  const copies = new Map<string, number>();
+  for (const item of scored) {
+    if (picked.length >= limit) break;
+    const n = copies.get(item.key) ?? 0;
+    if (item.key && n >= MAX_SAME_COPY) continue;
+    // Clearly another service or not an offer at all: leave it out while
+    // there are enough better ads.
+    if ((item.relevance < 0 || item.junk) && picked.length >= MIN_ADS_PER_COMPETITOR) continue;
+    copies.set(item.key, n + 1);
+    picked.push(item);
+  }
+  return picked.map((item) => item.ad);
 }
 
 function failOffers(job: SearchJob, message: string): SearchJob {
@@ -636,11 +685,16 @@ export async function runSearchOffersReportPhase(
       return failOffers(job, "No ads fetched for the selected competitors.");
     }
 
+    const focus = searchedServiceFocus(
+      job.keywords?.length ? job.keywords : job.keyword ? [job.keyword] : [],
+      job.selectedCategory?.label || null,
+    );
     const analysisAds: SearchCompetitorAdRecord[] = [];
     for (const c of competitors) {
       analysisAds.push(
         ...pickAdsForAnalysis(
           cached.filter((a) => a.competitorId === c.id),
+          focus,
         ),
       );
     }
@@ -701,6 +755,10 @@ export async function runSearchOffersReportPhase(
             : [],
         selectedCategory: job.selectedCategory || null,
         businessProfile: job.businessProfile || null,
+      },
+      guardrails: {
+        skip: Boolean(job.skipGuardrails),
+        override: job.guardrailOverride || null,
       },
       onProgress: (tick) => {
         if (isSearchJobSuppressed(runId)) return;

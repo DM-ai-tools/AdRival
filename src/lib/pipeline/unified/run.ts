@@ -35,6 +35,13 @@ import { verifyAndRepairUnifiedPage } from "./verifyPage";
 import { embedRemoteImagesInHtml } from "../design/packageHtml";
 import { captureCompetitorScreenshotTiles } from "../competitorScreenshots";
 import {
+  captureCompetitorBlueprint,
+  inventoryFromBlueprint,
+  isUsableBlueprint,
+  type CompetitorBlueprint,
+} from "./blueprint";
+import { buildFromBlueprint } from "./blueprintRun";
+import {
   beginUnifiedAbort,
   endUnifiedAbort,
   abortUnifiedRun,
@@ -384,6 +391,8 @@ export async function runUnifiedRecreation(
   const abortSignal = beginUnifiedAbort(competitorId);
   /** Last complete HTML from this run, kept if a later validation step fails. */
   let salvageHtml = "";
+  /** Set when the detailed browser capture could not be used and the simpler rebuild ran. */
+  let captureFallbackNote: string | null = null;
   const keyword = job.keywords?.[0] || job.keyword.split(",")[0]?.trim() || job.keyword;
   const sourceUrl = competitor.pageAnalysis.analyzedUrl;
   let page = basePage({ competitor, job, businessUrl, keyword, sourceUrl });
@@ -411,6 +420,30 @@ export async function runUnifiedRecreation(
       : null;
 
     const competitorPrep = (async () => {
+      // Preferred: one rendered pass that captures real sections, their
+      // screenshots, the design shape and fully loaded forms.
+      let blueprint: CompetitorBlueprint | null = null;
+      try {
+        page = persist(competitorId, page, stages, "analyzing_competitor", "Capturing the competitor page section by section…");
+        // Long pages take about a minute alone and longer while the brand research runs alongside.
+        blueprint = await captureCompetitorBlueprint(sourceUrl, { timeoutMs: 180_000 });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        captureFallbackNote = `The detailed competitor capture was unavailable (${sanitizeClientFacingText(message).slice(0, 120)}), so this page used the simpler rebuild. Rebuild the page to try the detailed capture again.`;
+        page = persist(competitorId, page, stages, "analyzing_competitor", `Detailed capture unavailable (${sanitizeClientFacingText(message).slice(0, 120)}). Using the saved page analysis…`);
+      }
+      if (blueprint && !isUsableBlueprint(blueprint) && !captureFallbackNote) {
+        captureFallbackNote = "The competitor page showed too few sections in the browser, so this page used the simpler rebuild.";
+      }
+      if (isUsableBlueprint(blueprint)) {
+        return {
+          inventory: inventoryFromBlueprint(blueprint),
+          layout: null,
+          competitorChrome: null as CompetitorChrome | null,
+          blueprint: blueprint as CompetitorBlueprint | null,
+        };
+      }
+
       let inventory = page.contentPack?.inventory || null;
       const savedArchitecture = competitor.pageAnalysis?.pageArchitecture?.sections || [];
       const hasOfferArchitecture = competitor.pageAnalysis?.status === "completed" && savedArchitecture.length >= 2;
@@ -555,7 +588,7 @@ export async function runUnifiedRecreation(
           ],
         };
       }
-      return { inventory: inventory!, layout, competitorChrome };
+      return { inventory: inventory!, layout, competitorChrome, blueprint: null as CompetitorBlueprint | null };
     })();
 
     const clientPrep = (async () => {
@@ -611,14 +644,21 @@ export async function runUnifiedRecreation(
       return { brand, assets, evidence };
     })();
 
-    const [{ inventory, layout, competitorChrome }, client] = await Promise.all([
+    const [{ inventory, layout, competitorChrome, blueprint }, client] = await Promise.all([
       competitorPrep,
       clientPrep,
     ]);
     const { brand, evidence } = client;
     let { assets } = client;
 
-    stages = markStage(stages, "analyzing_competitor", "done", `${inventory.sections.length} sections identified`);
+    stages = markStage(
+      stages,
+      "analyzing_competitor",
+      "done",
+      blueprint
+        ? `${inventory.sections.length} sections${blueprint.forms.length ? `, ${blueprint.forms.length} form${blueprint.forms.length === 1 ? "" : "s"}` : ""} captured`
+        : `${inventory.sections.length} sections identified`,
+    );
     page = persist(competitorId, page, stages, "analyzing_competitor", "Competitor page analysed", {
       progress: {
         ...page.progress!,
@@ -699,13 +739,11 @@ export async function runUnifiedRecreation(
         const src = (image.src || "").trim();
         if (!src) return false;
         if (identityUrl && src === identityUrl) return false;
-        if (/favicon|apple-touch|sprite|pixel|1x1/i.test(src)) return false;
-        // Prefer logo marks; include non-favicon icons that often appear in trust strips.
-        if (image.kind === "logo") return true;
-        if (image.kind === "icon" && /^https?:\/\//i.test(src) && !/favicon/i.test(src)) {
-          return true;
-        }
-        return false;
+        if (/favicon|apple-touch|sprite|pixel|1x1|menu|hamburger|offcanvas|burger|arrow|chevron|close|search|icon[-_]/i.test(`${src} ${image.alt || ""}`)) return false;
+        // The client's own logo variants are not proof of anyone else.
+        const clientWord = (page.businessName || "").toLowerCase().split(/\s+/)[0] || "";
+        if (clientWord.length >= 3 && `${src} ${image.alt || ""}`.toLowerCase().includes(clientWord)) return false;
+        return image.kind === "logo";
       })
       .slice(0, 12);
     const proofLogos: Array<{ src: string; alt: string }> = [];
@@ -723,6 +761,101 @@ export async function runUnifiedRecreation(
       seenProof.add(remote);
       proofLogos.push({ src, alt: image.alt || "Partner logo" });
       if (proofLogos.length >= 8) break;
+    }
+
+    if (blueprint) {
+      stages = markStage(stages, "preparing_brief", "done", "Design system ready");
+      stages = markStage(stages, "creating_page", "indeterminate", "Writing sections…");
+      page = persist(competitorId, { ...page, status: "design_pending" }, stages, "creating_page", "Writing the page section by section…");
+      const built = await buildFromBlueprint({
+        blueprint,
+        competitorId,
+        competitorName: competitor.pageName,
+        sourceUrl,
+        clientUrl: businessUrl,
+        clientName: page.businessName || hostOf(businessUrl),
+        keyword,
+        colors: brand.colors,
+        brandDesign: brand.design || job.businessProfile?.brandDesign || null,
+        assets,
+        profile,
+        evidence,
+        campaignOffer: campaignOffer as Record<string, unknown> | null,
+        identityLogoDataUri,
+        logoUrl: logo.url || assets?.logoUrl || null,
+        proofLogos,
+        previousImages: page.generatedImages || [],
+        userFeedback: options.userFeedback || null,
+        signal: abortSignal,
+        onProgress: (message) => {
+          if (abortSignal.aborted) return;
+          const phase: UnifiedStageId = /image/i.test(message)
+            ? "generating_images"
+            : /compar|refin/i.test(message)
+              ? "checking"
+              : "creating_page";
+          if (phase === "generating_images") {
+            stages = markStage(stages, "creating_page", "done", "Sections written");
+            stages = markStage(stages, "generating_images", "active", message);
+          } else if (phase === "checking") {
+            stages = markStage(stages, "generating_images", "done");
+            stages = markStage(stages, "checking", "active", message);
+          } else {
+            stages = markStage(stages, "creating_page", "indeterminate", message);
+          }
+          page = persist(competitorId, page, stages, phase, message);
+        },
+      });
+      salvageHtml = built.html;
+      const placeholders = built.imageReport.placeholders > 0;
+      const report = built.report;
+      const publishBlockers = [
+        ...built.unresolved,
+        ...(placeholders ? ["Page ready with image placeholders. Generate missing images when credits allow."] : []),
+        ...(report && report.score < 0.8 ? report.summary : []),
+        ...(report?.content.copiedSentences.length ? [`Rewrite ${report.content.copiedSentences.length} sentence(s) copied from the competitor.`] : []),
+      ];
+      stages = markStage(stages, "creating_page", "done");
+      stages = markStage(stages, "generating_images", "done", `${built.imageReport.completed}/${built.imageReport.planned} images`);
+      stages = markStage(stages, "checking", "done", report ? `${Math.round(report.score * 100)}% match` : undefined);
+      stages = markStage(stages, "ready", "done");
+      page = persist(
+        competitorId,
+        {
+          ...page,
+          status: "completed",
+          html: built.html,
+          generatedImages: built.imageReport.images,
+          brandColors: brand.colors,
+          differentiationNotes: [`Blueprint build (${UNIFIED_PIPELINE_VERSION}).`, ...built.warnings.slice(0, 12)].join(" "),
+          publishReady: !placeholders && publishBlockers.length === 0,
+          publishBlockers: publishBlockers.slice(0, 12),
+          pipelineVersion: UNIFIED_PIPELINE_VERSION,
+          qualityReport: report
+            ? {
+                score: report.score,
+                summary: report.summary,
+                sections: report.sections.map((s) => ({ id: s.id, kind: s.kind, problems: s.problems })),
+                form: report.form,
+                repairedSections: built.repairedSections,
+                capture: {
+                  sections: blueprint.sections.length,
+                  forms: blueprint.forms.length,
+                  screenshots: blueprint.sections.filter((s) => s.crop).length,
+                },
+              }
+            : null,
+          error: null,
+          userFeedback: options.userFeedback || page.userFeedback || null,
+        },
+        stages,
+        "ready",
+        placeholders ? "Page ready with image placeholders" : "Ready",
+      );
+      const latest = getCompetitor(competitorId);
+      if (!latest) throw new Error("Failed to save recreated page");
+      endUnifiedAbort(competitorId, abortSignal);
+      return latest;
     }
 
     // Fold + full-page screenshots for accurate section replication (quality over speed).
@@ -1168,6 +1301,7 @@ export async function runUnifiedRecreation(
     salvageHtml = validated.html || html;
     const placeholders = imageReport.placeholders > 0;
     const publishBlockers = [
+      ...(captureFallbackNote ? [captureFallbackNote] : []),
       ...generated.response.unresolvedRequirements,
       ...(placeholders ? ["Page ready with image placeholders. Generate missing images when credits allow."] : []),
       ...validated.warnings,

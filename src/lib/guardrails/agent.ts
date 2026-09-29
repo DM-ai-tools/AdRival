@@ -43,7 +43,7 @@ function compile(patterns: string[]): RegExp[] {
 }
 
 function haystack(parts: Array<string | null | undefined>): string {
-  return parts.filter(Boolean).join("\n").slice(0, 4000);
+  return parts.filter(Boolean).join("\n").slice(0, 8000);
 }
 
 function matchesAny(text: string, patterns: RegExp[]): string | null {
@@ -107,12 +107,13 @@ export function guardCompetitorHeuristic(
     };
   }
 
+  // The model's own reason is not scanned: "a real agency, not a SaaS tool"
+  // would otherwise reject the competitor it just approved.
   const text = haystack([
     candidate.pageName,
     candidate.adText,
     candidate.landingPageUrl,
     ...(candidate.services || []),
-    candidate.llmReason,
   ]);
 
   // Override mode: still block obvious junk unless user explicitly seeks it
@@ -191,6 +192,138 @@ export function guardCompetitorHeuristic(
     source: "sop",
     sopId: sop.id,
   };
+}
+
+/** Facebook page categories that are never a service business's competitor. */
+const NON_PROVIDER_PAGE_CATEGORY =
+  /\b(software|app page|video game|media\/news company|news (&|and) media|newspaper|magazine|publisher|blogger|personal blog|podcast|education website|e-?learning|online course|internet company|web ?hosting|computers? (&|and) internet website)\b/i;
+
+/**
+ * Landing pages that teach or sell software rather than the service. Blog and
+ * resource pages are not listed: real providers promote their articles too.
+ */
+const CONTENT_OR_PRODUCT_PATH =
+  /\/(academy|courses?|tutorials?|plugins?|extensions?|download|downloads|pricing\/(?:residential|datacenter|proxies)|what-is-[a-z0-9-]+)(\/|$|\?)/i;
+
+/** Country-code domain endings → ISO country. Generic endings (.com, .io) are unknown. */
+const CCTLD_COUNTRY: Array<[RegExp, string]> = [
+  [/\.(com?\.)?au$/, "AU"],
+  [/\.(co\.)?nz$/, "NZ"],
+  [/\.(co\.)?uk$/, "GB"],
+  [/\.(co\.)?in$/, "IN"],
+  [/\.ca$/, "CA"],
+  [/\.ie$/, "IE"],
+  [/\.(com\.)?sg$/, "SG"],
+  [/\.(co\.)?za$/, "ZA"],
+  [/\.ae$/, "AE"],
+  [/\.(com\.)?ph$/, "PH"],
+  [/\.(com\.)?pk$/, "PK"],
+  [/\.(com\.)?my$/, "MY"],
+  [/\.de$/, "DE"],
+  [/\.fr$/, "FR"],
+  [/\.es$/, "ES"],
+  [/\.it$/, "IT"],
+  [/\.nl$/, "NL"],
+  [/\.(com\.)?br$/, "BR"],
+  [/\.(com\.)?mx$/, "MX"],
+  [/\.us$/, "US"],
+];
+
+/**
+ * The country a landing domain clearly belongs to, when that is not one of
+ * the run's countries. Null when the domain is generic or matches.
+ */
+export function foreignCountryDomain(
+  urls: Array<string | null | undefined>,
+  targetCountries: string[],
+): string | null {
+  const targets = new Set(
+    targetCountries
+      .filter((c): c is string => typeof c === "string" && /^[a-z]{2}$/i.test(c.trim()))
+      .map((c) => c.trim().toUpperCase().replace(/^UK$/, "GB")),
+  );
+  if (!targets.size) return null;
+  const found = new Set<string>();
+  for (const u of urls) {
+    if (!u) continue;
+    let host = "";
+    try {
+      host = new URL(u).hostname.toLowerCase();
+    } catch {
+      continue;
+    }
+    if (/(^|\.)(facebook|fb|instagram|linkedin|youtube|google|bit|linktr)\./.test(host)) continue;
+    const hit = CCTLD_COUNTRY.find(([re]) => re.test(host));
+    if (!hit) return null; // any generic domain → unknown, not foreign
+    found.add(hit[1]);
+  }
+  if (!found.size) return null;
+  for (const c of found) if (targets.has(c)) return null;
+  return [...found][0];
+}
+
+/**
+ * Cheap check before the AI review — no network. Rejects an advertiser whose
+ * ads, page categories or landing pages show it is not the same kind of
+ * business, so the review is not spent on it.
+ */
+export function precheckCompetitor(
+  ctx: GuardrailContext,
+  candidate: {
+    pageName: string;
+    adText?: string | null;
+    landingPageUrls?: Array<string | null | undefined>;
+    pageCategories?: string[] | null;
+    /** The run's countries; a landing domain from elsewhere is rejected. */
+    targetCountries?: string[] | null;
+  },
+): GuardrailDecision {
+  const sop = getSopForContext(ctx);
+  const landing = (candidate.landingPageUrls || []).filter(Boolean) as string[];
+  const foreign = ctx.skip ? null : foreignCountryDomain(landing, candidate.targetCountries || []);
+  if (foreign) {
+    return {
+      ok: false,
+      reason: `Its website is a ${foreign} site, outside the searched country`,
+      source: "heuristic",
+      sopId: sop.id,
+    };
+  }
+  const heuristic = guardCompetitorHeuristic(ctx, {
+    pageName: candidate.pageName,
+    adText: candidate.adText,
+    landingPageUrl: landing.join("\n"),
+  });
+  if (!heuristic.ok || ctx.skip || ctx.override?.enabled) return heuristic;
+  if (sop.id === "saas_b2b" || sop.id === "education") return heuristic;
+
+  const categories = (candidate.pageCategories || []).join(", ");
+  if (categories && NON_PROVIDER_PAGE_CATEGORY.test(categories)) {
+    return {
+      ok: false,
+      reason: `Facebook lists the page as ${categories}, not a ${sop.label.toLowerCase()} business`,
+      source: "heuristic",
+      sopId: sop.id,
+    };
+  }
+  // Only when every ad points at content or software pages: a real provider
+  // that promotes one blog post still has service pages in its other ads.
+  const paths = landing.map((u) => {
+    try {
+      return new URL(u).pathname;
+    } catch {
+      return u;
+    }
+  });
+  if (paths.length && paths.every((p) => CONTENT_OR_PRODUCT_PATH.test(p))) {
+    return {
+      ok: false,
+      reason: "Every ad links to a guide, blog or software page rather than a service page",
+      source: "heuristic",
+      sopId: sop.id,
+    };
+  }
+  return heuristic;
 }
 
 /**

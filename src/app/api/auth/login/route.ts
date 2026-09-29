@@ -13,7 +13,7 @@ import {
   recordFailedLogin,
 } from "@/lib/auth/rateLimit";
 import { recordAudit } from "@/lib/accounting/records";
-import { getUserByUsername, toPublicUser } from "@/lib/db";
+import { getUserByUsername, toPublicUser, updateUser } from "@/lib/db";
 
 export const runtime = "nodejs";
 
@@ -61,6 +61,7 @@ export async function POST(request: Request) {
   }
 
   clearLoginAttempts(username);
+  updateUser(user.id, { lastLoginAt: new Date().toISOString() });
   const publicUser = toPublicUser(user);
   const token = await createSessionToken({
     ...publicUser,

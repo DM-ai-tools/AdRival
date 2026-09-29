@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getLookupAds, getLookupJob } from "@/lib/db";
+import { clearLookupJobSuppression, getLookupAds, getLookupJob } from "@/lib/db";
 import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
 import { reportRunCredits, runBillable } from "@/lib/accounting/run";
 import { isCreditError } from "@/lib/accounting/errors";
@@ -47,6 +47,10 @@ export async function POST(request: Request) {
     ) {
       return NextResponse.json({ job, ads, cached: true });
     }
+
+    // Clear a stop flag left by an earlier Stop so the report can run again,
+    // unless the lookup is still fetching ads.
+    if (job.status !== "running") clearLookupJobSuppression(lookupId);
 
     const updated = await runBillable(
       {

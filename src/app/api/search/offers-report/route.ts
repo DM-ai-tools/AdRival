@@ -1,12 +1,16 @@
 import { after } from "next/server";
 import { NextResponse } from "next/server";
-import { getCompetitorsByRun, getJob, saveJob } from "@/lib/db";
+import { clearSearchJobSuppression, getCompetitorsByRun, getJob, saveJob } from "@/lib/db";
+import { competitorForList } from "@/lib/competitorView";
 import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
 import { precheckRun, runBillable } from "@/lib/accounting/run";
 import { isCreditError } from "@/lib/accounting/errors";
 import { runSearchOffersReportPhase } from "@/lib/pipeline/searchOffersReport";
 
 export const runtime = "nodejs";
+
+/** An offers report with no progress for this long is treated as lost. */
+const OFFERS_STALE_MS = 15 * 60 * 1000;
 export const maxDuration = 300;
 
 /**
@@ -53,10 +57,14 @@ export async function POST(request: Request) {
       );
     }
 
-    if (job.progress.stage === "analyzing_offers") {
+    // Already building: report that, unless it has gone quiet for so long that
+    // the work was lost (e.g. the server restarted mid-report). Then allow a
+    // fresh start rather than leaving the report stuck forever.
+    const quietFor = Date.now() - Date.parse(job.updatedAt || "");
+    if (job.progress.stage === "analyzing_offers" && !(quietFor > OFFERS_STALE_MS)) {
       return NextResponse.json({
         job,
-        competitors,
+        competitors: competitors.map(competitorForList),
         started: true,
       });
     }
@@ -83,9 +91,15 @@ export async function POST(request: Request) {
       job.offersCompetitorIds = null;
     }
 
+    // A Stop pressed earlier (on this report, or anything else in the run)
+    // leaves a stop flag that makes the offers phase exit at once. Clear it,
+    // unless the competitor search itself is still running.
+    if (job.status !== "running") clearSearchJobSuppression(jobId);
+
     const selectedCount = job.offersCompetitorIds?.length || competitors.length;
     job.progress = {
       ...job.progress,
+      stopRequested: job.status !== "running" ? false : job.progress.stopRequested,
       stage: "analyzing_offers",
       offersPhase: "starting",
       offersDone: 0,
@@ -154,7 +168,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       job: getJob(jobId),
-      competitors,
+      competitors: competitors.map(competitorForList),
       started: true,
       chargedTo: user.username,
     });

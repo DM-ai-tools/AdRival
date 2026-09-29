@@ -1,7 +1,15 @@
-import { NextResponse } from "next/server";
-import { getCompetitor, getCompetitorsByRun, getJob } from "@/lib/db";
+import { after, NextResponse } from "next/server";
+import {
+  clearSearchJobSuppression,
+  getCompetitor,
+  getCompetitorsByRun,
+  getJob,
+  saveJob,
+  updateJob,
+} from "@/lib/db";
+import { competitorForList } from "@/lib/competitorView";
 import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
-import { runBillable } from "@/lib/accounting/run";
+import { precheckRun, runBillable } from "@/lib/accounting/run";
 import { isCreditError } from "@/lib/accounting/errors";
 import {
   runBrandReviewForCompetitor,
@@ -53,7 +61,7 @@ export async function POST(request: Request) {
         mode: "single",
         competitorId: body.competitorId,
         brand,
-        competitor: updated,
+        competitor: updated && competitorForList(updated),
       });
     }
 
@@ -64,24 +72,58 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "Run not found" }, { status: 404 });
       }
       const runId = body.runId;
-      const result = await runBillable(
-        {
-          user,
-          operation: "search.brand_review_batch",
-          projectKind: "search",
-          projectId: runId,
-          runId,
-        },
-        () => runBrandReviewForJob(runId, { force: body.force !== false }),
+      // Refuse an unfunded run before anything starts, as the synchronous
+      // version did through runBillable.
+      const precheck = precheckRun(user);
+      if (!precheck.ok) {
+        return NextResponse.json(
+          { error: precheck.message, code: precheck.reason },
+          { status: precheck.reason === "suspended" ? 403 : 402 },
+        );
+      }
+      if (job.progress.stage === "brand_review") {
+        return NextResponse.json({ ok: true, mode: "batch", runId, started: true, job });
+      }
+      // A batch takes minutes, longer than a request may stay open, so it runs
+      // in the background and the panel follows it through the status poll.
+      // The stage is set before replying so the first poll already sees it.
+      // Like runBrandReviewForJob, a new batch clears an earlier Stop.
+      clearSearchJobSuppression(runId);
+      job.progress = {
+        ...job.progress,
+        stopRequested: false,
+        stage: "brand_review",
+        brandReviewDone: 0,
+        brandReviewTotal: getCompetitorsByRun(runId).length,
+        brandReviewCurrentName: null,
+        message: "Brand review starting…",
+      };
+      job.updatedAt = new Date().toISOString();
+      saveJob(job);
+      after(() =>
+        runBillable(
+          {
+            user,
+            operation: "search.brand_review_batch",
+            projectKind: "search",
+            projectId: runId,
+            runId,
+          },
+          () => runBrandReviewForJob(runId, { force: body.force !== false }),
+        ).catch((err) => {
+          console.error("[brand-review] batch failed", err);
+          const current = getJob(runId);
+          updateJob(runId, {
+            progress: {
+              ...(current?.progress ?? job.progress),
+              stage: "done",
+              brandReviewCurrentName: null,
+              message: `Brand review failed: ${(err as Error).message}`,
+            },
+          });
+        }),
       );
-      return NextResponse.json({
-        ok: true,
-        mode: "batch",
-        runId,
-        ...result,
-        competitors: getCompetitorsByRun(runId),
-        job: getJob(runId),
-      });
+      return NextResponse.json({ ok: true, mode: "batch", runId, started: true, job: getJob(runId) });
     }
 
     return NextResponse.json(

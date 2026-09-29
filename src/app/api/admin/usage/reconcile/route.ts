@@ -28,6 +28,8 @@ export async function POST(request: Request) {
 
     let body: {
       reservationId?: string;
+      /** "billed" charges the full hold, "not_billed" releases it. */
+      outcome?: "billed" | "not_billed";
       chargeCredits?: string | number;
       reason?: string;
     } = {};
@@ -42,7 +44,16 @@ export async function POST(request: Request) {
     if (!reservationId) throw new HttpError(400, "reservationId is required");
     if (!reason) throw new HttpError(400, "A reason is required");
 
-    const charge = parseCreditsInput(body.chargeCredits ?? 0);
+    let charge: number | null;
+    if (body.outcome === "billed" || body.outcome === "not_billed") {
+      const pending = listPendingReconciliation().find((r) => r.id === reservationId);
+      if (!pending) {
+        throw new HttpError(404, "No pending reservation with that id", "not_found");
+      }
+      charge = body.outcome === "billed" ? pending.amountSubunits : 0;
+    } else {
+      charge = parseCreditsInput(body.chargeCredits ?? 0);
+    }
     if (charge === null || charge < 0) {
       throw new HttpError(400, "Charge must be a non-negative number");
     }

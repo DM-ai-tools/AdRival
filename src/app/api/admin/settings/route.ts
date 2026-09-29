@@ -2,12 +2,25 @@ import { NextResponse } from "next/server";
 import { getAppSettings, updateAppSettings } from "@/lib/db";
 import { errorResponse, HttpError, requireAdmin } from "@/lib/authz";
 import {
+  getActiveConversionRuleSet,
   listConversionRuleSets,
   publishConversionRuleSet,
   recordAudit,
 } from "@/lib/accounting/records";
 import { parseCreditsInput } from "@/lib/accounting/units";
 import { PROVIDER_IDS, type ProviderId, type ResetCadence } from "@/lib/types";
+import { validateConversionRules } from "@/lib/accounting/conversionValidation";
+
+/** The env var holding each provider's key; typed so a new provider can't be missed. */
+const PROVIDER_KEY_ENV: Record<ProviderId, string> = {
+  sociavault: "SOCIAVAULT_API_KEY",
+  openrouter: "OPENROUTER_API_KEY",
+  openai: "OPENAI_API_KEY",
+  anthropic: "ANTHROPIC_API_KEY",
+  firecrawl: "FIRECRAWL_API_KEY",
+  brandfetch: "BRANDFETCH_API_KEY",
+  runway: "RUNWAYML_API_SECRET",
+};
 
 export const runtime = "nodejs";
 
@@ -17,17 +30,14 @@ export async function GET() {
     return NextResponse.json({
       settings: getAppSettings(),
       conversionRuleSets: listConversionRuleSets(),
+      // The version new charges really use (falls back to the newest when the
+      // setting names a version that does not exist).
+      effectiveConversionRuleVersion: getActiveConversionRuleSet().version,
       providers: PROVIDER_IDS,
       // Credentials stay server-side: only whether each key is present.
-      providerKeyConfigured: {
-        sociavault: Boolean(process.env.SOCIAVAULT_API_KEY?.trim()),
-        openrouter: Boolean(process.env.OPENROUTER_API_KEY?.trim()),
-        openai: Boolean(process.env.OPENAI_API_KEY?.trim()),
-        anthropic: Boolean(process.env.ANTHROPIC_API_KEY?.trim()),
-        firecrawl: Boolean(process.env.FIRECRAWL_API_KEY?.trim()),
-        brandfetch: Boolean(process.env.BRANDFETCH_API_KEY?.trim()),
-        runway: Boolean(process.env.RUNWAYML_API_SECRET?.trim()),
-      },
+      providerKeyConfigured: Object.fromEntries(
+        PROVIDER_IDS.map((id) => [id, Boolean(process.env[PROVIDER_KEY_ENV[id]]?.trim())]),
+      ),
     });
   } catch (err) {
     return errorResponse(err, { audience: "admin" });
@@ -148,6 +158,14 @@ export async function POST(request: Request) {
       typeof body.perCallReservationCeiling !== "object"
     ) {
       throw new HttpError(400, "perCallReservationCeiling is required");
+    }
+    // These become the live billing rules at once, so reject anything malformed.
+    const problems = validateConversionRules({
+      rates: body.rates,
+      perCallReservationCeiling: body.perCallReservationCeiling,
+    });
+    if (problems.length) {
+      throw new HttpError(400, `Conversion rules not published: ${problems.slice(0, 5).join(" ")}`);
     }
 
     const created = publishConversionRuleSet({

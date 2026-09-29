@@ -5,7 +5,7 @@ import { errorResponse, requireUser, resolveSpaceAccess } from "@/lib/authz";
 import { precheckRun, runBillable } from "@/lib/accounting/run";
 import { isCreditError } from "@/lib/accounting/errors";
 import { maskClientFacingText } from "@/lib/clientFacing";
-import { saveLookupJob, updateLookupJob } from "@/lib/db";
+import { getLookupJob, saveLookupJob, updateLookupJob } from "@/lib/db";
 import { dispatchPlatformLookup } from "@/lib/pipeline/dispatch";
 import { AD_PLATFORMS, type AdPlatform } from "@/lib/platforms";
 import type { LookupPageCandidate } from "@/lib/types";
@@ -133,15 +133,15 @@ export async function POST(request: Request) {
           ? (err as Error).message
           : maskClientFacingText(`Lookup failed: ${(err as Error).message}`) ||
             "Lookup failed";
+        // Keep the counts the lookup reached.
+        const reached = getLookupJob(lookupId)?.progress;
         updateLookupJob(lookupId, {
           status: "failed",
           error: message,
           progress: {
+            ...(reached ?? { candidatesFound: 0, adsFetched: 0, pagesScanned: 0 }),
             stage: "failed",
             message,
-            candidatesFound: 0,
-            adsFetched: 0,
-            pagesScanned: 0,
           },
         });
       }

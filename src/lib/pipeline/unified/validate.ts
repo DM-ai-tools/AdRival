@@ -40,6 +40,8 @@ function neutralizeCompetitorHost(html: string, competitorHost: string, clientHo
 
 function ensureBrandCss(html: string, colors: BrandColors | null | undefined): string {
   if (!colors) return html;
+  // Pages built on the shared design system already style chrome, logos and slots.
+  if (html.includes("/* adr-design-system */")) return html;
   const block = `
 :root{
   --brand-primary:${colors.primary};

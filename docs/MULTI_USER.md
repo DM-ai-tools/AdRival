@@ -75,7 +75,7 @@ Admins are not credit-limited. Their runs still record provider usage and calcul
 
 ## Sharing and ownership
 
-Sharing is admin-only at this stage (**Admin → Projects**):
+Sharing is admin-only at this stage (**Admin → Client spaces**; a whole client space is shared at once):
 
 | Role   | View | Edit | Run paid tasks |
 |--------|------|------|----------------|
@@ -94,7 +94,7 @@ Sharing is admin-only at this stage (**Admin → Projects**):
 ## Legacy (unowned) projects
 
 Jobs that existed before schema v2 have `ownerUserId: null`. They appear only
-in **Admin → Projects** (filter “unassigned”). Assign an owner there. Until
+in **Admin → Client spaces**, under “Runs not in a client space”. Move them into a space there. Until
 then, guessing the id from the UI or API returns 404 for regular users.
 
 ## Provider balances (admins only)

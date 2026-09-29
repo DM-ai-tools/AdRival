@@ -107,12 +107,13 @@ export function verifyAndRepairUnifiedPage(
     const expected = options.formSpec.fields.length;
     const actual = formFieldCount($($forms[0]));
     if (actual + 1 < expected) {
-      $($forms[0]).closest("section").replaceWith(
-        buildDynamicFormHtml(options.formSpec, {
-          ctaLabel: options.formCtaLabel,
-          heading: options.formSpec.heading || null,
-        }),
-      );
+      // Swap only the form — the section around it (often the hero) stays.
+      const rebuilt = buildDynamicFormHtml(options.formSpec, {
+        ctaLabel: options.formCtaLabel,
+        heading: null,
+      });
+      const formOnly = rebuilt.match(/<form\b[\s\S]*<\/form>/i)?.[0] || rebuilt;
+      $($forms[0]).replaceWith(formOnly);
       repairs.push(`Replaced underbuilt form (${actual} fields) with competitor spec (${expected} fields).`);
     } else if (!$($forms[0]).attr("id")) {
       $($forms[0]).attr("id", "adr-lead-form");

@@ -73,8 +73,18 @@ const PLACEHOLDER_SVG = (label: string, w = 1200, h = 800) => {
   return `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
 };
 
-export function placeholderDataUri(slot: Pick<UnifiedImageSlot, "id" | "purpose" | "width" | "height">): string {
-  return PLACEHOLDER_SVG(slot.purpose || slot.id, slot.width || 1200, slot.height || 800);
+export function placeholderDataUri(
+  slot: Pick<UnifiedImageSlot, "id" | "purpose" | "width" | "height">,
+  colors?: { primary?: string | null; secondary?: string | null; accent?: string | null } | null,
+): string {
+  const w = slot.width || 1200;
+  const h = slot.height || 800;
+  if (!colors?.primary) return PLACEHOLDER_SVG(slot.purpose || slot.id, w, h);
+  // Brand-coloured panel: keeps the layout finished while the image is pending.
+  const a = colors.primary;
+  const b = colors.accent || colors.secondary || colors.primary;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${a}"/><stop offset="1" stop-color="${b}"/></linearGradient><radialGradient id="r" cx=".3" cy=".3" r=".7"><stop offset="0" stop-color="#fff" stop-opacity=".28"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient></defs><rect width="100%" height="100%" fill="url(#g)"/><rect width="100%" height="100%" fill="url(#r)"/></svg>`;
+  return `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
 }
 
 function extractHtmlDocument(raw: string): string | null {

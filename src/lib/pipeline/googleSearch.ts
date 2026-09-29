@@ -15,6 +15,7 @@ import {
 import {
   analyzeAdCandidate,
   expandKeywordQueries,
+  isAgencySeed,
   pickCompanyPageMatch,
   pickGoogleAdDomains,
   serviceKeywordOverlapScore,
@@ -32,6 +33,7 @@ import {
   isLookupJobSuppressed,
   saveCompetitor,
   saveJob,
+  saveJobProgress,
   saveLookupAd,
   saveLookupJob,
   updateCompetitor,
@@ -39,7 +41,9 @@ import {
 import {
   buildGuardrailContext,
   guardCompetitorHeuristic,
+  precheckCompetitor,
 } from "../guardrails";
+import { isCreditError } from "../accounting/errors";
 import {
   TARGET_COMPETITORS,
   type AdCandidate,
@@ -452,7 +456,7 @@ export async function runGoogleFamilySearch(
     job.progress.stage = "analyzing_ad";
     job.progress.message = `Reviewing ${batch.length} ad ${batch.length === 1 ? "copy" : "copies"} in parallel…`;
     job.updatedAt = new Date().toISOString();
-    saveJob(job);
+    saveJobProgress(job);
     await mapPool(batch, AD_REVIEW_BATCH, async (args) => {
       if (accepted.length >= TARGET_COMPETITORS) return;
       if (isSearchJobSuppressed(job.id)) return;
@@ -472,7 +476,18 @@ export async function runGoogleFamilySearch(
           categoryLabel: job.selectedCategory?.label || null,
           maxQueries: 6,
         })
-      : allKeywords;
+      : isAgencySeed(businessProfile, job.selectedCategory, allKeywords)
+        ? // Transparency search matches advertiser names: "SEO" finds
+          // "Yoast SEO"-style tools, "SEO agency" finds agencies.
+          Array.from(
+            new Set([
+              ...allKeywords.map((kw) =>
+                /\b(agency|agencies|services?|company|consultant|firm)\b/i.test(kw) ? kw : `${kw} agency`,
+              ),
+              ...allKeywords,
+            ]),
+          )
+        : allKeywords;
     const extraPool: string[] = [];
     const rememberExtra = (query: string) => {
       const trimmed = query.trim();
@@ -516,7 +531,7 @@ export async function runGoogleFamilySearch(
       job.progress.stage = "finding_domains";
       job.progress.message = `Transparency search for "${query}"…`;
       job.updatedAt = new Date().toISOString();
-      saveJob(job);
+      saveJobProgress(job);
 
       let advertisersRaw: Awaited<
         ReturnType<typeof extractGoogleAdvertisers>
@@ -527,7 +542,7 @@ export async function runGoogleFamilySearch(
         job.progress.scannedPages += 1;
       } catch (err) {
         job.progress.message = `Transparency search warning: ${(err as Error).message}`;
-        saveJob(job);
+        saveJobProgress(job);
       }
 
       const advertiserBatch = advertisersRaw.slice(0, advertiserCap);
@@ -537,7 +552,7 @@ export async function runGoogleFamilySearch(
         const slice = advertiserBatch.slice(i, i + AD_REVIEW_BATCH);
         job.progress.stage = "fetching_ads";
         job.progress.message = `Fetching ads for ${slice.length} Transparency advertisers…`;
-        saveJob(job);
+        saveJobProgress(job);
         const rows = await mapPool(slice, AD_REVIEW_BATCH, async (adv) => {
           const id = String(adv.advertiser_id || "");
           if (!id || seenAdvertisers.has(id)) return null;
@@ -590,7 +605,7 @@ export async function runGoogleFamilySearch(
       !isSearchJobSuppressed(jobId)
     ) {
       job.progress.message = `Adding competitors from outside the company locations to fill the list…`;
-      saveJob(job);
+      saveJobProgress(job);
       for (const competitor of heldMismatches) {
         if (accepted.length >= TARGET_COMPETITORS) break;
         saveCompetitor(competitor);
@@ -616,7 +631,7 @@ export async function runGoogleFamilySearch(
             ? "verifying_domains"
             : "ranking_domains";
           job.progress.message = message;
-          saveJob(job);
+          saveJobProgress(job);
         },
       });
       for (const gap of gaps) {
@@ -784,7 +799,7 @@ async function tryAcceptFromAds(args: {
   if (english.length === 0) {
     job.progress.rejected += 1;
     job.progress.message = `Skipped ${pageName}: ad copy is not English`;
-    saveJob(job);
+    saveJobProgress(job);
     return;
   }
 
@@ -819,7 +834,7 @@ async function tryAcceptFromAds(args: {
   if (primaryCopy.length < 12) {
     job.progress.rejected += 1;
     job.progress.message = `Skipped ${pageName}: creatives had no readable ad copy`;
-    saveJob(job);
+    saveJobProgress(job);
     return;
   }
 
@@ -836,7 +851,7 @@ async function tryAcceptFromAds(args: {
   ) {
     job.progress.rejected += 1;
     job.progress.message = `Skipped ${pageName}: ad copy does not match the keywords`;
-    saveJob(job);
+    saveJobProgress(job);
     return;
   }
 
@@ -847,24 +862,49 @@ async function tryAcceptFromAds(args: {
 
   if (isSearchJobSuppressed(job.id) || accepted.length >= TARGET_COMPETITORS) return;
 
+  const guardCtx = buildGuardrailContext({
+    businessProfile: job.businessProfile,
+    selectedCategoryLabel: job.selectedCategory?.label || null,
+    searchKeywords: keywords,
+    override: job.guardrailOverride || null,
+    skipGuardrails: Boolean(job.skipGuardrails),
+  });
+  const allCopy = english.map((c) => `${c.title}\n${c.body}\n${c.fullText}`).join("\n");
+  const targetCountries = (job.countries?.length ? job.countries : [String(job.geo || "US")]).map(String);
+  // Plugins, proxies, courses, publishers, foreign sites: no AI review needed.
+  const pre = precheckCompetitor(guardCtx, {
+    pageName,
+    adText: `${pageName}\n${allCopy}`,
+    landingPageUrls: english.map((c) => c.landingPageUrl),
+    targetCountries,
+  });
+  if (!pre.ok) {
+    job.progress.rejected += 1;
+    job.progress.message = `Skipped ${pageName}: ${pre.reason}`;
+    saveJobProgress(job);
+    return;
+  }
+
   let filter;
   try {
     job.progress.stage = "analyzing_ad";
     job.progress.message = `LLM reviewing ${pageName}…`;
-    saveJob(job);
+    saveJobProgress(job);
     filter = await analyzeAdCandidate(
       keywords[0] || query,
       primary,
       null,
       english.filter((a) => a.adArchiveId !== primary.adArchiveId).slice(0, 5),
       {
-        relaxed: accepted.length >= 2,
+        relaxed: accepted.length >= 3,
         businessProfile: job.businessProfile,
         searchKeywords: keywords,
         selectedCategory: job.selectedCategory,
+        targetCountry: targetCountries[0] || null,
       },
     );
-  } catch {
+  } catch (err) {
+    if (isCreditError(err)) throw err;
     job.progress.rejected += 1;
     return;
   }
@@ -877,26 +917,16 @@ async function tryAcceptFromAds(args: {
     return;
   }
 
-  const guard = guardCompetitorHeuristic(
-    buildGuardrailContext({
-      businessProfile: job.businessProfile,
-      selectedCategoryLabel: job.selectedCategory?.label || null,
-      searchKeywords: keywords,
-      override: job.guardrailOverride || null,
-      skipGuardrails: Boolean(job.skipGuardrails),
-    }),
-    {
-      pageName,
-      adText: primary.fullText || primary.body,
-      landingPageUrl: primary.landingPageUrl,
-      services: filter.services,
-      llmReason: filter.reason,
-    },
-  );
+  const guard = guardCompetitorHeuristic(guardCtx, {
+    pageName,
+    adText: allCopy,
+    landingPageUrl: primary.landingPageUrl,
+    services: filter.services,
+  });
   if (!guard.ok) {
     job.progress.rejected += 1;
     job.progress.message = `Guardrail blocked ${pageName}: ${guard.reason}`;
-    saveJob(job);
+    saveJobProgress(job);
     return;
   }
 
@@ -907,7 +937,7 @@ async function tryAcceptFromAds(args: {
   if (!meetsActiveAdsThreshold(activeCount, thresholds)) {
     job.progress.rejected += 1;
     job.progress.message = `Skipped ${pageName}: ${activeCount} ads (need ≥${thresholds.minActiveAds})`;
-    saveJob(job);
+    saveJobProgress(job);
     return;
   }
 
@@ -973,10 +1003,12 @@ async function tryAcceptFromAds(args: {
   ) {
     heldMismatches.push(competitor);
     job.progress.message = `Holding ${pageName}: outside the company locations — searching the other branches first`;
-    saveJob(job);
+    saveJobProgress(job);
     return;
   }
 
+  // Reviews run in parallel; another one may have filled the list meanwhile.
+  if (accepted.length >= TARGET_COMPETITORS || isSearchJobSuppressed(job.id)) return;
   saveCompetitor(competitor);
   accepted.push(competitor);
   job.competitorIds.push(competitor.id);

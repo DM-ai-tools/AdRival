@@ -40,6 +40,7 @@ import {
   buildGuardrailContext,
   filterOfferLaddersWithGuardrail,
 } from "../guardrails";
+import type { GuardrailOverride } from "../guardrails/agent";
 import {
   serviceKeywordOverlapScore,
   type ServiceSignalOptions,
@@ -47,7 +48,9 @@ import {
 import {
   offerFitsSearchedService,
   searchedServiceFocus,
+  type ServiceFocus,
 } from "./offerServiceFocus";
+import { hostOf, isHomepageUrl, junkLandingReason, offerRelevance } from "./offerRelevance";
 
 function getOffersLlmClient(): {
   client: OpenAI;
@@ -89,8 +92,13 @@ function normalizeCopy(title: string, body: string): string {
     .slice(0, 400);
 }
 
+/**
+ * Creatives whose normalized copy starts the same are one creative with small
+ * edits (a changed emoji, a trailing line). 90 characters is enough to keep
+ * genuinely different ads apart.
+ */
 function fingerprint(s: string): string {
-  return s.slice(0, 160);
+  return s.slice(0, 90);
 }
 
 function extractPriceFromText(blob: string): string | null {
@@ -280,23 +288,33 @@ function heuristicService(
   return null;
 }
 
-function heuristicTicketTier(
+export function heuristicTicketTier(
   offer?: string | null,
   pricing?: string | null,
   cta?: string | null,
 ): OfferTicketTier {
   const blob = `${offer || ""} ${pricing || ""} ${cta || ""}`.toLowerCase();
-  if (/\b(free|complimentary|\$0|lead magnet|checklist|ebook|guide)\b/i.test(blob)) {
+  // `\b` never matches before "$", so dollar amounts are read separately.
+  // Commas are allowed as thousands separators ("$1,500").
+  const amounts = [...blob.matchAll(/\$\s?(\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?/g)].map(
+    (m) => Number(m[1].replace(/,/g, "")),
+  );
+  if (
+    /\b(free|complimentary|lead magnet|checklist|ebook|guide)\b/i.test(blob) ||
+    amounts.some((n) => n === 0)
+  ) {
     return "low";
   }
   if (
-    /\b(enterprise|custom quote|premium|retainer|high[- ]ticket|\$\s?[1-9]\d{3,})\b/i.test(
-      blob,
-    )
+    /\b(enterprise|custom quote|premium|retainer|high[- ]ticket)\b/i.test(blob) ||
+    amounts.some((n) => n >= 1000)
   ) {
     return "high";
   }
-  if (/\b(\$\s?\d{2,3}|\/mo|\/month|package|starter)\b/i.test(blob)) {
+  if (
+    /\b(package|starter)\b|\/mo\b|\/month\b/i.test(blob) ||
+    amounts.some((n) => n >= 10 && n < 1000)
+  ) {
     return "mid";
   }
   return "unknown";
@@ -332,6 +350,7 @@ type CreativeCluster = {
 function clusterAdCreatives(
   ads: LookupAdRecord[],
   maxClusters = MAX_CREATIVE_CLUSTERS,
+  focus?: ServiceFocus | null,
 ): CreativeCluster[] {
   const buckets = new Map<string, CreativeCluster>();
   for (const ad of ads) {
@@ -352,9 +371,37 @@ function clusterAdCreatives(
       landingPageUrl: ad.landingPageUrl || ad.youtubeUrl || null,
     });
   }
-  return [...buckets.values()]
-    .sort((a, b) => b.ads.length - a.ads.length)
-    .slice(0, maxClusters);
+  const focused = Boolean(focus && (focus.families.length || focus.tokens.length));
+  const relevance = (c: CreativeCluster) =>
+    focused ? offerRelevance(`${c.title} ${c.body} ${c.cta || ""}`, focus!) : 0;
+  const ranked = [...buckets.values()]
+    .map((c) => ({ c, r: relevance(c) }))
+    .filter(({ r }) => !focused || r >= 0)
+    .sort((a, b) => b.r - a.r || b.c.ads.length - a.c.ads.length)
+    .map(({ c }) => c);
+  if (!focused) return ranked.slice(0, maxClusters);
+  // Share the slots across competitors so the most repeated advertiser does
+  // not take all of them.
+  const queues = new Map<string, CreativeCluster[]>();
+  for (const c of ranked) {
+    const key = competitorKeyOfAd(c.ads[0]);
+    const list = queues.get(key) ?? [];
+    list.push(c);
+    queues.set(key, list);
+  }
+  const picked: CreativeCluster[] = [];
+  for (let round = 0; picked.length < maxClusters; round += 1) {
+    let added = false;
+    for (const list of queues.values()) {
+      if (picked.length >= maxClusters) break;
+      if (list[round]) {
+        picked.push(list[round]);
+        added = true;
+      }
+    }
+    if (!added) break;
+  }
+  return picked;
 }
 
 type CreativeEnrichment = {
@@ -382,6 +429,8 @@ const creativeLlmSchema = z.object({
 
 async function enrichCreativeClusters(
   clusters: CreativeCluster[],
+  /** The searched service, so labels for matching ads are consistent. */
+  searchedService?: string | null,
 ): Promise<Map<string, CreativeEnrichment>> {
   const map = new Map<string, CreativeEnrichment>();
   for (const c of clusters) {
@@ -420,7 +469,12 @@ For each creative cluster extract:
 - cta: call-to-action button/text if present (or null)
 - serviceTargeted: the product/service category being sold (short label)
 - funnelStage: TOFU (awareness), MOFU (consideration/lead magnet), BOFU (conversion), or unknown
-Keep wording concrete. Do not invent prices not in the copy.
+Keep wording concrete. Do not invent prices not in the copy.${
+              searchedService
+                ? `
+The user is researching competitors for: ${searchedService}. When a creative sells that service, set serviceTargeted to exactly "${searchedService}" and make the offer the specific deal for it. Otherwise name the other service.`
+                : ""
+            }
 Return JSON: { "items": [{ "id", "hook", "offer", "pricing", "cta", "serviceTargeted", "funnelStage" }] }`,
           },
           {
@@ -583,11 +637,34 @@ function landingPageBucketText(bucket: LpBucket): string {
   return `${bucket.url}\n${adText}`.slice(0, 4000);
 }
 
+function focusFromSignals(signals?: ServiceSignalOptions | null): ServiceFocus {
+  return searchedServiceFocus(
+    signals?.searchKeywords || [],
+    signals?.selectedCategory?.label || null,
+  );
+}
+
 function scoreLandingPageBucket(
   bucket: LpBucket,
   signals?: ServiceSignalOptions | null,
 ): number {
   if (!signals) return 0;
+  const focus = focusFromSignals(signals);
+  if (focus.families.length || focus.tokens.length) {
+    // The page path says what the page is for ("/google-ads-audit"), the ads
+    // pointing at it say what it sells.
+    const rawPath = bucket.url.replace(/^https?:\/\/[^/]+/i, "").split(/[?#]/)[0];
+    const path = rawPath.replace(/[-_/]+/g, " ");
+    let score = offerRelevance(`${path}\n${landingPageBucketText(bucket)}`, focus);
+    // A page address that names only another service ("/google-ads-management"
+    // on an SEO search) decides it, whatever the ads pointing at it say.
+    if (offerRelevance(path, focus) < 0) score = Math.min(score, -0.2);
+    // Booking widgets, news and blog posts rarely state the offer itself.
+    if (/\/(widget\/booking|booking|calendar|news|blog|press|media|articles?)\b/i.test(rawPath) || /calendly\.com|calendar\./i.test(bucket.url)) {
+      score -= 0.3;
+    }
+    return score;
+  }
   const copyScore = serviceKeywordOverlapScore(
     landingPageBucketText(bucket),
     signals,
@@ -597,7 +674,82 @@ function scoreLandingPageBucket(
   return Math.min(1, copyScore * 0.75 + urlScore * 0.35);
 }
 
-function clusterLandingPages(
+function competitorKeyOfAd(ad: LookupAdRecord): string {
+  const source = (ad.raw as { _searchOfferSource?: { competitorId?: string } } | undefined)
+    ?._searchOfferSource;
+  return source?.competitorId || ad.pageId || ad.pageName || "unknown";
+}
+
+/**
+ * Pick which landing pages are analysed. Pages for a different service are
+ * left out, and the slots are shared round-robin across competitors (best
+ * page of each first) so one heavy advertiser cannot take them all.
+ */
+export function selectLandingPagesToAnalyze(
+  buckets: LpBucket[],
+  cap: number,
+  focused: boolean,
+): { toAnalyze: LpBucket[]; skipped: Array<LpBucket & { skipReason: string }> } {
+  const skipped: Array<LpBucket & { skipReason: string }> = [];
+  const eligible: LpBucket[] = [];
+  for (const bucket of buckets) {
+    if (focused && (bucket.relevanceScore ?? 0) < 0) {
+      skipped.push({ ...bucket, skipReason: "Skipped: this page is about a different service" });
+    } else {
+      eligible.push(bucket);
+    }
+  }
+  const byCompetitor = new Map<string, LpBucket[]>();
+  for (const bucket of eligible) {
+    const key = competitorKeyOfAd(bucket.ads[0]);
+    const list = byCompetitor.get(key) ?? [];
+    list.push(bucket);
+    byCompetitor.set(key, list);
+  }
+  // Share the strong pages round-robin first; weak ones (no clear sign of the
+  // service) only fill slots that are left.
+  const STRONG = 0.3;
+  const strongQueues = [...byCompetitor.values()].map((list) =>
+    list.filter((b) => !focused || (b.relevanceScore ?? 0) >= STRONG),
+  );
+  const toAnalyze: LpBucket[] = [];
+  for (let round = 0; toAnalyze.length < cap; round += 1) {
+    let added = false;
+    for (const queue of strongQueues) {
+      if (toAnalyze.length >= cap) break;
+      if (queue[round]) {
+        toAnalyze.push(queue[round]);
+        added = true;
+      }
+    }
+    if (!added) break;
+  }
+  const chosen = new Set(toAnalyze);
+  for (const bucket of [...eligible].sort((a, b) => (b.relevanceScore ?? 0) - (a.relevanceScore ?? 0))) {
+    if (toAnalyze.length >= cap) break;
+    // Nothing on the page address or its ads names the service: not worth
+    // paying to analyse.
+    if (focused && (bucket.relevanceScore ?? 0) <= 0) continue;
+    if (!chosen.has(bucket)) {
+      toAnalyze.push(bucket);
+      chosen.add(bucket);
+    }
+  }
+  for (const bucket of eligible) {
+    if (!chosen.has(bucket)) {
+      skipped.push({
+        ...bucket,
+        skipReason:
+          focused && (bucket.relevanceScore ?? 0) <= 0
+            ? "Skipped: neither the page address nor its ads mention the searched service"
+            : `Skipped (analyzed the top ${cap} destinations by service relevance, shared across competitors)`,
+      });
+    }
+  }
+  return { toAnalyze, skipped };
+}
+
+export function clusterLandingPages(
   ads: LookupAdRecord[],
   signals?: ServiceSignalOptions | null,
 ): LpBucket[] {
@@ -614,6 +766,8 @@ function clusterLandingPages(
     ) {
       continue;
     }
+    // Social profiles, job and legal pages carry no offer.
+    if (junkLandingReason(url)) continue;
     const existing = buckets.get(key);
     if (existing) {
       existing.ads.push(ad);
@@ -621,15 +775,25 @@ function clusterLandingPages(
     }
     buckets.set(key, { matchKey: key, url, ads: [ad] });
   }
-  return [...buckets.values()]
-    .map((b) => {
-      const url = mostCommonDestinationUrl(b.ads) || b.url;
-      const withUrl = { ...b, url };
-      return {
-        ...withUrl,
-        relevanceScore: scoreLandingPageBucket(withUrl, signals),
-      };
-    })
+  const scored = [...buckets.values()].map((b) => {
+    const url = mostCommonDestinationUrl(b.ads) || b.url;
+    const withUrl = { ...b, url };
+    return {
+      ...withUrl,
+      relevanceScore: scoreLandingPageBucket(withUrl, signals),
+    };
+  });
+  // A homepage usually describes everything the business does; when the same
+  // site also has a specific offer page, analyse that first.
+  const hostsWithOfferPages = new Set(
+    scored.filter((b) => !isHomepageUrl(b.url)).map((b) => hostOf(b.url)),
+  );
+  for (const b of scored) {
+    if (isHomepageUrl(b.url) && hostsWithOfferPages.has(hostOf(b.url))) {
+      b.relevanceScore = (b.relevanceScore || 0) - 0.3;
+    }
+  }
+  return scored
     .sort(
       (a, b) =>
         (b.relevanceScore || 0) - (a.relevanceScore || 0) ||
@@ -860,7 +1024,19 @@ type LadderNode = {
   competitors: string[];
   service: string;
   relevance: number;
+  evidence?: string | null;
+  evidenceSource?: "page" | "ad" | null;
+  confidence?: number | null;
 };
+
+/** Offers the page analysis is reasonably sure the page sells. */
+const MIN_OFFER_CONFIDENCE = 0.5;
+
+function confidentServiceOffers(page: LookupUniqueLandingPage) {
+  return (page.serviceOffers || []).filter(
+    (o) => o.offer && (o.confidence == null || o.confidence >= MIN_OFFER_CONFIDENCE),
+  );
+}
 
 function flowTierOrder(tier: OfferTicketTier, stage: FunnelStage): number {
   if (tier === "low" || (tier === "unknown" && stage === "TOFU")) return 0;
@@ -886,7 +1062,7 @@ function namesForUrl(url: string | null, ads: LookupAdRecord[]): string[] {
  * Build one offer ladder per distinct offer that matches the searched service.
  * Identical wording is combined. Different offers stay separate ladders.
  */
-async function buildValueLadder(input: {
+export async function buildValueLadder(input: {
   adOffers: LookupUniqueOfferLine[];
   lpOffers: LookupUniqueOfferLine[];
   creatives: LookupUniqueAdCreative[];
@@ -921,6 +1097,30 @@ async function buildValueLadder(input: {
 
   for (const page of input.pages) {
     if (page.status !== "completed" || !page.primaryOffer) continue;
+    const serviceOffers = confidentServiceOffers(page);
+    if (serviceOffers.length) {
+      // A page with several packages for the service gives several steps.
+      for (const item of serviceOffers) {
+        pushNode({
+          offer: item.offer,
+          cta: item.cta || page.cta || null,
+          pricing: item.pricing || null,
+          funnelStage: page.funnelStage || "unknown",
+          ticketTier:
+            item.ticketTier && item.ticketTier !== "unknown"
+              ? item.ticketTier
+              : heuristicTicketTier(item.offer, item.pricing, item.cta),
+          landingPageUrl: page.url,
+          adCount: page.adCount,
+          competitors: namesForUrl(page.url, ads),
+          service: page.serviceTargeted || null,
+          evidence: item.evidence ?? null,
+          evidenceSource: item.evidence ? "page" : null,
+          confidence: item.confidence ?? null,
+        });
+      }
+      continue;
+    }
     pushNode({
       offer: page.primaryOffer,
       cta: page.cta || null,
@@ -934,17 +1134,31 @@ async function buildValueLadder(input: {
     });
   }
 
+  // Ad-offer lines are built from these same creatives. Take each creative's
+  // price from its line, and add a line below only when no creative already
+  // covers it, so one ad is not counted twice.
+  const linePricing = new Map<string, string>();
+  for (const line of input.adOffers) {
+    const key = normalizeOfferKey(line.offer);
+    if (key && line.pricing && !linePricing.has(key)) linePricing.set(key, line.pricing);
+  }
+  const creativeOfferKeys = new Set<string>();
   for (const creative of input.creatives) {
     if (!creative.offer) continue;
     const adNames = creative.sampleAdIds
       .map((id) => ads.find((ad) => ad.id === id)?.pageName)
       .filter((name): name is string => Boolean(name));
+    const offerKey = normalizeOfferKey(creative.offer);
+    creativeOfferKeys.add(offerKey);
+    const pricing = linePricing.get(offerKey) ?? null;
     pushNode({
       offer: creative.offer,
       cta: creative.cta || null,
-      pricing: null,
+      evidence: creative.sampleCopy || null,
+      evidenceSource: creative.sampleCopy ? "ad" : null,
+      pricing,
       funnelStage: creative.funnelStage || "unknown",
-      ticketTier: heuristicTicketTier(creative.offer, null, creative.cta),
+      ticketTier: heuristicTicketTier(creative.offer, pricing, creative.cta),
       landingPageUrl: creative.landingPageUrl || null,
       adCount: creative.adCount,
       competitors: adNames.length
@@ -955,6 +1169,7 @@ async function buildValueLadder(input: {
   }
 
   for (const line of input.adOffers) {
+    if (creativeOfferKeys.has(normalizeOfferKey(line.offer))) continue;
     pushNode({
       offer: line.offer,
       cta: line.cta || null,
@@ -1030,8 +1245,18 @@ async function buildValueLadder(input: {
     prev.relevance = Math.max(prev.relevance, node.relevance);
   }
   const distinct: LadderNode[] = [];
+  const sameCompetitor = (a: LadderNode, b: LadderNode) =>
+    a.competitors.length > 0 &&
+    a.competitors.length === b.competitors.length &&
+    a.competitors.every((name) => b.competitors.includes(name));
   for (const node of identical.values()) {
-    const twin = distinct.find((item) => overlapScore(item.offer, node.offer) >= 0.9);
+    // One competitor rewording the same offer ("Get 60 days free!" and
+    // "60 days free.") is one offer; across competitors only near-identical
+    // wording merges.
+    const twin = distinct.find((item) => {
+      const score = overlapScore(item.offer, node.offer);
+      return score >= 0.9 || (score >= 0.6 && sameCompetitor(item, node));
+    });
     if (!twin) {
       distinct.push(node);
       continue;
@@ -1113,6 +1338,9 @@ async function buildValueLadder(input: {
         funnelStage: step.funnelStage,
         landingPageUrl: step.landingPageUrl,
         competitors: step.competitors,
+        evidence: step.evidence ?? null,
+        evidenceSource: step.evidenceSource ?? null,
+        confidence: step.confidence ?? null,
       }));
       const adOffers: LookupOfferAdLeaf[] = flowSteps.map((step) => ({
         creativeId: step.id,
@@ -1231,6 +1459,8 @@ export async function buildLookupOffersReport(
     maxCreativeClusters?: number;
     /** Keyword / service signals for LP + ladder relevance ranking */
     relevance?: ServiceSignalOptions | null;
+    /** The run's own industry-rule settings, so this pass honours them too. */
+    guardrails?: { skip?: boolean; override?: GuardrailOverride | null } | null;
   },
 ): Promise<LookupOffersReport> {
   const now = new Date().toISOString();
@@ -1260,7 +1490,25 @@ export async function buildLookupOffersReport(
   const lpCap = options?.maxLandingPages ?? MAX_LP_TO_ANALYZE;
   const creativeCap = options?.maxCreativeClusters ?? MAX_CREATIVE_CLUSTERS;
   const lpBucketsPreview = clusterLandingPages(ads, signals);
-  const lpWorkCount = Math.min(lpBucketsPreview.length, lpCap);
+  const lpFocus = focusFromSignals(signals);
+  // Behind a keyword search the report analyses pages for the searched
+  // service (see analyzeLookupAdLandingPage). A standalone lookup keeps the
+  // full per-ad analysis the lookup screen shows.
+  const offersMode = lookupId.startsWith("search-offers:");
+  const offersService =
+    offersMode && (lpFocus.families.length || lpFocus.tokens.length)
+      ? {
+          keywords: signals?.searchKeywords || [],
+          category: signals?.selectedCategory?.label || null,
+          focus: lpFocus,
+        }
+      : null;
+  const lpSelection = selectLandingPagesToAnalyze(
+    lpBucketsPreview,
+    lpCap,
+    Boolean(signals && (lpFocus.families.length || lpFocus.tokens.length)),
+  );
+  const lpWorkCount = lpSelection.toAnalyze.length;
   const totalUnits = 2 + lpWorkCount; // creatives + LPs + ladder
   let doneUnits = 0;
 
@@ -1327,14 +1575,19 @@ export async function buildLookupOffersReport(
   }
 
   // —— Ad copy clusters ——
-  const clusters = clusterAdCreatives(ads, creativeCap);
+  const clusters = clusterAdCreatives(ads, creativeCap, lpFocus);
   tick(
     "creatives",
     `Enriching ${clusters.length} unique creatives…`,
     `${clusters.length} creatives`,
     0,
   );
-  const enriched = await enrichCreativeClusters(clusters);
+  const enriched = await enrichCreativeClusters(
+    clusters,
+    offersService
+      ? [offersService.keywords.join(", "), offersService.category].filter(Boolean).join(" / ")
+      : null,
+  );
   tick(
     "creatives",
     `Creative analysis done · ${clusters.length} clusters`,
@@ -1399,8 +1652,7 @@ export async function buildLookupOffersReport(
 
   // —— Unique landing pages ——
   const lpBuckets = lpBucketsPreview;
-  const toAnalyze = lpBuckets.slice(0, lpCap);
-  const skipped = lpBuckets.slice(lpCap);
+  const { toAnalyze, skipped } = lpSelection;
 
   tick(
     "landing_pages",
@@ -1482,9 +1734,24 @@ export async function buildLookupOffersReport(
     }
 
     try {
-      const updated = await analyzeLookupAdLandingPage(representative.id);
+      const updated = await analyzeLookupAdLandingPage(
+        representative.id,
+        offersMode ? { offersReport: { service: offersService } } : undefined,
+      );
       const analysis = updated.pageAnalysis;
       const o = analysis?.offer;
+      if (offersService && analysis?.status === "completed" && analysis.mentionsService === false) {
+        return finishOne({
+          url: preferDestinationUrl(bucket.url, analysis.analyzedUrl),
+          matchKey: bucket.matchKey,
+          adCount: bucket.ads.length,
+          status: "skipped" as const,
+          primaryOffer: null,
+          error: "Skipped: this page does not sell the searched service",
+          sampleAdId: representative.id,
+          relevanceScore: bucket.relevanceScore ?? null,
+        } satisfies LookupUniqueLandingPage);
+      }
       if (!analysis || analysis.status === "failed" || !o?.primaryOffer) {
         return finishOne({
           url: bucket.url,
@@ -1523,15 +1790,19 @@ export async function buildLookupOffersReport(
           o.primaryOffer,
           o.primaryOffer,
         ),
+        serviceOffers: analysis.serviceOffers ?? null,
       } satisfies LookupUniqueLandingPage);
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // The pre-check found the page is about another service: not a failure.
+      const offTopic = /different service than the one searched/i.test(message);
       return finishOne({
         url: bucket.url,
         matchKey: bucket.matchKey,
         adCount: bucket.ads.length,
-        status: "failed" as const,
+        status: offTopic ? ("skipped" as const) : ("failed" as const),
         primaryOffer: null,
-        error: err instanceof Error ? err.message : String(err),
+        error: offTopic ? "Skipped: this page is about a different service" : message,
         sampleAdId: representative.id,
         relevanceScore: bucket.relevanceScore ?? null,
       } satisfies LookupUniqueLandingPage);
@@ -1544,7 +1815,7 @@ export async function buildLookupOffersReport(
     adCount: b.ads.length,
     status: "skipped",
     primaryOffer: null,
-    error: `Skipped (analyzed top ${lpCap} destinations by service relevance, then ad volume)`,
+    error: b.skipReason,
     sampleAdId: b.ads[0]?.id || null,
     relevanceScore: b.relevanceScore ?? null,
   }));
@@ -1561,17 +1832,38 @@ export async function buildLookupOffersReport(
   const lpOffers = dedupeOfferLines(
     pages
       .filter((p) => p.status === "completed" && p.primaryOffer)
-      .map((p) => ({
-        offer: p.primaryOffer!,
-        source: "landing_page" as const,
-        adCount: p.adCount,
-        urls: [p.url],
-        sampleHooks: p.headline ? [p.headline] : undefined,
-        funnelStage: p.funnelStage,
-        ticketTier: heuristicTicketTier(p.primaryOffer, p.pricing, p.cta),
-        cta: p.cta ?? null,
-        pricing: p.pricing ?? null,
-      })),
+      .flatMap((p) => {
+        const items = confidentServiceOffers(p);
+        if (items.length) {
+          return items.map((item) => ({
+            offer: item.offer,
+            source: "landing_page" as const,
+            adCount: p.adCount,
+            urls: [p.url],
+            sampleHooks: p.headline ? [p.headline] : undefined,
+            funnelStage: p.funnelStage,
+            ticketTier:
+              item.ticketTier && item.ticketTier !== "unknown"
+                ? item.ticketTier
+                : heuristicTicketTier(item.offer, item.pricing, item.cta),
+            cta: item.cta ?? p.cta ?? null,
+            pricing: item.pricing ?? null,
+          }));
+        }
+        return [
+          {
+            offer: p.primaryOffer!,
+            source: "landing_page" as const,
+            adCount: p.adCount,
+            urls: [p.url],
+            sampleHooks: p.headline ? [p.headline] : undefined,
+            funnelStage: p.funnelStage,
+            ticketTier: heuristicTicketTier(p.primaryOffer, p.pricing, p.cta),
+            cta: p.cta ?? null,
+            pricing: p.pricing ?? null,
+          },
+        ];
+      }),
   );
 
   const serviceFocus = searchedServiceFocus(
@@ -1629,7 +1921,8 @@ export async function buildLookupOffersReport(
       signals?.businessProfile || lookupJob?.businessProfile || null,
     selectedCategoryLabel: signals?.selectedCategory?.label || null,
     searchKeywords: signals?.searchKeywords || null,
-    skipGuardrails: false,
+    override: options?.guardrails?.override ?? null,
+    skipGuardrails: Boolean(options?.guardrails?.skip),
   });
   const filteredLadders = filterOfferLaddersWithGuardrail(
     guardCtx,
@@ -1744,6 +2037,8 @@ export async function runLookupOffersReportPhase(
     maxLandingPages?: number;
     maxCreativeClusters?: number;
     relevance?: ServiceSignalOptions | null;
+    /** The run's own industry-rule settings, so this pass honours them too. */
+    guardrails?: { skip?: boolean; override?: GuardrailOverride | null } | null;
     onProgress?: OffersProgressHook;
   },
 ): Promise<LookupJob | null> {
@@ -1828,6 +2123,7 @@ export async function runLookupOffersReportPhase(
         maxLandingPages: options?.maxLandingPages,
         maxCreativeClusters: options?.maxCreativeClusters,
         relevance,
+        guardrails: options?.guardrails ?? null,
       });
       const offerCount =
         report.adCopy.uniqueOffers.length +

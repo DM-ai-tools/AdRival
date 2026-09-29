@@ -5,6 +5,7 @@ import type {
   CompetitorRecord,
   LandingPageOfferAnalysis,
   LookupAdRecord,
+  ServiceOfferEvidence,
 } from "../types";
 import { extractCompetitorChromeFromHtml } from "./unified/recreateChrome";
 import {
@@ -30,6 +31,8 @@ import {
 import { isCreditError } from "../accounting/errors";
 import { maskClientFacingText } from "../clientFacing";
 import { fetchRawLandingHtml, normalizeLandingUrl } from "./htmlFetch";
+import type { ServiceFocus } from "./offerServiceFocus";
+import { offerRelevance } from "./offerRelevance";
 import {
   collectSameLandingPageAds,
   collectSameLandingPageAdsFromLookup,
@@ -70,6 +73,21 @@ const analysisSchema = z.object({
   conversionElements: z.array(z.string()).optional().default([]),
   techNotes: z.array(z.string()).optional().default([]),
   summary: z.string().nullable().optional(),
+  // Only requested by the offers report (see serviceContext).
+  mentionsService: z.boolean().nullable().optional(),
+  serviceOffers: z
+    .array(
+      z.object({
+        offer: z.string(),
+        pricing: z.string().nullable().optional(),
+        tier: z.string().nullable().optional(),
+        cta: z.string().nullable().optional(),
+        evidence: z.string().nullable().optional(),
+        confidence: z.number().nullable().optional(),
+      }),
+    )
+    .nullable()
+    .optional(),
 });
 
 type PageOutline = {
@@ -516,13 +534,42 @@ async function fetchLandingPage(url: string): Promise<{
   finalUrl: string;
   title: string | null;
   outline: PageOutline;
+  homepageFallback: boolean;
 }> {
   const page = await fetchRawLandingHtml(url);
   return {
     finalUrl: page.finalUrl,
     title: page.title,
     outline: extractPageOutline(page.html, page.title),
+    homepageFallback: page.homepageFallback,
   };
+}
+
+/** What the offers report is researching, passed to the page analysis. */
+export type OfferServiceContext = {
+  keywords: string[];
+  category: string | null;
+  focus: ServiceFocus;
+};
+
+const SERVICE_SCHEMA_HINT = `
+Also include:
+  "mentionsService": boolean,
+  "serviceOffers": [{ "offer": string, "pricing": string|null, "tier": "low"|"mid"|"high"|"unknown", "cta": string|null, "evidence": string, "confidence": number }]`;
+
+function serviceInstructions(context: OfferServiceContext): string {
+  const what = [context.keywords.join(", "), context.category].filter(Boolean).join(" / ");
+  return `
+The user is researching competitors for: ${what}.
+- mentionsService: true only if this page sells that service (not just lists it among many in a footer or menu).
+- serviceOffers: every distinct offer on the page for that service, cheapest first: free consults/audits/trials, entry packages, core packages, premium or retainer tiers. A pricing table with three plans gives three entries.
+  - offer: what the visitor gets, 14 words or fewer.
+  - pricing: the price exactly as written on the page, or null. Never invent a price.
+  - tier: low (free or small entry), mid, high (premium, retainer, custom quote), or unknown.
+  - evidence: a short quote (25 words or fewer) copied from the page that shows the offer.
+  - confidence: 0 to 1, how sure you are the page offers this.
+- If the page does not sell the service, set mentionsService false and serviceOffers [].
+- offer.primaryOffer should be the main offer for that service when the page has several.`;
 }
 
 function schemaHint(): string {
@@ -722,8 +769,12 @@ async function analyzeWithLlm(input: {
   adBody?: string;
   platform?: string;
   screenshots?: CompetitorScreenshotTile[];
+  /** Set by the offers report: focus the extraction on this service. */
+  serviceContext?: OfferServiceContext | null;
 }): Promise<z.infer<typeof analysisSchema>> {
-  const system = `${buildSystemPrompt()}\n\nRespond with a single JSON object matching: ${schemaHint()}`;
+  const system = input.serviceContext
+    ? `${buildSystemPrompt()}\n${serviceInstructions(input.serviceContext)}\n\nRespond with a single JSON object matching: ${schemaHint()}${SERVICE_SCHEMA_HINT}`
+    : `${buildSystemPrompt()}\n\nRespond with a single JSON object matching: ${schemaHint()}`;
 
   const userPayload = {
     landingUrl: input.url,
@@ -739,6 +790,12 @@ async function analyzeWithLlm(input: {
     // Cap body text; outline already carries structure
     pageText: input.outline.plainText.slice(0, 14_000),
     hasScreenshots: Boolean(input.screenshots?.length),
+    searchedService: input.serviceContext
+      ? {
+          keywords: input.serviceContext.keywords,
+          category: input.serviceContext.category,
+        }
+      : undefined,
     instructions: {
       headline:
         "Prefer the H1 / hero text visible in the screenshot and heroCandidates. Do NOT concatenate brand+product+tagline. Do NOT copy adHeadline unless the page has no hero text.",
@@ -972,11 +1029,41 @@ async function analyzeWithLlm(input: {
   };
 }
 
+const TIERS = new Set(["low", "mid", "high", "unknown"]);
+
+function toServiceOffers(
+  raw: z.infer<typeof analysisSchema>["serviceOffers"],
+): ServiceOfferEvidence[] | null {
+  if (!raw?.length) return raw ? [] : null;
+  return raw
+    .filter((o) => o.offer?.trim())
+    .slice(0, 20)
+    .map((o) => ({
+      offer: o.offer.trim(),
+      pricing: o.pricing?.trim() || null,
+      ticketTier: (TIERS.has(String(o.tier)) ? o.tier : "unknown") as ServiceOfferEvidence["ticketTier"],
+      cta: o.cta?.trim() || null,
+      evidence: o.evidence?.trim().slice(0, 240) || null,
+      confidence:
+        typeof o.confidence === "number" && Number.isFinite(o.confidence)
+          ? Math.max(0, Math.min(1, o.confidence))
+          : null,
+    }));
+}
+
 /**
  * Fetch landing page for a lookup ad, analyze offer + architecture, persist on the ad.
  */
 export async function analyzeLookupAdLandingPage(
   adId: string,
+  options?: {
+    /**
+     * Set by the offers report. The page must be the ad's own page (not a
+     * homepage it fell back to) and about the searched service, and the
+     * analysis lists every offer for that service with evidence.
+     */
+    offersReport?: { service: OfferServiceContext | null } | null;
+  },
 ): Promise<LookupAdRecord> {
   const ad = getLookupAd(adId);
   if (!ad) throw new Error("Lookup ad not found");
@@ -997,9 +1084,34 @@ export async function analyzeLookupAdLandingPage(
     },
   });
 
+  const forOffers = options?.offersReport ?? null;
+  const service = forOffers?.service ?? null;
+
   try {
     const page = await fetchLandingPage(url);
     let outline = page.outline;
+
+    if (forOffers && page.homepageFallback) {
+      throw new Error(
+        "The ad's page is no longer available. The site sent visitors to its homepage instead.",
+      );
+    }
+    // A cheap check before any paid analysis: skip pages that are only about
+    // a different service than the one searched.
+    if (service && (service.focus.families.length || service.focus.tokens.length)) {
+      const pageText = [
+        outline.title,
+        outline.metaDescription,
+        ...outline.heroCandidates,
+        ...outline.headingOutline.map((h) => h.text),
+        outline.plainText.slice(0, 4000),
+      ]
+        .filter(Boolean)
+        .join(" ");
+      if (offerRelevance(pageText, service.focus) < 0) {
+        throw new Error("This page is about a different service than the one searched.");
+      }
+    }
 
     // Enrich thin/JS-rendered pages with ad creative for offer context only.
     // Do NOT seed heroCandidates from the ad — that caused headline mismatches.
@@ -1020,29 +1132,38 @@ export async function analyzeLookupAdLandingPage(
       );
     }
 
-    const screenshots = await captureCompetitorScreenshotTiles(page.finalUrl);
+    // The offers report only needs the offer, so one screenshot of the top of
+    // the page is enough.
+    const screenshots = await captureCompetitorScreenshotTiles(page.finalUrl, {
+      foldOnly: Boolean(forOffers),
+    });
     const llm = await analyzeWithLlm({
       url: page.finalUrl,
       outline,
       adTitle: ad.title,
       adBody: ad.body,
       screenshots: screenshots.tiles,
+      serviceContext: service,
     });
     if (screenshots.warnings.length) {
       console.warn("[page-analysis] screenshot warnings", screenshots.warnings.slice(0, 3));
     }
 
+    // The offers report groups ads by page itself and never shows this, so
+    // it skips the extra AI call.
     let sameLandingPageAds = null;
-    try {
-      const siblings = getLookupAds(ad.lookupId);
-      sameLandingPageAds = await collectSameLandingPageAdsFromLookup({
-        ad,
-        siblings,
-        analyzedUrl: page.finalUrl,
-        pageOffer: llm.offer?.primaryOffer,
-      });
-    } catch (err) {
-      console.warn("[page-analysis] same-LP ads (lookup) failed", err);
+    if (!forOffers) {
+      try {
+        const siblings = getLookupAds(ad.lookupId);
+        sameLandingPageAds = await collectSameLandingPageAdsFromLookup({
+          ad,
+          siblings,
+          analyzedUrl: page.finalUrl,
+          pageOffer: llm.offer?.primaryOffer,
+        });
+      } catch (err) {
+        console.warn("[page-analysis] same-LP ads (lookup) failed", err);
+      }
     }
 
     const analysis: LandingPageOfferAnalysis = {
@@ -1063,6 +1184,8 @@ export async function analyzeLookupAdLandingPage(
       summary: llm.summary ?? null,
       error: null,
       sameLandingPageAds,
+      mentionsService: service ? (llm.mentionsService ?? null) : null,
+      serviceOffers: service ? toServiceOffers(llm.serviceOffers) : null,
     };
 
     const updated = updateLookupAd(adId, { pageAnalysis: analysis });

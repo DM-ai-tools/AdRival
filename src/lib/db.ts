@@ -68,6 +68,8 @@ function runWasDeleted(db: DatabaseShape, id: string): boolean {
  * lockfile this same process already holds.
  */
 let lockDepth = 0;
+const STALE_LOCK_MS = 15_000;
+const LOCK_SLEEP = new Int32Array(new SharedArrayBuffer(4));
 
 /** Cross-request / multi-process lock for read-modify-write of store.json */
 function withDbLock<T>(fn: () => T): T {
@@ -91,9 +93,12 @@ function withDbLock<T>(fn: () => T): T {
       break;
     } catch {
       if (Date.now() - started > 15_000) {
-        // Stale lock recovery
+        // Stale lock recovery. Only break a lock that has itself been held for
+        // 15s, never one another writer acquired a moment ago.
         try {
-          fs.unlinkSync(DB_LOCK_PATH);
+          if (Date.now() - fs.statSync(DB_LOCK_PATH).mtimeMs > STALE_LOCK_MS) {
+            fs.unlinkSync(DB_LOCK_PATH);
+          }
         } catch {
           /* ignore */
         }
@@ -101,10 +106,8 @@ function withDbLock<T>(fn: () => T): T {
           throw new Error("Timed out waiting for data store lock");
         }
       }
-      const waitUntil = Date.now() + 25;
-      while (Date.now() < waitUntil) {
-        /* spin */
-      }
+      // Sleep rather than busy-spin so the lock holder gets the CPU.
+      Atomics.wait(LOCK_SLEEP, 0, 0, 25);
     }
   }
   lockDepth = 1;
@@ -279,6 +282,26 @@ export function isLookupJobSuppressed(lookupId: string): boolean {
     return true;
   }
   return false;
+}
+
+/** Allow a stopped lookup to run its offers report again (clears stop flag). */
+export function clearLookupJobSuppression(lookupId: string): LookupJob | null {
+  suppressedLookupJobIds.delete(lookupId);
+  return withDbLock(() => {
+    const db = ensureDb();
+    const jobs = db.lookupJobs ?? [];
+    const idx = jobs.findIndex((j) => j.id === lookupId);
+    if (idx < 0) return null;
+    const prev = jobs[idx];
+    if (!prev.progress?.stopRequested) return prev;
+    jobs[idx] = {
+      ...prev,
+      progress: { ...prev.progress, stopRequested: false },
+      updatedAt: new Date().toISOString(),
+    };
+    writeDb(db);
+    return jobs[idx];
+  });
 }
 
 export function listLookupJobs(limit = 200): LookupJob[] {
@@ -557,26 +580,66 @@ function ensureDb(): DatabaseShape {
   if (!fs.existsSync(DB_PATH)) {
     const db = emptyDb();
     memoryDb = db;
-    fs.writeFileSync(DB_PATH, JSON.stringify(db), "utf8");
+    writeStoreFile(JSON.stringify(db));
     memoryDbStamp = storeStamp();
     return db;
   }
+  let parsed: DatabaseShape;
   try {
-    const raw = fs.readFileSync(DB_PATH, "utf8");
-    const parsed = JSON.parse(raw) as DatabaseShape;
-    const previousVersion = parsed.schemaVersion ?? 1;
-    memoryDb = hydrateDb(parsed);
-    if (previousVersion < SCHEMA_VERSION) {
-      // Persist the migration immediately so a read-only request path cannot
-      // leave the on-disk store un-migrated.
-      fs.writeFileSync(DB_PATH, JSON.stringify(memoryDb), "utf8");
+    parsed = JSON.parse(fs.readFileSync(DB_PATH, "utf8")) as DatabaseShape;
+  } catch (err) {
+    // Never fall back to an empty store here: the next write would replace
+    // every user, credit and run on disk with it.
+    if (memoryDb) {
+      console.error("[db] store.json could not be read; keeping the last good copy in memory", err);
+      return memoryDb;
     }
-    memoryDbStamp = storeStamp();
-    return memoryDb;
-  } catch {
-    memoryDb = emptyDb();
-    memoryDbStamp = "";
-    return memoryDb;
+    const copy = path.join(DATA_DIR, `store.unreadable-${Date.now()}.json`);
+    try {
+      fs.copyFileSync(DB_PATH, copy);
+    } catch {
+      /* ignore */
+    }
+    throw new Error(
+      `Data store ${DB_PATH} could not be read (a copy was saved to ${copy}). Restore it from a backup before restarting.`,
+    );
+  }
+  const previousVersion = parsed.schemaVersion ?? 1;
+  memoryDb = hydrateDb(parsed);
+  if (previousVersion < SCHEMA_VERSION) {
+    // Persist the migration immediately so a read-only request path cannot
+    // leave the on-disk store un-migrated.
+    writeStoreFile(JSON.stringify(memoryDb));
+  }
+  memoryDbStamp = storeStamp();
+  return memoryDb;
+}
+
+/**
+ * Write the store via a temp file and rename, so a crash or restart mid-write
+ * leaves the previous complete store in place instead of a truncated one.
+ */
+function writeStoreFile(json: string) {
+  const tmp = `${DB_PATH}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, json, "utf8");
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      fs.renameSync(tmp, DB_PATH);
+      return;
+    } catch (err) {
+      // Windows refuses the rename while another process has the file open
+      // for reading; that clears within milliseconds.
+      const code = (err as NodeJS.ErrnoException).code;
+      if ((code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") || attempt >= 20) {
+        try {
+          fs.unlinkSync(tmp);
+        } catch {
+          /* ignore */
+        }
+        throw err;
+      }
+      Atomics.wait(LOCK_SLEEP, 0, 0, 25);
+    }
   }
 }
 
@@ -585,7 +648,7 @@ function writeDb(db: DatabaseShape) {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
-  fs.writeFileSync(DB_PATH, JSON.stringify(db), "utf8");
+  writeStoreFile(JSON.stringify(db));
   memoryDbStamp = storeStamp();
 }
 
@@ -712,15 +775,88 @@ export function getSeenPageIds(): Set<string> {
 }
 
 export function markPageSeen(pageId: string) {
-  const db = ensureDb();
-  if (!db.seenPageIds.includes(pageId)) {
-    db.seenPageIds.push(pageId);
-    writeDb(db);
+  withDbLock(() => {
+    const db = ensureDb();
+    if (!db.seenPageIds.includes(pageId)) {
+      db.seenPageIds.push(pageId);
+      writeDb(db);
+    }
+  });
+}
+
+/**
+ * Throttled progress saves. Every write re-serializes the whole store, and the
+ * pipelines report progress many times a second, so routine progress is
+ * written at most once per PROGRESS_WRITE_MS. A stage change is written at
+ * once, a pending write is always flushed with the latest state, and any
+ * normal save cancels it so an older snapshot can never land after a newer one.
+ */
+const PROGRESS_WRITE_MS = 2_000;
+type PendingProgress<T> = { job: T; timer: ReturnType<typeof setTimeout> | null; last: number; stage: string };
+const pendingSearchProgress = new Map<string, PendingProgress<SearchJob>>();
+const pendingLookupProgress = new Map<string, PendingProgress<LookupJob>>();
+
+function throttleProgress<T extends { id: string; status: string; progress?: { stage?: string } | null }>(
+  pending: Map<string, PendingProgress<T>>,
+  job: T,
+  write: (job: T) => boolean,
+) {
+  const now = Date.now();
+  const stage = job.progress?.stage || "";
+  const entry = pending.get(job.id) ?? { job, timer: null, last: 0, stage: "" };
+  entry.job = job;
+  pending.set(job.id, entry);
+  if (stage !== entry.stage || now - entry.last >= PROGRESS_WRITE_MS) {
+    if (entry.timer) clearTimeout(entry.timer);
+    entry.timer = null;
+    entry.stage = stage;
+    entry.last = now;
+    write(job);
+    return;
   }
+  if (entry.timer) return;
+  entry.timer = setTimeout(() => {
+    entry.timer = null;
+    entry.last = Date.now();
+    write(entry.job);
+  }, PROGRESS_WRITE_MS - (now - entry.last));
+  entry.timer.unref?.();
+}
+
+function settleProgress<T>(
+  pending: Map<string, PendingProgress<T>>,
+  id: string,
+  job: { status: string; progress?: { stage?: string } | null },
+) {
+  const entry = pending.get(id);
+  if (!entry) return;
+  if (entry.timer) clearTimeout(entry.timer);
+  if (job.status !== "running") {
+    pending.delete(id);
+    return;
+  }
+  entry.timer = null;
+  entry.last = Date.now();
+  entry.stage = job.progress?.stage || "";
+}
+
+/** Save routine search progress, throttled (see PROGRESS_WRITE_MS). */
+export function saveJobProgress(job: SearchJob): void {
+  throttleProgress(pendingSearchProgress, job, writeSearchJob);
+}
+
+/** Save routine lookup progress, throttled (see PROGRESS_WRITE_MS). */
+export function saveLookupJobProgress(job: LookupJob): void {
+  throttleProgress(pendingLookupProgress, job, writeLookupJob);
 }
 
 /** Persist a search job. Returns false if the run was deleted and must not resurrect. */
 export function saveJob(job: SearchJob): boolean {
+  settleProgress(pendingSearchProgress, job.id, job);
+  return writeSearchJob(job);
+}
+
+function writeSearchJob(job: SearchJob): boolean {
   return withDbLock(() => {
     const db = ensureDb();
     const idx = db.jobs.findIndex((j) => j.id === job.id);
@@ -764,6 +900,8 @@ export function updateJob(
   id: string,
   patch: Partial<SearchJob>,
 ): SearchJob | null {
+  // A pending throttled progress write holds an older snapshot; drop it.
+  settleProgress(pendingSearchProgress, id, { status: patch.status ?? "running", progress: patch.progress });
   return withDbLock(() => {
     const db = ensureDb();
     const idx = db.jobs.findIndex((j) => j.id === id);
@@ -805,24 +943,26 @@ export function listHistoryRuns(limit = 100): HistoryRunSummary[] {
 
 export function saveCompetitor(competitor: CompetitorRecord): boolean {
   if (suppressedSearchJobIds.has(competitor.runId)) return false;
-  const db = ensureDb();
-  if (runWasDeleted(db, competitor.runId)) {
-    suppressedSearchJobIds.add(competitor.runId);
-    return false;
-  }
-  // Don't orphan competitors onto a deleted / missing run
-  if (!db.jobs.some((j) => j.id === competitor.runId)) return false;
-  db.competitors.unshift(competitor);
-  if (!db.seenPageIds.includes(competitor.pageId)) {
-    db.seenPageIds.push(competitor.pageId);
-  }
-  const job = db.jobs.find((j) => j.id === competitor.runId);
-  if (job && !job.competitorIds.includes(competitor.id)) {
-    job.competitorIds.push(competitor.id);
-    job.updatedAt = new Date().toISOString();
-  }
-  writeDb(db);
-  return true;
+  return withDbLock(() => {
+    const db = ensureDb();
+    if (runWasDeleted(db, competitor.runId)) {
+      suppressedSearchJobIds.add(competitor.runId);
+      return false;
+    }
+    // Don't orphan competitors onto a deleted / missing run
+    if (!db.jobs.some((j) => j.id === competitor.runId)) return false;
+    db.competitors.unshift(competitor);
+    if (!db.seenPageIds.includes(competitor.pageId)) {
+      db.seenPageIds.push(competitor.pageId);
+    }
+    const job = db.jobs.find((j) => j.id === competitor.runId);
+    if (job && !job.competitorIds.includes(competitor.id)) {
+      job.competitorIds.push(competitor.id);
+      job.updatedAt = new Date().toISOString();
+    }
+    writeDb(db);
+    return true;
+  });
 }
 
 export function getCompetitorsByRun(runId: string): CompetitorRecord[] {
@@ -837,12 +977,14 @@ export function updateCompetitor(
   id: string,
   patch: Partial<CompetitorRecord>,
 ): CompetitorRecord | null {
-  const db = ensureDb();
-  const idx = db.competitors.findIndex((c) => c.id === id);
-  if (idx < 0) return null;
-  db.competitors[idx] = { ...db.competitors[idx], ...patch };
-  writeDb(db);
-  return db.competitors[idx];
+  return withDbLock(() => {
+    const db = ensureDb();
+    const idx = db.competitors.findIndex((c) => c.id === id);
+    if (idx < 0) return null;
+    db.competitors[idx] = { ...db.competitors[idx], ...patch };
+    writeDb(db);
+    return db.competitors[idx];
+  });
 }
 
 export function listAllCompetitors(limit = 100): CompetitorRecord[] {
@@ -927,6 +1069,11 @@ export function clearAllHistory(): { removedRuns: number; removedCompetitors: nu
 /* ── Competitor name lookup (separate from keyword search history) ── */
 
 export function saveLookupJob(job: LookupJob): boolean {
+  settleProgress(pendingLookupProgress, job.id, job);
+  return writeLookupJob(job);
+}
+
+function writeLookupJob(job: LookupJob): boolean {
   return withDbLock(() => {
     const db = ensureDb();
     if (!db.lookupJobs) db.lookupJobs = [];
@@ -975,6 +1122,7 @@ export function updateLookupJob(
   id: string,
   patch: Partial<LookupJob>,
 ): LookupJob | null {
+  settleProgress(pendingLookupProgress, id, { status: patch.status ?? "running", progress: patch.progress });
   return withDbLock(() => {
     const db = ensureDb();
     if (!db.lookupJobs) db.lookupJobs = [];
@@ -1253,6 +1401,7 @@ export type UserPatch = Partial<
     | "blockedModels"
     | "suspendedAt"
     | "deletedAt"
+    | "lastLoginAt"
   >
 > & {
   /** Invalidates every existing session for this user. */
@@ -1488,6 +1637,40 @@ export function archiveProjectSpace(spaceId: string): {
   });
 }
 
+export function renameProjectSpace(spaceId: string, clientName: string): boolean {
+  return transaction((db) => {
+    const space = (db.projectSpaces ?? []).find((s) => s.id === spaceId);
+    if (!space) return false;
+    space.clientName = clientName;
+    space.updatedAt = new Date().toISOString();
+    return true;
+  });
+}
+
+/**
+ * Bring back an archived client space, and the runs that were archived with
+ * it (same archive time). Runs archived separately stay archived.
+ */
+export function restoreProjectSpace(spaceId: string): { ok: boolean; runsRestored: number } {
+  return transaction((db) => {
+    const space = (db.projectSpaces ?? []).find((s) => s.id === spaceId);
+    if (!space?.archivedAt) return { ok: false, runsRestored: 0 };
+    const archivedAt = space.archivedAt;
+    const now = new Date().toISOString();
+    let runsRestored = 0;
+    for (const job of [...db.jobs, ...(db.lookupJobs ?? [])]) {
+      if (job.spaceId === spaceId && job.archivedAt === archivedAt) {
+        job.archivedAt = null;
+        job.updatedAt = now;
+        runsRestored += 1;
+      }
+    }
+    space.archivedAt = null;
+    space.updatedAt = now;
+    return { ok: true, runsRestored };
+  });
+}
+
 export function assignRunsToSpace(
   spaceId: string,
   runs: Array<{ kind: ProjectKind; id: string }>,
@@ -1600,5 +1783,21 @@ export function listAdminAlerts(): AdminAlert[] {
   return [...(readDb().adminAlerts ?? [])].sort((a, b) =>
     b.createdAt.localeCompare(a.createdAt),
   );
+}
+
+/** Mark provider alerts as handled so they leave the open list. */
+export function acknowledgeAdminAlerts(ids: string[], actorUserId: string): number {
+  const wanted = new Set(ids);
+  return transaction((db) => {
+    let count = 0;
+    const now = new Date().toISOString();
+    for (const alert of db.adminAlerts ?? []) {
+      if (!wanted.has(alert.id) || alert.acknowledgedAt) continue;
+      alert.acknowledgedAt = now;
+      alert.acknowledgedByUserId = actorUserId;
+      count += 1;
+    }
+    return count;
+  });
 }
 

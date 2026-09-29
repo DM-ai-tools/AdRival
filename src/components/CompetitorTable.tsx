@@ -193,6 +193,7 @@ export function CompetitorTable({
   const [locationBusyId, setLocationBusyId] = useState<string | null>(null);
   const [locationBatchBusy, setLocationBatchBusy] = useState(false);
   const [locationError, setLocationError] = useState<string | null>(null);
+  const [locationNote, setLocationNote] = useState<string | null>(null);
 
   const resolvedRunId = runId || competitors[0]?.runId || null;
 
@@ -218,6 +219,7 @@ export function CompetitorTable({
   async function refreshAllLocations() {
     if (!resolvedRunId) return;
     setLocationError(null);
+    setLocationNote(null);
     setLocationBatchBusy(true);
     try {
       const res = await fetch("/api/competitors/location", {
@@ -230,6 +232,14 @@ export function CompetitorTable({
       if (Array.isArray(data.competitors)) {
         onCompetitorsUpdated?.(data.competitors);
       }
+      const updated = Number(data.updated ?? 0);
+      const failed = Number(data.failed ?? 0);
+      setLocationNote(
+        updated || failed
+          ? `Found ${updated} address${updated === 1 ? "" : "es"}` +
+              (failed ? `, ${failed} still unknown. Use “Find address” on a row to try again.` : ".")
+          : "No unknown locations to look up.",
+      );
     } catch (err) {
       setLocationError((err as Error).message);
     } finally {
@@ -362,6 +372,11 @@ export function CompetitorTable({
               {locationError}
             </span>
           )}
+          {locationNote && !locationError ? (
+            <span className="muted" role="status">
+              {locationNote}
+            </span>
+          ) : null}
         </div>
       )}
       <table className="comp-table">

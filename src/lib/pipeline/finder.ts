@@ -26,6 +26,7 @@ import {
   markPageSeen,
   saveCompetitor,
   saveJob,
+  saveJobProgress,
 } from "../db";
 import {
   cheapLocationFromText,
@@ -37,7 +38,9 @@ import {
   buildGuardrailContext,
   getSopForContext,
   guardCompetitorHeuristic,
+  precheckCompetitor,
 } from "../guardrails";
+import { searchQueriesForKeywords } from "./searchQueries";
 import {
   MAX_PAGES_PER_QUERY,
   MAX_SEARCH_PAGES,
@@ -56,6 +59,9 @@ import {
 import type { AdPlatform } from "../platforms";
 import { parseKeywords, getPlatformAdThresholds, meetsDurationThreshold } from "../platforms";
 import { metaCountriesFromGeo } from "../geo";
+
+/** How many advertisers ahead of the current one get their LLM review started. */
+const REVIEW_AHEAD = 3;
 
 function currentThresholds(acceptedCount: number, platform: AdPlatform) {
   // Keep LLM strict early; only relax after we have a solid local/relevant core
@@ -249,7 +255,7 @@ function updateJob(job: SearchJob, patch: Partial<SearchJob>) {
 function setProgress(job: SearchJob, progress: Partial<JobProgress>) {
   job.progress = { ...job.progress, ...progress };
   job.updatedAt = new Date().toISOString();
-  saveJob(job);
+  saveJobProgress(job);
 }
 
 /** Active-ads proxy from creatives already seen in this search (no extra API round-trips). */
@@ -390,6 +396,24 @@ export async function runCompetitorSearch(
     reason: "lowActiveAds" | "geoMismatch";
   };
   const nearMisses: NearMiss[] = [];
+  const addressLookups: Promise<void>[] = [];
+
+  // Cheap check before any AI review, cached per page.
+  const prechecks = new Map<string, ReturnType<typeof precheckCompetitor>>();
+  const precheckPage = (pageId: string, pageAds: AdCandidate[]) => {
+    let d = prechecks.get(pageId);
+    if (!d) {
+      d = precheckCompetitor(guardrailCtx, {
+        pageName: pageAds[0]?.pageName || "",
+        adText: pageAds.map((a) => `${a.title}\n${a.body}\n${a.fullText}`).join("\n"),
+        landingPageUrls: pageAds.map((a) => a.landingPageUrl),
+        pageCategories: pageAds.flatMap((a) => a.pageCategories || []),
+        targetCountries: countries,
+      });
+      prechecks.set(pageId, d);
+    }
+    return d;
+  };
 
   const matchedLocalCount = () =>
     accepted.filter((c) => c.locationStatus === "matched").length;
@@ -485,27 +509,32 @@ export async function runCompetitorSearch(
       job.competitorIds.push(competitor.id);
     }
 
-    // Sociavault address (FB page / LI company) so Preview shows a real location
-    try {
-      const { enrichCompetitorSociavaultAddress } = await import("./competitorLocation");
-      const loc = await enrichCompetitorSociavaultAddress({
-        competitorId: competitor.id,
-        facebookUrl: brand.facebookUrl || primary.pageProfileUri || null,
-        linkedinUrl: brand.linkedinUrl || null,
-        geoMode,
-        targetLocations,
-      });
-      if (loc) {
-        competitor.locationLabel = loc.locationLabel;
-        competitor.locationCity = loc.locationCity;
-        competitor.locationSuburb = loc.locationSuburb;
-        competitor.locationCountry = loc.locationCountry;
-        competitor.locationStatus = loc.locationStatus;
-        competitor.locationSource = loc.locationSource;
-      }
-    } catch {
-      /* keep provisional text location */
-    }
+    // Sociavault address (FB page / LI company) so Preview shows a real location.
+    // It saves itself, so the search moves on and the run waits for it at the end.
+    addressLookups.push(
+      import("./competitorLocation")
+        .then(({ enrichCompetitorSociavaultAddress }) =>
+          enrichCompetitorSociavaultAddress({
+            competitorId: competitor.id,
+            facebookUrl: brand.facebookUrl || primary.pageProfileUri || null,
+            linkedinUrl: brand.linkedinUrl || null,
+            geoMode,
+            targetLocations,
+          }),
+        )
+        .then((loc) => {
+          if (!loc) return;
+          competitor.locationLabel = loc.locationLabel;
+          competitor.locationCity = loc.locationCity;
+          competitor.locationSuburb = loc.locationSuburb;
+          competitor.locationCountry = loc.locationCountry;
+          competitor.locationStatus = loc.locationStatus;
+          competitor.locationSource = loc.locationSource;
+        })
+        .catch(() => {
+          /* keep provisional text location */
+        }),
+    );
 
     // Brand review is on-demand via Brand review tab — not during find
     const locNote = competitor.locationLabel
@@ -534,21 +563,11 @@ export async function runCompetitorSearch(
         maxQueries: 6,
       });
     } else {
-      const querySet = new Set<string>();
-      for (const kw of keywords.length ? keywords : [primaryKeyword]) {
-        querySet.add(kw);
-        try {
-          const expanded = await expandKeywordQueries(kw, businessProfile, {
-            geoMode,
-            targetLocations,
-            selectedCategory,
-          });
-          for (const q of expanded) querySet.add(q);
-        } catch (err) {
-          if (isCreditError(err)) throw err;
-        }
-      }
-      queries = Array.from(querySet).slice(0, MAX_SEARCH_QUERIES_META);
+      queries = await searchQueriesForKeywords(
+        keywords.length ? keywords : [primaryKeyword],
+        (kw) => expandKeywordQueries(kw, businessProfile, { geoMode, targetLocations, selectedCategory }),
+        MAX_SEARCH_QUERIES_META,
+      );
     }
     setProgress(job, {
       stage: "searching_ads",
@@ -688,8 +707,79 @@ export async function runCompetitorSearch(
             return scorePage(b[1]) - scorePage(a[1]);
           });
 
-          for (const [pageId, pageAds] of pageEntries) {
+          // The LLM review is the slow step. Start it for the next few eligible
+          // pages while the current one is decided, but keep every decision
+          // sequential and in the same order: a prefetched review is used only
+          // if it was made with exactly the inputs the decision would use.
+          const reviews = new Map<
+            string,
+            {
+              relaxed: boolean;
+              primaryId: string;
+              extrasKey: string;
+              result: Promise<{ ok: true; value: AdFilterResult } | { ok: false; error: unknown }>;
+            }
+          >();
+          const extrasKeyOf = (list: AdCandidate[]) =>
+            list.slice(0, 5).map((a) => a.adArchiveId).join(",");
+          const startReview = (primary: AdCandidate, extras: AdCandidate[], relaxed: boolean) =>
+            analyzeAdCandidate(
+              primaryKeyword,
+              primary,
+              primary.pageCategories?.[0] ?? null,
+              extras.slice(0, 5),
+              {
+                relaxed,
+                businessProfile,
+                searchKeywords: keywords,
+                selectedCategory,
+                targetCountry: primary.country || countries[0] || null,
+              },
+            );
+          const prefetchReviews = (fromIndex: number) => {
+            if (accepted.length >= TARGET_COMPETITORS || isSearchJobSuppressed(job.id)) return;
+            const thrNow = currentThresholds(accepted.length, platform);
+            for (
+              let j = fromIndex + 1;
+              j < pageEntries.length && j <= fromIndex + REVIEW_AHEAD;
+              j += 1
+            ) {
+              const [nextId, nextAds] = pageEntries[j];
+              if (reviews.has(nextId)) continue;
+              if (seen.has(nextId) || rejectedPages.has(nextId) || analyzedPages.has(nextId)) continue;
+              if (!precheckPage(nextId, nextAds).ok) continue;
+              const nextPrimary =
+                pickSampleAd(nextAds, {
+                  requireLanding: thrNow.requireLanding,
+                  signalOptions,
+                  targets: targetLocations,
+                  geoMode,
+                }) || (!thrNow.requireLanding ? richestAd(nextAds) : null);
+              if (!nextPrimary) continue;
+              if (
+                !businessProfile &&
+                !hasAgencyPositioningSignal(
+                  nextAds.map((a) => `${a.pageName}\n${a.title}\n${a.body}\n${a.fullText}`).join("\n"),
+                )
+              ) {
+                continue;
+              }
+              const nextExtras = nextAds.filter((a) => a.adArchiveId !== nextPrimary.adArchiveId);
+              reviews.set(nextId, {
+                relaxed: thrNow.relaxedLlm,
+                primaryId: nextPrimary.adArchiveId,
+                extrasKey: extrasKeyOf(nextExtras),
+                result: startReview(nextPrimary, nextExtras, thrNow.relaxedLlm).then(
+                  (value) => ({ ok: true as const, value }),
+                  (error: unknown) => ({ ok: false as const, error }),
+                ),
+              });
+            }
+          };
+
+          for (const [entryIndex, [pageId, pageAds]] of pageEntries.entries()) {
             if (accepted.length >= TARGET_COMPETITORS) break outer;
+            prefetchReviews(entryIndex);
             if (
               seen.has(pageId) ||
               rejectedPages.has(pageId) ||
@@ -731,6 +821,14 @@ export async function runCompetitorSearch(
               });
               continue;
             }
+            // Plugins, proxies, courses, publishers: rejected without an AI review.
+            const pre = precheckPage(pageId, pageAds);
+            if (!pre.ok) {
+              rejectedPages.add(pageId);
+              bumpReason("guardrailReject");
+              setProgress(job, { message: `Skipped ${primary.pageName}: ${pre.reason}` });
+              continue;
+            }
 
             const bodyChars = pageAds.reduce(
               (n, a) => n + (a.fullText?.length || a.body?.length || 0),
@@ -746,18 +844,20 @@ export async function runCompetitorSearch(
 
             let filter: AdFilterResult;
             try {
-              filter = await analyzeAdCandidate(
-                primaryKeyword,
-                primary,
-                primary.pageCategories?.[0] ?? null,
-                extras.slice(0, 5),
-                {
-                  relaxed: thr.relaxedLlm,
-                  businessProfile,
-                  searchKeywords: keywords,
-                  selectedCategory,
-                },
-              );
+              const ahead = reviews.get(pageId);
+              const sameInputs =
+                ahead &&
+                ahead.primaryId === primary.adArchiveId &&
+                ahead.extrasKey === extrasKeyOf(extras);
+              let reused: AdFilterResult | null = null;
+              if (sameInputs && (ahead.relaxed === thr.relaxedLlm || !ahead.relaxed)) {
+                const outcome = await ahead.result;
+                if (!outcome.ok) throw outcome.error;
+                // A strict review that passed also passes the relaxed bar;
+                // a strict reject is re-checked once the bar has relaxed.
+                if (ahead.relaxed === thr.relaxedLlm || outcome.value.relevant) reused = outcome.value;
+              }
+              filter = reused ?? (await startReview(primary, extras, thr.relaxedLlm));
             } catch (err) {
               if (isCreditError(err)) throw err;
               setProgress(job, {
@@ -885,7 +985,7 @@ export async function runCompetitorSearch(
             );
           }
 
-          saveJob(job);
+          saveJobProgress(job);
         } while (cursor && pageBudget < MAX_SEARCH_PAGES);
       } // country
     } // query
@@ -935,6 +1035,8 @@ export async function runCompetitorSearch(
 
       await fillFrom(nearMisses.filter((m) => m.reason === "geoMismatch"));
     }
+
+    await Promise.allSettled(addressLookups);
 
     const status =
       accepted.length >= TARGET_COMPETITORS

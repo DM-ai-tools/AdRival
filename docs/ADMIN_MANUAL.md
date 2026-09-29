@@ -51,6 +51,8 @@ You cannot demote, suspend, or delete the last active administrator. The app wil
 2. Click **Admin** in the header. Only administrators see that link.
 3. You land on **Administration**. The first tab is Overview.
 
+The tabs are Overview, Alerts, Users, Runs, Usage, Client spaces, Audit log and Settings. The tab you are on (and a user you have open) is part of the address, so refresh and Back keep your place, and you can send a colleague a link. The Alerts tab shows a red count when something is waiting.
+
 If you are not an admin, `/admin` is not yours to use. Making yourself an admin is not possible from Account. Another administrator has to promote you.
 
 ---
@@ -128,13 +130,13 @@ One row per service: calls, application credits charged, estimated cost, and fou
 
 A row appears when a call timed out or was aborted, so the app does not know if the vendor billed it. The user’s credits stay held until you record the outcome. Do not ignore this list. A held amount looks like “reserved” and reduces what that person can spend.
 
-For each row you see when it opened, the operation, the run id, how much is held, and a note.
+This section is called **Billing checks** on screen. For each row you see when it opened, the user, what it was for, and how much is held.
 
-1. Check the vendor’s own dashboard if you can, using the time and the run id.
-2. Click **Was billed** if they did charge it, or **Not billed** if they did not.
-3. Type a short reason in the prompt. Cancel the prompt if you are not sure — nothing is saved until you submit a reason.
+1. Check the vendor’s own dashboard if you can, using the time.
+2. Click **It was billed** if they did charge it, or **It wasn’t billed** if they did not.
+3. A dialog says exactly what will happen to the credits. Type how you know, then confirm. Cancel if you are not sure; nothing is saved until you confirm.
 
-**Was billed** keeps the charge. **Not billed** releases the hold. An unused hold also expires on its own after 15 minutes and is recovered, but a call marked pending reconciliation is waiting for you, not for that timer.
+**It was billed** charges the user the full held amount. **It wasn’t billed** gives the held credits back. An unused hold also expires on its own after 15 minutes and is recovered, but a call marked pending reconciliation is waiting for you, not for that timer.
 
 ### Recent failures
 
@@ -142,7 +144,7 @@ The latest calls that did not succeed: when, which provider, the operation, stat
 
 ### Recent admin activity
 
-An append-only log of admin actions: who did it, when, the action name, the target (a user or a project), and details such as the reason. You cannot edit or delete a row. If someone asks “who reset my password?”, this is the place.
+The latest admin actions in plain words: who did it, when, what, the user affected, and details such as the reason. Sign-ins and admins opening other people’s runs are left out here to keep it readable. **Full audit log** opens the Audit log tab. Rows cannot be edited or deleted; the store keeps the most recent 20,000.
 
 ---
 
@@ -152,34 +154,23 @@ Alerts is the list you act on. Click **Refresh** after you add credits or top up
 
 The note at the top is important: users are not told which provider failed.
 
-### Low credits by user
+### Low credits
 
-One line per active regular user who is at or below the low-credit warning from Settings. Administrators are not listed here, because they are not limited.
+One line per active regular user who is at or below the low-credit warning from Settings. Administrators are not listed, because they are not limited. The list is calculated live from current balances.
 
-Each line shows the display name, username, credits left, allowance, and the warning number. This list is calculated live from current balances. It is not a pile of old messages.
-
-What to do:
-
-1. Open **Users**.
-2. Search that username.
-3. Click **Manage**.
-4. Either **Add credits** or **Set allowance**, with a reason.
-5. Come back and **Refresh**.
+To top someone up, set **Credits to add** and a **Reason** at the top of the list, then click **Add … credits** on their line. **Top up all** does the same for everyone listed. Click a name to open that person in Users.
 
 A low warning does not by itself stop the person. They stop when the next task cannot be covered.
 
-### Provider credits exhausted
+### Provider accounts out of credits
 
-Grouped by the user who was working when a **vendor account** ran out. This is not their allowance. Topping up their AdRival credits will not fix it.
-
-Each line names the provider (SociaVault, OpenRouter, and so on), the time, and a short run id. The same person can have more than one provider under their name.
+Grouped by **provider**: a vendor account (SociaVault, OpenRouter, and so on) ran out while someone was working. This is not a user’s allowance; adding AdRival credits will not fix it.
 
 What to do:
 
-1. Read the provider name.
-2. Top up that vendor account, or fix the key, outside AdRival. Keys are never shown in this app.
-3. Tell the user they can retry. They were not told the vendor name, so you should say it plainly when you reply.
-4. **Refresh**. New failures are kept. An identical failure for the same user and provider is not logged again within about 15 minutes, so a burst of retries does not flood the list.
+1. Top up that vendor account, or fix the key, outside AdRival. Keys are never shown in this app.
+2. Tell the user they can retry. They were not told the vendor name, so say it plainly.
+3. Click **Dismiss** on the provider. Dismissed alerts leave the list and the tab count; tick **Show dismissed** to see them again. A new alert appears if it runs out again. An identical failure for the same user and provider is not logged again within about 15 minutes.
 
 ---
 
@@ -187,28 +178,23 @@ What to do:
 
 ### Create a user
 
-1. Open **Users**.
-2. Fill **Create user**:
-   - **Username** — what they type to sign in. No email.
-   - **Display name** — the name other people see.
-   - **Role** — User, unless you intend them to see this whole dashboard. An admin is not credit-limited.
-   - **Initial allowance** — credits they start with. Leave it blank to use the default in Settings. `0` means they cannot run until you set an allowance.
+1. Open **Users** and click **New user**.
+2. Fill in **Username** (what they type to sign in; no email), **Display name**, **Role** (User, unless they should see this whole dashboard; an admin is not credit-limited) and **Starting credits** (blank uses the default in Settings; `0` means they cannot run until you give them credits).
 3. Click **Create user**.
 
-The page shows a **temporary password once**. Copy it and give it to them in a private way. They must change it at the next sign-in. There is no email to send the password.
+The dialog shows the **temporary password once**, with a **Copy** button. Give it to them privately. They must change it at the next sign-in.
 
 A public signup, if you turn it on in Settings, always creates a regular user. It cannot create an admin.
 
 ### The user table
 
-**Search** matches username or display name. Filter by **Role** (Admin or User) and **Status** (Active, Suspended, Deleted). **Refresh** reloads the list.
+**Search** matches username or display name as you type. Filter by **Role** and **Status**. Click a column heading (User, Credits left, Last sign-in, Runs) to sort. Long lists are split into pages of 25.
 
-Each row shows name, role, status, credits, and project count.
+Each row shows name, role, status, credits left, last sign-in, and how many runs and client spaces they own. **Locked out** means too many wrong passwords in a row; **Must change password** means they have not yet replaced a temporary password.
 
-- A regular user shows credits left and the allowance. The left number turns to a low style when they are under the warning.
-- An admin shows **Unlimited**, plus how much has been used (for the record only).
+Tick rows (or the box in the heading for the whole page) and click **Add credits to N selected** to top up several people at once, with one reason.
 
-Click **Manage** to open that person. Click **Close** to hide the panel.
+Click **Open** to open a person in a panel on the right, with four tabs: **Credits**, **Account**, **Limits** and **Activity**. Escape or **Close** closes it. Every result appears inside the panel, next to what you clicked.
 
 ### Credits — three different buttons
 
@@ -226,7 +212,7 @@ The live line under Credits shows left, allowance, and used or refunded. After a
 
 #### Adjust usage, step by step
 
-1. Open Manage for that person.
+1. Open that person in Users (the Credits tab).
 2. Leave the amount box alone.
 3. Slide left to **Remove** credits, right to **Refund** them. The range is −200 to +200. Zero does nothing, and **Apply adjustment** stays off at zero.
 4. Read the preview: remaining goes from the old number to the new one. Allowance stays the same.
@@ -246,32 +232,36 @@ In the same Credits panel:
 
 Click **Save schedule**. This does not move credits today. It only decides whether the next period wipes unused allowance.
 
-### Account actions
+### Account actions (Account tab)
 
-Still inside Manage, under **Account**:
-
-| Button | What happens |
+| Action | What happens |
 | --- | --- |
-| Suspend | They cannot sign in. Existing sessions die immediately. Their history stays. The button becomes **Reactivate**. |
-| Reactivate | They can sign in again. |
-| Promote to admin | They can open Administration and are no longer credit-limited. |
-| Demote to user | They lose the admin screens and become credit-limited again. Refused if they are the last active admin. |
-| Reset password | Asks you to confirm. Shows a new temporary password once. Signs them out everywhere. They must change it at next sign-in. |
-| Delete | Soft delete. Access is revoked at once. Billing and audit history stay. |
+| Save name | Changes the display name others see. |
+| Suspend / Reactivate | Asks you to confirm. Suspending signs them out at once; runs and credits are kept. You cannot suspend yourself. |
+| Make admin / Make regular user | Asks you to confirm. Admins have unlimited credits and full access. Refused for the last active admin, and you cannot demote yourself. |
+| Reset password | Asks you to confirm. Shows a new temporary password once, with a Copy button. Signs them out everywhere. |
+| Unlock sign-in | Shown only when they are locked out after repeated wrong passwords. Lets them try again straight away. |
+| Delete account… | Soft delete. Access ends at once. Billing and audit history stay. |
 
-**Delete** asks what to do with their projects. Type one of these words exactly:
+**Delete account…** opens a dialog that says how many runs and client spaces they own and asks what should happen to them:
 
-| Word | Result |
+| Choice | Result |
 | --- | --- |
-| archive | Their spaces and runs are archived. Shared people lose access. |
-| transfer | You are asked for an active username. That person becomes the owner. Past charges stay with whoever ran them. |
-| unassign | Runs are no longer tied to that owner. They show up under Client spaces as runs not in a client space, until you move them. |
+| Archive them | Their runs and client spaces are archived. People they shared with lose access. |
+| Give them to another user | Pick the new owner from the list. They own the runs and client spaces from then on. Past charges stay with whoever ran them. |
+| Leave them unassigned | Runs are no longer tied to that owner and show under Client spaces as runs not in a client space. Their client spaces pass to you. |
 
-Then confirm. You cannot delete the last active administrator.
+Type their username to confirm. You cannot delete yourself or the last active administrator. A deleted account cannot be changed or given credits later.
+
+### Limits tab
+
+- **Runs at the same time** — overrides the Settings default for this person. Leave blank for the default.
+- **Services this user may use** — untick a service to refuse it for this person only. With every box ticked there is no restriction.
+- **Blocked models** — one model name per line, for this person only.
 
 ### Activity
 
-Click **Activity** in the Manage header. This is read-only.
+The **Activity** tab is read-only.
 
 - **Allowance, Consumed, Reserved, Available** — the same credit picture, including holds.
 - **Concurrency limit** — “Default” means they use the number in Settings. A number here would be a personal override. The Users screen does not have a form to type that override.
@@ -280,7 +270,7 @@ Click **Activity** in the Manage header. This is read-only.
 - **Projects owned** — title, kind, **Created** date and time, and whether it is archived.
 - **Recent runs** — run id, operation, call count, credits, and when it finished.
 
-Close the panel when you are done. Activity is not where you edit credits. Go back to Manage for that.
+Activity is not where you edit credits; use the Credits tab for that.
 
 ---
 
@@ -364,7 +354,9 @@ The header is the client name, the owner, and the run count.
 
 **Runs in this space** lists every search and lookup: title, Search or Lookup, status, **Created** date and time, and **Updated** if it changed later. This is the history. Opening it does not charge anyone.
 
-**Delete space** asks you to confirm. It archives the space and every run inside it. People it was shared with lose access immediately. It is a soft delete: the audit trail remains. It does not delete the owner’s account.
+**Rename** next to the client name changes it in place.
+
+**Archive space** asks you to confirm. It archives the space and every run inside it. People it was shared with lose access immediately. It does not delete the owner’s account. Archived spaces are listed at the bottom of the tab; **Restore** brings a space back together with the runs that were archived with it.
 
 ### Share the whole space
 
@@ -374,7 +366,7 @@ The header is the client name, the owner, and the run count.
    - **Editor** — can start tasks. Credits come from **their** allowance, not the owner’s.
 3. Click **Share space**.
 
-Sharing does not change the owner. Past charges stay with whoever ran them. The list under the button shows who has access. **Revoke** removes that person immediately.
+Sharing does not change the owner. Past charges stay with whoever ran them. The list under the button shows who has access. **Remove access** asks you to confirm, then removes that person immediately.
 
 Share the space again with the other permission if you need to change Viewer to Editor, or the reverse.
 
@@ -395,15 +387,25 @@ After the move, those runs follow the space: share the space and people see them
 
 ---
 
+## Runs
+
+Every search and lookup by every user, newest first. Filter by text, owner, type and status. Each row shows the owner, client space, status (with the current step while it runs), how many competitors or ads it found, and the credits it used. **Open** opens the run in the app, the way its owner sees it. Click an owner to open them in Users.
+
+## Audit log
+
+Who did what and when, in plain words, newest first. Filter by **Area** (credits, accounts, client spaces, settings, conversion rules, billing checks, sign-ins), **Done by**, **User affected**, and dates. Sign-ins and admins opening other people’s runs are hidden unless you tick **Include sign-ins and run views**. **Export CSV** downloads what you are looking at (up to 2,000 rows). Credit amounts are shown in credits.
+
+---
+
 ## 9. Settings
 
-Settings is global. A change here applies to everyone, unless a person’s Manage panel has its own allowance or reset schedule.
+Settings is global. A change here applies to everyone, unless a person has their own allowance, reset schedule or limits (Users → open → Credits or Limits).
 
 The page shows an error in red and **Settings saved** when a save worked. **Publish new version** is a different button. Saving the form does not publish rates. Publishing rates does not save the form. Do both if you changed both.
 
 ### How much to allot
 
-The box at the top is a planning guide, not that person’s usage. The same box appears inside Manage. It is built from the active conversion rules.
+The box at the top is a planning guide, not that person’s usage. The same box appears in a person’s Credits tab under “How allowances work”. It is built from the active conversion rules.
 
 It lists sample costs, such as:
 
@@ -428,7 +430,7 @@ These are samples. If you change conversion rates, the sample call costs change.
 | --- | --- |
 | Allow public signup | Adds a register link on the login page. New accounts are always regular users, never admins. Off by default. |
 | Default allowance for new users | What a blank allowance becomes. `0` means they cannot run until you set one. Does not change people who already exist. |
-| Default reset schedule | Manual, or monthly. Monthly expires unused allowance and keeps history. A person’s own schedule in Manage overrides this for them. |
+| Default reset schedule | Manual, or monthly. Monthly expires unused allowance and keeps history. A person’s own schedule (their Credits tab) overrides this for them. |
 | Low-credit warning | When remaining credits hit this number, the user sees a warning and they appear on Alerts. No email is sent. |
 | Concurrent runs per user | How many paid tasks one person may have running at once. Extra starts are refused until one finishes. Applies to administrators too. |
 | Hard cap per run | A normal user’s run stops before it can reserve more than this. Does not apply to administrators. |
@@ -439,24 +441,24 @@ Click **Save settings** at the bottom of this form. The checkbox and the number 
 
 **Disable** a provider to block it for every user, including you. The label adds “(no key configured)” when that vendor’s key is missing from the server. Disabling a missing key does not add the key.
 
-**Blocked models** is one model name per line. A blocked model cannot be used. This is global. The Users screen does not have a matching per-person checklist, even though the sentence on this panel mentions individual accounts. Use this box, or disable the whole provider, for the control you can actually click.
+**Blocked models** is one model name per line. A blocked model cannot be used. This is global. To limit one person instead, open them in **Users** and use the **Limits** tab.
+
+When you tick a provider that was on, **Save settings** asks you to confirm first, because every task that needs it is refused for everyone.
 
 Save settings after you tick a provider or edit the model list.
 
 ### Credit conversion rules
 
-These rules turn vendor usage into the credits you see on user accounts. They are versioned.
+These rules turn vendor usage into the credits you see on user accounts. They are versioned: publishing makes a new version, and charges already made keep the version they were priced with.
 
-- The **Rates** box is JSON. Each vendor has a `default` rate, and can have a rate for a specific model.
-- Numbers in that box are **subunits**. 10,000 subunits = 1 credit. A SociaVault rate of `10000` per request means 1 credit per request. Do not type `1` if you mean 1 credit.
-- Typical keys: `perRequest` for a scrape, `perThousandInputTokens` and `perThousandOutputTokens` for a model, `perImage` for Runway. Estimated token sizes are used when the vendor does not send a real count.
-- **Per-call reservation ceiling** is the most the app will hold before one call of unknown size, again in subunits. Leftover hold is released after the call. Do not set this tiny, or large calls cannot start. Do not set it enormous, or one call can freeze someone’s whole allowance.
-- Dollar prices are optional. Leave them out and cost columns say “No price configured” instead of $0. Token dollar totals on Overview still use documented list prices for models that have them. That Overview figure is separate from these credit rates.
-- **Note for this version** — write why you changed it. You will see this note in the versions table.
+- Each service has a table. **All other models** is its default rate; **+ Add a rate for one model** adds a model with its own rate, and **Remove** deletes one.
+- Rates are typed **in credits**: per request, per 1,000 input tokens, per 1,000 output tokens, per image. Leave a box empty if it does not apply.
+- **Hold per call** is the most the app holds before one call of unknown size. Leftover hold is released after the call. Not tiny, or large calls cannot start; not enormous, or one call can freeze someone’s whole allowance.
+- Dollar prices and fallback token estimates are kept as they were; the table does not change them.
+- **Start from** picks the version to edit. Picking an older version and publishing it makes those rates active again, which is how you roll back.
+- **Note for this version** — write why you changed it.
 
-Click **Publish new version**. The success line names the new version, for example v2. Existing charges keep the version they were billed with. You cannot rewrite history by publishing new rates.
-
-**Published versions** lists version, created time, note, how many providers are priced, and which version is active. The active one is the version new calls use.
+Click **Review and publish…**. A dialog lists every change against the active version (for example “OpenAI / default: Per 1k input tokens 0.2 → 0.25 credits”). Nothing is published until you confirm. Anything malformed, such as a negative rate or an unknown service, is refused by the server with a plain explanation.
 
 ### Provider credentials
 
@@ -482,7 +484,7 @@ A short recap of public signup, default allowance, low-credit warning, per-run c
 Check in this order:
 
 1. **Alerts → Low credits.** If they are listed, Add credits or Set allowance.
-2. **Users → Manage.** Confirm status is Active, not Suspended or Deleted.
+2. **Users → Open.** Confirm status is Active, not Suspended or Deleted.
 3. **Alerts → Provider credits exhausted.** If their name is there, their allowance is not the problem. Top up the named vendor. When you reply, you may name the vendor. Their screen will not.
 4. **Overview → Pending reconciliation.** A stuck hold can make remaining credits look smaller than the allowance.
 5. **Settings.** Concurrent runs may already be full, a provider may be disabled, or the hard cap may be stopping a large run.
@@ -490,14 +492,14 @@ Check in this order:
 
 ### A task timed out and they want the credits back
 
-1. Overview → Pending reconciliation. If the hold is there, mark **Not billed** only if the vendor did not charge, or **Was billed** if they did. Write the reason.
-2. If the charge already settled and you still want to give credits back, Users → Manage → slide Adjust usage to the right and apply. Do not Set allowance unless you also want a new cap.
+1. Overview → Billing checks. If the hold is there, choose **It wasn’t billed** only if the vendor did not charge, or **It was billed** if they did. Write how you know.
+2. If the charge already settled and you still want to give credits back, Users → Open → Credits → slide Adjust usage to the right and apply. Do not Set allowance unless you also want a new cap.
 
 ### Hand a client folder to someone else
 
 1. Client spaces → open the space.
 2. Transfer ownership if they should own it, or Share as Editor if the original owner should keep it.
-3. Revoke the old share if that person should stop seeing it.
+3. Remove the old share if that person should stop seeing it.
 
 ### Turn off signups
 
@@ -525,6 +527,6 @@ The user guide is `docs/USER_MANUAL.md`. It covers search, lookup, offers, landi
 - **Sharing does not transfer the bill.** The person who clicks start pays, on their own allowance.
 - **Deleting a space archives every run in it.** You do not pick runs one by one on delete.
 - **Publishing rates does not rewrite old charges.** Usage still shows the old version number on old rows.
-- **The rate JSON is in subunits.** 10,000 means 1 credit.
+- **Rates are typed in credits.** The table converts them; you never type subunits.
 - **The temporary password is shown once.** If you leave the page without copying it, reset the password and copy the new one.
 - **Do not remove the last admin.** Promote someone else first.

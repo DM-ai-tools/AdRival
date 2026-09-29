@@ -8,51 +8,18 @@ import type {
   SearchCompetitorAdRecord,
   SearchJob,
 } from "@/lib/types";
-import { OfferLadderFlow, ladderSteps, splitLaddersByOffer } from "@/components/OfferLadderFlow";
+import {
+  OfferLadderFlow,
+  adsForOffer,
+  ladderSteps,
+  splitLaddersByOffer,
+  tierName,
+  visibleOfferLadders,
+} from "@/components/OfferLadderFlow";
+import { searchedServiceFocus } from "@/lib/pipeline/offerServiceFocus";
 
 function shortUrl(url: string): string {
   return url.replace(/^https?:\/\//i, "").replace(/\/$/, "");
-}
-
-function lpKey(url?: string | null): string {
-  return (url || "")
-    .replace(/^https?:\/\//i, "")
-    .replace(/\/$/, "")
-    .toLowerCase();
-}
-
-function adsForLadder(
-  ladder: LookupCoreOfferLadder,
-  ads: SearchCompetitorAdRecord[],
-): SearchCompetitorAdRecord[] {
-  const byId = new Map(ads.map((a) => [a.id, a]));
-  const byArchive = new Map(ads.map((a) => [a.adArchiveId, a]));
-  const seen = new Set<string>();
-  const out: SearchCompetitorAdRecord[] = [];
-  const push = (ad?: SearchCompetitorAdRecord | null) => {
-    if (!ad || seen.has(ad.id)) return;
-    seen.add(ad.id);
-    out.push(ad);
-  };
-  for (const ref of ladder.sourceAdRefs || []) {
-    push(
-      byId.get(ref.adId) ||
-        (ref.adArchiveId ? byArchive.get(ref.adArchiveId) : undefined),
-    );
-  }
-  if (out.length) return out;
-  const names = new Set(
-    (ladder.sourceCompetitors || []).map((n) => n.toLowerCase()),
-  );
-  const targetLp = lpKey(ladder.landingPageUrl);
-  const fromNames = names.size
-    ? ads.filter((a) => names.has(a.pageName.toLowerCase()))
-    : ads;
-  if (targetLp) {
-    const matched = fromNames.filter((a) => lpKey(a.landingPageUrl) === targetLp);
-    if (matched.length) return matched;
-  }
-  return fromNames;
 }
 
 export default function SearchOfferLadderPage() {
@@ -87,13 +54,32 @@ export default function SearchOfferLadderPage() {
     };
   }, [jobId]);
 
+  // The same list, ids and numbers as the dashboard's Offer ladders view.
+  const offers = useMemo<LookupCoreOfferLadder[]>(() => {
+    if (!job) return [];
+    const focus = searchedServiceFocus(
+      job.keywords?.length ? job.keywords : job.keyword ? [job.keyword] : [],
+      job.selectedCategory?.label || null,
+    );
+    return visibleOfferLadders(job.offersReport?.valueLadder?.ladders || [], focus);
+  }, [job]);
+
   const ladder = useMemo<LookupCoreOfferLadder | null>(() => {
-    const ladders = splitLaddersByOffer(job?.offersReport?.valueLadder?.ladders || []);
-    return ladders.find((l) => l.id === ladderId) || null;
-  }, [job?.offersReport?.valueLadder?.ladders, ladderId]);
+    const found = offers.find((l) => l.id === ladderId);
+    if (found) return found;
+    // Links saved before the dashboard and this page shared one list.
+    const legacy = splitLaddersByOffer(job?.offersReport?.valueLadder?.ladders || []);
+    return legacy.find((l) => l.id === ladderId) || null;
+  }, [offers, job?.offersReport?.valueLadder?.ladders, ladderId]);
+
+  const position = ladder ? offers.findIndex((l) => l.id === ladder.id) : -1;
+  const prev = position > 0 ? offers[position - 1] : null;
+  const next = position >= 0 && position < offers.length - 1 ? offers[position + 1] : null;
+  const firstStep = ladder ? ladderSteps(ladder)[0] : null;
+  const evidence = firstStep?.evidence ?? null;
 
   const referencedAds = useMemo(
-    () => (ladder ? adsForLadder(ladder, ads) : []),
+    () => (ladder ? adsForOffer(ladder, ads) : []),
     [ladder, ads],
   );
 
@@ -102,8 +88,11 @@ export default function SearchOfferLadderPage() {
       <section className="panel">
         <div className="results-head">
           <h1>Offer ladder details</h1>
-          <Link className="ghost-btn" href="/">
-            ← Back to search
+          <Link
+            className="ghost-btn"
+            href={`/?mode=search&run=${encodeURIComponent(jobId)}&tab=offers`}
+          >
+            ← Back to offers
           </Link>
         </div>
         {error ? <p className="error-text">{error}</p> : null}
@@ -113,11 +102,41 @@ export default function SearchOfferLadderPage() {
         ) : null}
         {ladder ? (
           <article className="offers-core-ladder">
+            {offers.length > 1 ? (
+              <nav className="offer-ws-detail-nav" aria-label="Other offers">
+                {prev ? (
+                  <Link
+                    className="ghost-btn"
+                    href={`/search-offers/${encodeURIComponent(jobId)}/${encodeURIComponent(prev.id)}`}
+                  >
+                    ← {prev.coreOffer.slice(0, 40)}
+                  </Link>
+                ) : (
+                  <span />
+                )}
+                <span className="muted">
+                  Offer {position + 1} of {offers.length}
+                </span>
+                {next ? (
+                  <Link
+                    className="ghost-btn"
+                    href={`/search-offers/${encodeURIComponent(jobId)}/${encodeURIComponent(next.id)}`}
+                  >
+                    {next.coreOffer.slice(0, 40)} →
+                  </Link>
+                ) : (
+                  <span />
+                )}
+              </nav>
+            ) : null}
             <header className="offers-core-ladder-head">
               <div className="offers-meta-row">
-                <span className="offers-card-kicker">Ladder {ladder.rank}</span>
+                <span className={`offer-ws-chip-tier is-${ladder.ticketTier}`}>
+                  {tierName(ladder.ticketTier)}
+                </span>
                 <span className="muted">
-                  {ladderSteps(ladder).length} steps · {ladder.sourceCompetitors?.length || 0} competitor sources
+                  {ladder.sourceCompetitors?.length || 0} competitor
+                  {(ladder.sourceCompetitors?.length || 0) === 1 ? "" : "s"}
                 </span>
               </div>
               <h2>{ladder.coreOffer}</h2>
@@ -130,6 +149,12 @@ export default function SearchOfferLadderPage() {
                 </a>
               ) : null}
             </header>
+            {evidence ? (
+              <blockquote className="offer-ws-evidence">
+                “{evidence}”
+                <cite>{firstStep?.evidenceSource === "ad" ? "From the ad" : "From the landing page"}</cite>
+              </blockquote>
+            ) : null}
             <OfferLadderFlow ladder={ladder} />
             {ladder.sourceCompetitors?.length ? (
               <div className="offers-tree-node">

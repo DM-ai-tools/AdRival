@@ -49,6 +49,8 @@ function imageRecord(
   };
 }
 
+const IMAGE_CONCURRENCY = 3;
+
 function isCreditFailure(message: string): boolean {
   return /not enough credits|not have enough credits|insufficient credits|no remaining credits/i.test(message);
 }
@@ -74,30 +76,33 @@ export async function executeImageSlots(input: {
   let creditsExhausted = false;
   const total = illustrative.length;
 
-  for (let index = 0; index < illustrative.length; index += 1) {
+  let done = 0;
+  const results = new Array<GeneratedLandingImage | null>(illustrative.length).fill(null);
+  const runOne = async (index: number) => {
     const slot = illustrative[index];
-    input.onProgress?.(index, total, `Image ${index + 1} of ${total}`);
     const cached = input.previous?.find(
       (image) => image.id === slot.id && image.prompt === slot.prompt && image.publicUrl.startsWith("data:image/"),
     );
     if (cached) {
       resolved.set(slot.id, cached.publicUrl);
-      images.push({ ...cached, slotState: "reused", reused: true, updatedAt: new Date().toISOString() });
+      results[index] = { ...cached, slotState: "reused", reused: true, updatedAt: new Date().toISOString() };
       completed += 1;
-      continue;
+      return;
     }
     if (creditsExhausted || !hasRunwayKey()) {
-      const placeholder = placeholderDataUri(slot);
+      const placeholder = placeholderDataUri(slot, input.colors);
       resolved.set(slot.id, placeholder);
-      images.push(imageRecord(slot, "failed", placeholder));
+      results[index] = imageRecord(slot, "failed", placeholder);
       placeholders += 1;
       skippedCredits += 1;
-      continue;
+      return;
     }
     try {
       const brandHint = `Brand palette primary ${input.colors.primary}, secondary ${input.colors.secondary}, accent ${input.colors.accent}. No text, logos, watermarks, or readable words in the image.`;
       const result = await generateGptImage2({
-        promptText: `${slot.prompt}\n\n${brandHint}`,
+        promptText: `${slot.prompt}
+
+${brandHint}`,
         ratio: asRatio(slot.aspectRatio),
         quality: "medium",
         competitorId: input.competitorId,
@@ -105,19 +110,33 @@ export async function executeImageSlots(input: {
       });
       const src = `data:image/png;base64,${result.buffer.toString("base64")}`;
       resolved.set(slot.id, src);
-      images.push(imageRecord(slot, "ready", src, result.taskId));
+      results[index] = imageRecord(slot, "ready", src, result.taskId);
       completed += 1;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (isCreditFailure(message)) creditsExhausted = true;
-      const placeholder = placeholderDataUri(slot);
+      const placeholder = placeholderDataUri(slot, input.colors);
       resolved.set(slot.id, placeholder);
-      images.push(imageRecord(slot, "failed", placeholder));
+      results[index] = imageRecord(slot, "failed", placeholder);
       placeholders += 1;
       if (creditsExhausted) skippedCredits += 1;
       else failed += 1;
+    } finally {
+      done += 1;
+      input.onProgress?.(done, total, `Image ${done} of ${total}`);
     }
-  }
+  };
+  // Three at a time: each image is a separate provider render.
+  let cursor = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(IMAGE_CONCURRENCY, illustrative.length) }, async () => {
+      while (cursor < illustrative.length) {
+        const index = cursor++;
+        await runOne(index);
+      }
+    }),
+  );
+  images.push(...results.filter((r): r is GeneratedLandingImage => Boolean(r)));
   input.onProgress?.(total, total, placeholders ? "Page ready with image placeholders" : "Images complete");
   return {
     html: applyImageSlotsToHtml(input.html, resolved),

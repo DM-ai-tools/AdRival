@@ -1,15 +1,27 @@
 import { NextResponse } from "next/server";
 import {
   countActiveAdmins,
+  archiveProjectSpace,
+  getProjectSpace,
   getUserById,
   listProjects,
+  listProjectSpaces,
+  listSpaceMemberships,
+  removeSpaceMembership,
   setProjectArchived,
+  setProjectSpaceOwner,
   setProjectOwner,
   toPublicUser,
   updateUser,
 } from "@/lib/db";
 import { errorResponse, HttpError, requireAdmin } from "@/lib/authz";
-import { recordAudit, listMemberships, removeMembership } from "@/lib/accounting/records";
+import {
+  listMemberships,
+  queryLedger,
+  recordAudit,
+  removeMembership,
+} from "@/lib/accounting/records";
+import { clearLoginAttempts, isLoginLocked } from "@/lib/auth/rateLimit";
 import {
   getCreditSummary,
   listPeriods,
@@ -58,6 +70,22 @@ export async function GET(
       recentCalls: queryProviderCalls({ chargedUserId: user.id, limit: 25 }).rows,
       projects: listProjects({ ownerUserId: user.id }),
       sharedWithThisUser: listMemberships({ userId: user.id }),
+      lastLoginAt: user.lastLoginAt ?? null,
+      loginLocked: isLoginLocked(user.username).locked,
+      spacesOwned: listProjectSpaces({ ownerUserId: user.id, includeArchived: true }).map((s) => ({
+        id: s.id,
+        clientName: s.clientName,
+        archivedAt: s.archivedAt ?? null,
+      })),
+      spacesSharedWithThisUser: listSpaceMemberships()
+        .filter((m) => m.userId === user.id)
+        .map((m) => ({
+          spaceId: m.spaceId,
+          role: m.role,
+          clientName: getProjectSpace(m.spaceId)?.clientName ?? m.spaceId,
+        })),
+      // Allowance changes, top-ups, adjustments and charges, newest first.
+      ledger: queryLedger({ userId: user.id, limit: 100 }),
     });
   } catch (err) {
     return errorResponse(err, { audience: "admin" });
@@ -76,6 +104,8 @@ export async function PATCH(
 
     let body: {
       displayName?: string;
+      /** Lift a sign-in lockout caused by repeated wrong passwords. */
+      unlockLogin?: boolean;
       role?: UserRole;
       status?: "active" | "suspended";
       maxConcurrentRuns?: number | null;
@@ -88,8 +118,24 @@ export async function PATCH(
       return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
     }
 
+    if (user.status === "deleted") {
+      throw new HttpError(409, "This account has been deleted and can't be changed", "user_deleted");
+    }
+    // An admin removing their own access would lock themselves out mid-session.
+    if (
+      userId === admin.id &&
+      ((body.role !== undefined && body.role !== "admin") || body.status === "suspended")
+    ) {
+      throw new HttpError(409, "You can't demote or suspend your own account", "self_lockout");
+    }
+
     const patch: Parameters<typeof updateUser>[1] = {};
     const details: Record<string, string | number | boolean | null> = {};
+
+    if (body.unlockLogin) {
+      clearLoginAttempts(user.username);
+      details.unlockLogin = true;
+    }
 
     if (body.displayName !== undefined) {
       const displayName = String(body.displayName).trim();
@@ -219,9 +265,26 @@ export async function DELETE(
       }
     }
 
+    // Client spaces follow the same choice as runs. A space always needs an
+    // owner, so "unassign" hands it to the admin doing the delete.
+    const spaces = listProjectSpaces({ ownerUserId: userId });
+    for (const space of spaces) {
+      if (projectAction === "archive") {
+        archiveProjectSpace(space.id);
+      } else {
+        const newOwner = projectAction === "transfer" ? transferToUserId : admin.id;
+        setProjectSpaceOwner(space.id, newOwner);
+        // The new owner doesn't also need a sharing entry on their own space.
+        removeSpaceMembership(space.id, newOwner);
+      }
+    }
+
     // Revoke everything shared *with* this account.
     for (const membership of listMemberships({ userId })) {
       removeMembership(membership.projectKind, membership.projectId, userId);
+    }
+    for (const membership of listSpaceMemberships()) {
+      if (membership.userId === userId) removeSpaceMembership(membership.spaceId, userId);
     }
 
     updateUser(userId, {
@@ -239,6 +302,7 @@ export async function DELETE(
       details: {
         projectAction,
         projectsAffected: projects.length,
+        spacesAffected: spaces.length,
         transferToUserId: projectAction === "transfer" ? transferToUserId : null,
       },
     });
@@ -246,6 +310,7 @@ export async function DELETE(
     return NextResponse.json({
       ok: true,
       projectsAffected: projects.length,
+      spacesAffected: spaces.length,
       note: "Account soft-deleted. Credit ledger and audit history are retained.",
     });
   } catch (err) {

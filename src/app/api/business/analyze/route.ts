@@ -3,7 +3,7 @@ import { errorResponse, requireUser } from "@/lib/authz";
 import { runBillable } from "@/lib/accounting/run";
 import { isCreditError } from "@/lib/accounting/errors";
 import { analyzeBusinessUrl } from "@/lib/openrouter/businessAnalyzer";
-import { resolveBrandBundle } from "@/lib/pipeline/resolveBrandBundle";
+import { prefetchBrandBranding, resolveBrandBundle } from "@/lib/pipeline/resolveBrandBundle";
 import { sanitizeClientFacingText } from "@/lib/clientFacing";
 
 export const runtime = "nodejs";
@@ -57,6 +57,9 @@ export async function POST(request: Request) {
         runId: null,
       },
       async () => {
+        // Reading the site's branding is slow and needs only the URL, so it
+        // starts alongside the profile analysis instead of after it.
+        const branding = prefetchBrandBranding(url);
         const analyzed = await analyzeBusinessUrl(url);
 
         // Brand identity via site branding (+ links) — colors, fonts, logo, socials
@@ -64,6 +67,7 @@ export async function POST(request: Request) {
           const bundle = await resolveBrandBundle({
             businessUrl: analyzed.url || url,
             profile: analyzed,
+            prefetched: branding,
           });
           analyzed.brandColors = bundle.colors;
           analyzed.brandAssets = bundle.assets;

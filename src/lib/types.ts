@@ -565,6 +565,23 @@ export interface LookupUniqueLandingPage {
   ads?: LookupOfferAdLeaf[];
   /** 0–1 service/keyword relevance used for ranking (search offers) */
   relevanceScore?: number | null;
+  /** Every offer on the page for the searched service, with its evidence. */
+  serviceOffers?: ServiceOfferEvidence[] | null;
+}
+
+/**
+ * One offer found on a landing page for the searched service, with the text
+ * that supports it, so a report can show why it lists the offer.
+ */
+export interface ServiceOfferEvidence {
+  offer: string;
+  pricing?: string | null;
+  ticketTier?: OfferTicketTier;
+  cta?: string | null;
+  /** Short quote from the page. */
+  evidence?: string | null;
+  /** 0–1: how sure the analysis is that the page sells this. */
+  confidence?: number | null;
 }
 
 /** Deduped offer line appearing across creatives or LPs. */
@@ -578,6 +595,9 @@ export interface LookupUniqueOfferLine {
   ticketTier?: OfferTicketTier;
   cta?: string | null;
   pricing?: string | null;
+  /** Short quote from the ad or page that supports the offer. */
+  evidence?: string | null;
+  confidence?: number | null;
 }
 
 /** Service → landing pages → ads tree node. */
@@ -610,6 +630,11 @@ export interface OfferLadderStep {
   landingPageUrl?: string | null;
   /** Competitors that run this step. A ladder can mix several. */
   competitors?: string[];
+  /** Short quote from the ad or page that supports this step. */
+  evidence?: string | null;
+  /** Where the quote comes from. */
+  evidenceSource?: "page" | "ad" | null;
+  confidence?: number | null;
 }
 
 /**
@@ -800,6 +825,10 @@ export interface LandingPageOfferAnalysis {
   error?: string | null;
   /** Ads using this same landing page + their hooks / offers */
   sameLandingPageAds?: SameLandingPageAdsSummary | null;
+  /** Offers on the page for the searched service (offers report only). */
+  serviceOffers?: ServiceOfferEvidence[] | null;
+  /** Whether the page sells the searched service at all (offers report only). */
+  mentionsService?: boolean | null;
 }
 
 /** One editable copy block produced before design fit. */
@@ -1020,6 +1049,15 @@ export interface RecreatedLandingPage {
   designRendererVersion?: string | null;
   /** unified-2 = sectioned multipass clone; unified-1 = legacy one-shot; absent = older split pipeline */
   pipelineVersion?: string | null;
+  /** How closely the last build follows the competitor page (blueprint builds only). */
+  qualityReport?: {
+    score: number;
+    summary: string[];
+    sections: Array<{ id: string; kind: string; problems: string[] }>;
+    form: { expected: number; found: number; inPlace: boolean } | null;
+    repairedSections: string[];
+    capture: { sections: number; forms: number; screenshots: number };
+  } | null;
   /** Live progress while content/design is running (polled by UI) */
   progress?: {
     phase: string;
@@ -1096,6 +1134,8 @@ export interface AppUser {
   createdByUserId?: string | null;
   suspendedAt?: string | null;
   deletedAt?: string | null;
+  /** Last successful sign-in. */
+  lastLoginAt?: string | null;
 }
 
 export type AppUserPublic = Pick<
@@ -1350,6 +1390,9 @@ export interface AdminAlert {
   provider: ProviderId;
   runId: string | null;
   createdAt: string;
+  /** Set when an admin marks the alert as handled. */
+  acknowledgedAt?: string | null;
+  acknowledgedByUserId?: string | null;
 }
 
 export interface AuditLogEntry {

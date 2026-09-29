@@ -3,6 +3,7 @@ import {
   createUser,
   getAppSettings,
   getUserByUsername,
+  listProjectSpaces,
   listProjects,
   listUsers,
   toPublicUser,
@@ -18,6 +19,7 @@ import {
 import { initializeUserCredits, getCreditSummary } from "@/lib/accounting/service";
 import { recordAudit } from "@/lib/accounting/records";
 import { parseCreditsInput } from "@/lib/accounting/units";
+import { isLoginLocked } from "@/lib/auth/rateLimit";
 import type { UserRole, UserStatus } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -32,6 +34,7 @@ export async function GET(request: Request) {
     const statusFilter = url.searchParams.get("status") ?? "";
 
     const projects = listProjects();
+    const spaces = listProjectSpaces();
     const rows = listUsers({ includeDeleted: true })
       .filter((user) => {
         if (
@@ -52,6 +55,9 @@ export async function GET(request: Request) {
         deletedAt: user.deletedAt ?? null,
         credits: getCreditSummary(user.id),
         projectCount: projects.filter((p) => p.ownerUserId === user.id).length,
+        spaceCount: spaces.filter((s) => s.ownerUserId === user.id).length,
+        lastLoginAt: user.lastLoginAt ?? null,
+        loginLocked: isLoginLocked(user.username).locked,
       }));
 
     return NextResponse.json(

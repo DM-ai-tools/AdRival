@@ -4,6 +4,8 @@ import {
 } from "@/lib/accounting/meter";
 
 const BASE_URL = "https://api.sociavault.com";
+const REQUEST_TIMEOUT_MS = 90_000;
+const RATE_LIMIT_RETRY_DELAYS_MS = [3_000, 8_000];
 
 function getApiKey(): string {
   const key = process.env.SOCIAVAULT_API_KEY;
@@ -47,13 +49,28 @@ async function svFetchRaw<T>(
     url.searchParams.set(k, String(v));
   }
 
-  const res = await fetch(url.toString(), {
-    headers: {
-      "X-API-Key": getApiKey(),
-      Accept: "application/json",
-    },
-    cache: "no-store",
-  });
+  // Without a timeout one hung request stalls a whole search. A 429 is retried
+  // a couple of times before it is reported, since it usually clears quickly.
+  let res: Response;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      res = await fetch(url.toString(), {
+        headers: {
+          "X-API-Key": getApiKey(),
+          Accept: "application/json",
+        },
+        cache: "no-store",
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (err) {
+      if ((err as Error).name === "TimeoutError") {
+        throw new Error(`Ad library request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
+      }
+      throw err;
+    }
+    if (res.status !== 429 || attempt >= RATE_LIMIT_RETRY_DELAYS_MS.length) break;
+    await new Promise((r) => setTimeout(r, RATE_LIMIT_RETRY_DELAYS_MS[attempt]));
+  }
 
   const json = await res.json().catch(() => ({}));
 

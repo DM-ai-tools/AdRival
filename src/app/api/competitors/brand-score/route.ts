@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getCompetitor, getCompetitorsByRun, getJob, updateCompetitor } from "@/lib/db";
+import { competitorForList } from "@/lib/competitorView";
 import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
 import { applyBrandScoresForJob, withBrandScore } from "@/lib/pipeline/brandScore";
 
@@ -32,7 +33,7 @@ export async function POST(request: Request) {
       return NextResponse.json({
         ok: true,
         mode: "single",
-        competitor: updated,
+        competitor: updated && competitorForList(updated),
       });
     }
 
@@ -47,7 +48,7 @@ export async function POST(request: Request) {
         mode: "batch",
         runId: body.runId,
         ...result,
-        competitors: getCompetitorsByRun(body.runId),
+        competitors: getCompetitorsByRun(body.runId).map(competitorForList),
       });
     }
 

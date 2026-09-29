@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { getStoreStats, mergeStore, replaceStore } from "@/lib/db";
 import { getSessionUser } from "@/lib/authz";
@@ -13,7 +14,14 @@ function secretMatches(req: NextRequest): boolean {
   const header = req.headers.get("authorization") || "";
   const bearer = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
   const alt = req.headers.get("x-import-secret")?.trim() || "";
-  return bearer === secret || alt === secret;
+  return safeEqual(bearer, secret) || safeEqual(alt, secret);
+}
+
+/** Compare without leaking how many leading characters matched. */
+function safeEqual(given: string, expected: string): boolean {
+  const a = Buffer.from(given);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 /**

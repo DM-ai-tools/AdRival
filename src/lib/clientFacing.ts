@@ -45,15 +45,33 @@ const NOT_CONFIGURED =
   "This task is not configured. Please contact your administrator.";
 
 /**
- * Text shown in the main app. Vendor names and API key names are removed.
- * Admin screens should keep the original string.
+ * Technical detail that means nothing to a user: HTTP status codes, API
+ * endpoint paths and internal jargon. Applied to status and error messages
+ * only, not to generated page copy.
+ */
+const TECHNICAL_REPLACEMENTS: Array<[RegExp, string]> = [
+  [/\s*\((?:HTTP\s*)?[1-5]\d{2}\)/g, ""],
+  [/\s*(?:with\s+)?\b(?:HTTP|status)\s+[1-5]\d{2}\b/gi, ""],
+  [/\s+(?:for|at|on)\s+\/v\d[\w/.:?=&-]*/gi, ""],
+  // Node's bare network error, e.g. "Search error: fetch failed".
+  [/(^|:\s*)fetch failed\b/gi, "$1the connection failed"],
+  [/\bLLM\b/g, "AI"],
+];
+
+/**
+ * Text shown in the main app. Vendor names, API key names and technical
+ * detail are removed. Admin screens should keep the original string.
  */
 export function maskClientFacingText(
   input: string | null | undefined,
 ): string | null {
   if (input == null || input === "") return input ?? null;
   if (/API_KEY|API_SECRET/i.test(input)) return NOT_CONFIGURED;
-  return sanitizeClientFacingText(input);
+  let out = sanitizeClientFacingText(input);
+  for (const [pattern, replacement] of TECHNICAL_REPLACEMENTS) {
+    out = out.replace(pattern, replacement);
+  }
+  return out.replace(/\s{2,}/g, " ").trim();
 }
 
 export function maskPageAnalysis<

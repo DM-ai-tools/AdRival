@@ -33,6 +33,7 @@ import {
   isSearchJobSuppressed,
   clearSearchJobSuppression,
   saveJob,
+  saveJobProgress,
   updateCompetitor,
 } from "../db";
 import {
@@ -43,6 +44,9 @@ import {
 import type { BrandReview, CompetitorRecord, SearchJob } from "../types";
 
 export { normalizeLinkedInCompanyUrl, parseYouTubeFromUrl } from "./socialParams";
+
+/** Competitors brand-reviewed at the same time in a batch run. */
+const BRAND_REVIEW_CONCURRENCY = 3;
 
 function safeNum(n: unknown): number | null {
   if (typeof n === "number" && Number.isFinite(n)) return Math.round(n);
@@ -1082,29 +1086,29 @@ export async function runBrandReviewForJob(
   job.updatedAt = new Date().toISOString();
   if (!saveJob(job)) return { updated: 0, skipped: 0 };
 
-  for (let i = 0; i < competitors.length; i++) {
-    if (isSearchJobSuppressed(jobId)) {
-      stopped = true;
-      break;
-    }
-    const c = competitors[i];
+  // Competitors are independent (each review writes only its own record), so
+  // a few run at once. Progress counts finished competitors.
+  let done = 0;
+  let next = 0;
+  const inFlight = new Set<string>();
+  const report = (message: string) => {
+    job.progress.brandReviewDone = done;
+    job.progress.brandReviewTotal = total;
+    job.progress.brandReviewCurrentName = inFlight.size ? [...inFlight].join(", ") : null;
+    job.progress.message = message;
+    job.updatedAt = new Date().toISOString();
+    saveJobProgress(job);
+  };
+
+  const reviewOne = async (c: CompetitorRecord) => {
     if (!options?.force && !isBrandReviewIncomplete(c.brand)) {
       skipped += 1;
-      job.progress.brandReviewDone = i + 1;
-      job.progress.brandReviewCurrentName = c.pageName;
-      job.progress.message = `Brand review ${i + 1}/${total}: ${c.pageName} (skipped — complete)`;
-      job.updatedAt = new Date().toISOString();
-      saveJob(job);
-      continue;
+      done += 1;
+      report(`Brand review ${done}/${total}: ${c.pageName} (skipped — complete)`);
+      return;
     }
-
-    job.progress.brandReviewDone = i;
-    job.progress.brandReviewTotal = total;
-    job.progress.brandReviewCurrentName = c.pageName;
-    job.progress.message = `Brand review ${i + 1}/${total}: ${c.pageName}…`;
-    job.updatedAt = new Date().toISOString();
-    saveJob(job);
-
+    inFlight.add(c.pageName);
+    report(`Brand review ${done + 1}/${total}: ${[...inFlight].join(", ")}…`);
     try {
       const brand = await runBrandReview({
         pageId: c.pageId,
@@ -1124,7 +1128,7 @@ export async function runBrandReviewForJob(
       });
       if (isSearchJobSuppressed(jobId)) {
         stopped = true;
-        break;
+        return;
       }
       const patch: Partial<CompetitorRecord> = { brand };
       if (brand.address && !c.locationLabel) {
@@ -1140,19 +1144,31 @@ export async function runBrandReviewForJob(
         c.pageName,
         (err as Error).message,
       );
+    } finally {
+      inFlight.delete(c.pageName);
     }
+    done += 1;
+    report(`Brand review ${done}/${total}: ${c.pageName} done`);
+  };
 
-    if (isSearchJobSuppressed(jobId)) {
-      stopped = true;
-      break;
+  const worker = async () => {
+    while (next < competitors.length) {
+      if (isSearchJobSuppressed(jobId)) {
+        stopped = true;
+        return;
+      }
+      const c = competitors[next];
+      next += 1;
+      await reviewOne(c);
+      if (stopped || isSearchJobSuppressed(jobId)) {
+        stopped = true;
+        return;
+      }
     }
-
-    job.progress.brandReviewDone = i + 1;
-    job.progress.brandReviewCurrentName = c.pageName;
-    job.progress.message = `Brand review ${i + 1}/${total}: ${c.pageName} done`;
-    job.updatedAt = new Date().toISOString();
-    saveJob(job);
-  }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(BRAND_REVIEW_CONCURRENCY, competitors.length) }, worker),
+  );
 
   const fresh = getJob(jobId);
   if (fresh) {

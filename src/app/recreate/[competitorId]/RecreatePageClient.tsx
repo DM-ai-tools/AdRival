@@ -41,6 +41,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
   );
   const [canEdit, setCanEdit] = useState(true);
   const [confirmRedesignOpen, setConfirmRedesignOpen] = useState(false);
+  const [stopping, setStopping] = useState(false);
 
   const syncFromPage = useCallback((nextPage: RecreatedLandingPage | null) => {
     setPage(nextPage);
@@ -61,6 +62,9 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     if (nextPage?.userFeedback) setDesignFeedback(nextPage.userFeedback);
     if (nextPage?.error?.startsWith("SOURCE_INCOMPLETE")) {
       setError(`${nextPage.error.replace(/^SOURCE_INCOMPLETE:\s*/, "")} Retry capture from Recreate content. A replacement draft was not generated.`);
+    } else if (nextPage?.status === "failed" && nextPage.error) {
+      // Show why the last attempt failed, also after reopening the page.
+      setError(nextPage.error);
     }
     if (nextPage?.status === "completed" && nextPage.html) {
       setView("design");
@@ -122,6 +126,27 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     },
     [competitorId, contentFeedback, designFeedback, syncFromPage],
   );
+
+  const stopRecreation = useCallback(async () => {
+    setStopping(true);
+    try {
+      const res = await fetch("/api/competitors/recreate-page", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ competitorId, action: "stop" }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "The page could not be stopped. Try again.");
+      if (data.competitor) {
+        setCompetitor(data.competitor as CompetitorRecord);
+        syncFromPage((data.competitor as CompetitorRecord).recreatedPage ?? null);
+      }
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setStopping(false);
+    }
+  }, [competitorId, syncFromPage]);
 
   const saveEdits = useCallback(async () => {
     setError(null);
@@ -529,8 +554,15 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     <main className="recreate-page">
       <header className="recreate-topbar">
         <div className="recreate-brand">
-          <Link href="/" className="recreate-back">
-            ← AdRival
+          <Link
+            href={
+              competitor?.runId && !competitor.runId.startsWith("lookup-")
+                ? `/?mode=search&run=${encodeURIComponent(competitor.runId)}&tab=preview`
+                : "/"
+            }
+            className="recreate-back"
+          >
+            ← Back to results
           </Link>
           <div>
             <h1>Recreate for my brand</h1>
@@ -848,6 +880,15 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
                       : "n/a"
                   }.`}
             </p>
+          ) : isUnified && (page.publishBlockers || []).length > 1 ? (
+            <>
+              <p>Review before publishing:</p>
+              <ul className="recreate-review-list">
+                {(page.publishBlockers || []).map((item, index) => (
+                  <li key={index}>{item}</li>
+                ))}
+              </ul>
+            </>
           ) : (
             <p>
               {isUnified ? "Review notes: " : "Publish checklist: "}
@@ -861,6 +902,33 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
             </p>
           )}
         </div>
+      ) : null}
+      {page?.status === "completed" && page.qualityReport && view === "design" ? (
+        <details className="recreate-quality">
+          <summary>
+            Match with the competitor page: <strong>{Math.round(page.qualityReport.score * 100)}%</strong>
+            {" · "}
+            {page.qualityReport.sections.filter((s) => !s.problems.length).length} of {page.qualityReport.sections.length} sections
+            {page.qualityReport.form
+              ? ` · form ${page.qualityReport.form.found}/${page.qualityReport.form.expected} fields${page.qualityReport.form.inPlace ? " in place" : " (moved)"}`
+              : ""}
+          </summary>
+          <ul>
+            {page.qualityReport.summary.map((line, index) => (
+              <li key={`s-${index}`}>{line}</li>
+            ))}
+            {page.qualityReport.sections
+              .filter((s) => s.problems.length)
+              .map((s) => (
+                <li key={s.id}>
+                  Section {s.id.replace("sec-", "")} ({s.kind}): {s.problems.join(" ")}
+                </li>
+              ))}
+            {page.qualityReport.repairedSections.length ? (
+              <li>Rebuilt automatically after the comparison: section {page.qualityReport.repairedSections.map((id) => id.replace("sec-", "")).join(", ")}.</li>
+            ) : null}
+          </ul>
+        </details>
       ) : null}
       {page?.sourceArchive && view === "content" ? (
         <p className="muted recreate-palette-note">
@@ -907,12 +975,31 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
           {progressMessage ? (
             <p className="muted recreate-progress-msg">{progressMessage}</p>
           ) : null}
+          {canEdit && (generating || page?.status === "pending" || page?.status === "design_pending") ? (
+            <button
+              type="button"
+              className="danger-btn"
+              disabled={stopping}
+              onClick={() => void stopRecreation()}
+            >
+              {stopping ? "Stopping…" : "Stop"}
+            </button>
+          ) : null}
         </div>
       )}
 
       {error && (
         <div className="recreate-status panel" role="alert">
           <p className="error-text">{error}</p>
+          {canEdit && !busy && page?.status === "failed" ? (
+            <button
+              type="button"
+              className="ghost-btn"
+              onClick={() => void generateContent(true)}
+            >
+              Try again
+            </button>
+          ) : null}
           {/business website URL|Analyze this competitor|landing page analysis|Analyze the competitor/i.test(
             error,
           ) ? (

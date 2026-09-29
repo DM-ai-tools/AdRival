@@ -188,42 +188,6 @@ export function BrandReviewPanel({
     }
   }
 
-  function startPolling(jobId: string) {
-    stopPolling();
-    pollRef.current = setInterval(async () => {
-      try {
-        const res = await fetch(
-          `/api/search/status?jobId=${encodeURIComponent(jobId)}`,
-        );
-        if (!res.ok) return;
-        const data = await res.json();
-        const progress = data.job?.progress as JobProgress | undefined;
-        if (progress) {
-          setLocalProgress({
-            done: progress.brandReviewDone ?? 0,
-            total:
-              progress.brandReviewTotal ??
-              Math.max(competitors.length, progress.accepted || 0),
-            currentName: progress.brandReviewCurrentName ?? null,
-            message: progress.message || "Brand review in progress…",
-          });
-          if (
-            progress.stage !== "brand_review" &&
-            progress.stopRequested
-          ) {
-            setBatchBusy(false);
-            setStopping(false);
-          }
-        }
-        if (Array.isArray(data.competitors) && data.competitors.length) {
-          onCompetitorsUpdated?.(data.competitors);
-        }
-      } catch {
-        /* ignore poll errors */
-      }
-    }, 1200);
-  }
-
   async function stopBrandReview() {
     if (!resolvedRunId || stopping) return;
     setStopping(true);
@@ -272,8 +236,8 @@ export function BrandReviewPanel({
     abortRef.current?.abort();
     const ac = new AbortController();
     abortRef.current = ac;
-    startPolling(resolvedRunId);
     try {
+      // The batch runs in the background; follow it through the status poll.
       const res = await fetch("/api/competitors/brand-review", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -283,19 +247,47 @@ export function BrandReviewPanel({
       const data = await res.json().catch(() => ({}));
       if (ac.signal.aborted) return;
       if (!res.ok) throw new Error(data.error || "Brand review failed");
-      if (Array.isArray(data.competitors)) {
-        onCompetitorsUpdated?.(data.competitors);
+
+      let finished: { progress?: JobProgress } | null = null;
+      while (!ac.signal.aborted) {
+        await new Promise((r) => setTimeout(r, 1500));
+        if (ac.signal.aborted) return;
+        const poll = await fetch(
+          `/api/search/status?jobId=${encodeURIComponent(resolvedRunId)}`,
+          { signal: ac.signal },
+        ).catch(() => null);
+        if (!poll?.ok) continue;
+        const status = await poll.json();
+        const progress = status.job?.progress as JobProgress | undefined;
+        if (Array.isArray(status.competitors) && status.competitors.length) {
+          onCompetitorsUpdated?.(status.competitors);
+        }
+        if (!progress) continue;
+        if (progress.stage === "brand_review") {
+          setLocalProgress({
+            done: progress.brandReviewDone ?? 0,
+            total: progress.brandReviewTotal ?? competitors.length,
+            currentName: progress.brandReviewCurrentName ?? null,
+            message: progress.message || "Brand review in progress…",
+          });
+          continue;
+        }
+        finished = status.job;
+        break;
       }
-      const wasStopped = Boolean(data.stopped);
+      if (!finished) return;
+      const message = finished.progress?.message || "";
+      const failed = /^Brand review failed/i.test(message);
+      if (failed) throw new Error(message);
       setLocalProgress({
-        done: data.updated ?? competitors.length,
-        total: competitors.length,
+        done: finished.progress?.brandReviewDone ?? competitors.length,
+        total: finished.progress?.brandReviewTotal ?? competitors.length,
         currentName: null,
-        message: wasStopped
-          ? `Brand review stopped · ${data.updated ?? 0} updated`
+        message: finished.progress?.stopRequested
+          ? message || "Brand review stopped"
           : force
-            ? `Redo complete · ${data.updated ?? competitors.length} updated`
-            : `Brand review complete · ${data.updated ?? competitors.length} updated`,
+            ? `Redo complete · ${message}`
+            : `Brand review complete · ${message}`,
       });
     } catch (err) {
       if ((err as Error).name === "AbortError") {

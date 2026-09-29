@@ -1,0 +1,65 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Fixture Agency</title>
+<style>
+  body{margin:0;font-family:Arial,sans-serif;background:#fff;color:#111}
+  header{display:flex;justify-content:space-between;align-items:center;padding:18px 40px;background:#fff}
+  header nav a{margin:0 12px}
+  .btn{display:inline-block;background:#e4007c;color:#fff;padding:14px 28px;border-radius:999px;font-weight:700;text-decoration:none}
+  section{padding:80px 40px}
+  .hero{display:grid;grid-template-columns:1fr 1fr;gap:40px;background:#140a2e;color:#fff}
+  .hero h1{font-size:56px;line-height:1.05;font-weight:800}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:24px}
+  .card{border-radius:18px;box-shadow:0 8px 24px rgba(0,0,0,.12);padding:24px;background:#fff}
+  h2{font-size:40px;font-weight:700}
+  input,select,textarea{display:block;width:100%;padding:12px;border:1px solid #ccc;border-radius:8px;margin-bottom:12px}
+  .modal{display:none;position:fixed;inset:0}
+  .step{display:none}.step.active{display:block}
+  .hp{position:absolute;left:-9999px}
+  footer{background:#0b0b0b;color:#eee;padding:48px 40px;display:grid;grid-template-columns:repeat(3,1fr)}
+</style>
+</head>
+<body>
+<header><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" width="120" height="40" alt="logo"><nav><a href="#s">Services</a><a href="#w">Work</a><a href="#c">Contact</a></nav><a class="btn" href="#c">Book a call</a></header>
+<main>
+  <section class="hero">
+    <div><h1>Growth marketing that pays for itself</h1><p>We run paid search and social for ambitious brands across Australia and beyond.</p><a class="btn" href="#c">Get my free audit</a></div>
+    <form class="hero-form">
+      <input name="first_name" placeholder="John">
+      <input name="email" type="email" placeholder="john@company.com">
+      <input name="website" placeholder="https://yourbusiness.com">
+      <input class="hp" name="hp_field" tabindex="-1" placeholder="Leave this field empty">
+      <button type="submit">Get my audit</button>
+    </form>
+  </section>
+  <section id="s">
+    <h2>What we take off your plate</h2>
+    <div class="grid">
+      <div class="card"><h3>Paid search</h3><p>Campaign builds, bid strategy and weekly optimisation across every account we run for you.</p></div>
+      <div class="card"><h3>Paid social</h3><p>Creative testing and audience work across Meta and TikTok so every dollar of spend works harder.</p></div>
+      <div class="card"><h3>Landing pages</h3><p>Conversion-focused pages built and tested by our team with clear goals for every visit.</p></div>
+      <div class="card"><h3>Reporting</h3><p>One live dashboard with the numbers that matter to your business, updated every single day.</p></div>
+    </div>
+  </section>
+  <section id="c">
+    <h2>Tell us about your business</h2>
+    <p>Three quick steps and we will come back with a plan within two business days.</p>
+    <form class="multi">
+      <div class="step active"><h4>Your details</h4><label for="fn">Full name *</label><input id="fn" name="full_name" required><label for="em">Work email</label><input id="em" name="work_email" type="email" required></div>
+      <div class="step"><h4>Your business</h4><label for="rev">Monthly revenue</label><select id="rev" name="revenue"><option value="">Select…</option><option>Under $50k</option><option>$50k–$250k</option><option>$250k+</option></select></div>
+      <div class="step"><h4>Your challenge</h4><fieldset><legend>Main goal</legend><label><input type="radio" name="goal" value="leads">More leads</label><label><input type="radio" name="goal" value="sales">More online sales</label></fieldset><label for="msg">Anything else?</label><textarea id="msg" name="message"></textarea></div>
+      <button type="button">Next</button><button type="submit">Send my brief</button>
+    </form>
+  </section>
+  <section>
+    <h2>Frequently asked questions</h2>
+    <details><summary>How long until results?</summary><p>Most clients see movement inside the first month of working together with us.</p></details>
+    <details><summary>Do you lock me in?</summary><p>No, every engagement is month to month with thirty days notice.</p></details>
+  </section>
+  <div class="modal"><h2>Hidden popup heading</h2><form><input name="popup_email" placeholder="Email"><input name="popup_name" placeholder="Name"></form></div>
+</main>
+<footer><div><h4>Company</h4><a href="#">About</a><a href="#">Careers</a></div><div><h4>Services</h4><a href="#">Search</a><a href="#">Social</a></div><div><h4>Contact</h4><a href="#">Email us</a></div></footer>
+</body>
+</html>

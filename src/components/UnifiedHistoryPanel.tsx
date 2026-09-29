@@ -1,5 +1,6 @@
 "use client";
 
+import { statusLabel } from "@/lib/progressLabels";
 import { useState } from "react";
 import type { UnifiedHistoryItem } from "@/lib/historyUnified";
 
@@ -91,7 +92,7 @@ export function UnifiedHistoryPanel({
               <div className="history-item-top">
                 <strong className="history-keyword">{run.title}</strong>
                 <span className={`status-pill status-${run.status}`}>
-                  {run.status}
+                  {statusLabel(run.status)}
                 </span>
               </div>
               <div className="history-item-meta">

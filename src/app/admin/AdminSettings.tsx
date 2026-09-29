@@ -4,6 +4,8 @@ import { FormEvent, useCallback, useEffect, useState } from "react";
 import { formatCredits, subunitsToCredits } from "@/lib/accounting/units";
 import { formatDateTime, providerLabel } from "@/lib/credits/display";
 import { CreditAllotmentGuide } from "@/components/CreditAllotmentGuide";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import AdminConversionRules from "./AdminConversionRules";
 import type { AppSettings, ConversionRuleSet, ProviderId } from "@/lib/types";
 
 interface SettingsPayload {
@@ -11,6 +13,7 @@ interface SettingsPayload {
   conversionRuleSets: ConversionRuleSet[];
   providers: readonly ProviderId[];
   providerKeyConfigured: Record<string, boolean>;
+  effectiveConversionRuleVersion?: number;
 }
 
 export default function AdminSettings() {
@@ -29,12 +32,11 @@ export default function AdminSettings() {
   const [disabledProviders, setDisabledProviders] = useState<string[]>([]);
   const [disabledModels, setDisabledModels] = useState("");
 
-  const [rulesJson, setRulesJson] = useState("");
-  const [ceilingJson, setCeilingJson] = useState("");
-  const [ruleNote, setRuleNote] = useState("");
-  const [publishing, setPublishing] = useState(false);
+  const [confirmDisable, setConfirmDisable] = useState<string[] | null>(null);
 
-  const applySettings = useCallback((payload: SettingsPayload) => {
+  // Each form is refreshed only from its own save, so saving one never throws
+  // away unsaved edits in the other.
+  const applyGlobal = useCallback((payload: SettingsPayload) => {
     const s = payload.settings;
     setPublicSignupEnabled(s.publicSignupEnabled);
     setDefaultAllowance(String(subunitsToCredits(s.defaultAllowanceSubunits)));
@@ -48,39 +50,45 @@ export default function AdminSettings() {
     );
     setDisabledProviders(s.disabledProviders ?? []);
     setDisabledModels((s.disabledModels ?? []).join("\n"));
-
-    const active =
-      payload.conversionRuleSets.find(
-        (r) => r.version === s.activeConversionRuleVersion,
-      ) ?? payload.conversionRuleSets[0];
-    if (active) {
-      setRulesJson(JSON.stringify(active.rates, null, 2));
-      setCeilingJson(JSON.stringify(active.perCallReservationCeiling, null, 2));
-    }
   }, []);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await fetch("/api/admin/settings", { cache: "no-store" });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error || "Failed to load settings");
-      setData(json as SettingsPayload);
-      applySettings(json as SettingsPayload);
-      setError(null);
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setLoading(false);
-    }
-  }, [applySettings]);
+  const load = useCallback(
+    async (refresh: "all" | "global" | "rules" = "all") => {
+      setLoading(true);
+      try {
+        const res = await fetch("/api/admin/settings", { cache: "no-store" });
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error || "Failed to load settings");
+        setData(json as SettingsPayload);
+        if (refresh !== "rules") applyGlobal(json as SettingsPayload);
+        setError(null);
+      } catch (err) {
+        setError((err as Error).message);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [applyGlobal],
+  );
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  async function saveSettings(e: FormEvent) {
+  function requestSave(e: FormEvent) {
     e.preventDefault();
+    const newlyDisabled = disabledProviders.filter(
+      (id) => !(data?.settings.disabledProviders ?? []).includes(id as never),
+    );
+    if (newlyDisabled.length) {
+      setConfirmDisable(newlyDisabled);
+      return;
+    }
+    void saveSettings();
+  }
+
+  async function saveSettings() {
+    setConfirmDisable(null);
     setError(null);
     setSuccess(null);
     setSaving(true);
@@ -105,56 +113,11 @@ export default function AdminSettings() {
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || "Failed to save settings");
       setSuccess("Settings saved.");
-      await load();
+      await load("global");
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setSaving(false);
-    }
-  }
-
-  async function publishRules(e: FormEvent) {
-    e.preventDefault();
-    setError(null);
-    setSuccess(null);
-
-    let rates: unknown;
-    let ceiling: unknown;
-    try {
-      rates = JSON.parse(rulesJson);
-    } catch {
-      setError("Conversion rates must be valid JSON.");
-      return;
-    }
-    try {
-      ceiling = JSON.parse(ceilingJson);
-    } catch {
-      setError("Per-call reservation ceilings must be valid JSON.");
-      return;
-    }
-
-    setPublishing(true);
-    try {
-      const res = await fetch("/api/admin/settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          rates,
-          perCallReservationCeiling: ceiling,
-          note: ruleNote,
-        }),
-      });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error || "Failed to publish rules");
-      setSuccess(
-        `Published conversion rules v${json.ruleSet.version}. Existing charges keep their original version.`,
-      );
-      setRuleNote("");
-      await load();
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setPublishing(false);
     }
   }
 
@@ -183,12 +146,11 @@ export default function AdminSettings() {
           {error}
         </p>
       ) : null}
-      {success ? <p className="credits-pending">{success}</p> : null}
 
       <section className="panel glow-panel admin-panel">
         <h2>Global settings</h2>
         <CreditAllotmentGuide />
-        <form onSubmit={(e) => void saveSettings(e)}>
+        <form onSubmit={requestSave}>
           <div className="admin-settings-stack">
             <label className="admin-checkbox">
               <input
@@ -299,8 +261,8 @@ export default function AdminSettings() {
 
           <h3>Provider restrictions</h3>
           <p className="muted">
-            Disabling a provider blocks it for every user. Per-user provider and
-            model restrictions are set on the individual account.
+            Disabling a provider blocks it for every user. To limit one person,
+            use the Limits tab on their account in Users.
           </p>
           <div className="admin-provider-grid">
             {data.providers.map((id) => (
@@ -342,97 +304,30 @@ export default function AdminSettings() {
             <button type="submit" className="search-btn" disabled={saving}>
               {saving ? "Saving…" : "Save settings"}
             </button>
+            {success ? <span className="credits-pending" role="status">{success}</span> : null}
           </div>
         </form>
+        {confirmDisable ? (
+          <ConfirmDialog
+            open
+            title={`Turn off ${confirmDisable.map((id) => providerLabel(id, "admin")).join(", ")} for everyone?`}
+            description="Every task that needs it will be refused for all users, including runs already queued, until you turn it back on."
+            confirmLabel="Turn off and save"
+            tone="danger"
+            busy={saving}
+            onConfirm={() => void saveSettings()}
+            onCancel={() => setConfirmDisable(null)}
+          />
+        ) : null}
       </section>
 
       <section className="panel glow-panel admin-panel">
         <h2>Credit conversion rules</h2>
-        <p className="muted">
-          Rates convert measured provider usage into application credits. Rules
-          are versioned: publishing a new version never alters historical
-          charges, which keep the version they were priced with. Monetary prices
-          are optional — leave them out and estimated cost reads &ldquo;No price
-          configured&rdquo; instead of $0.
-        </p>
-        <p className="muted">
-          Active version: <strong>v{data.settings.activeConversionRuleVersion}</strong>
-        </p>
-
-        <form onSubmit={(e) => void publishRules(e)}>
-          <label className="admin-field">
-            <span className="search-label">
-              Rates — provider → &ldquo;default&rdquo; or model key → rate
-            </span>
-            <textarea
-              className="search-textarea"
-              rows={16}
-              value={rulesJson}
-              onChange={(e) => setRulesJson(e.target.value)}
-              spellCheck={false}
-              disabled={publishing}
-            />
-          </label>
-          <label className="admin-field">
-            <span className="search-label">
-              Per-call reservation ceiling (subunits per provider)
-            </span>
-            <textarea
-              className="search-textarea"
-              rows={9}
-              value={ceilingJson}
-              onChange={(e) => setCeilingJson(e.target.value)}
-              spellCheck={false}
-              disabled={publishing}
-            />
-          </label>
-          <label className="admin-field">
-            <span className="search-label">Note for this version</span>
-            <input
-              className="search-input"
-              value={ruleNote}
-              onChange={(e) => setRuleNote(e.target.value)}
-              placeholder="Why these rates changed"
-              disabled={publishing}
-            />
-          </label>
-          <div className="admin-actions-row" style={{ marginTop: 12 }}>
-            <button type="submit" className="search-btn" disabled={publishing}>
-              {publishing ? "Publishing…" : "Publish new version"}
-            </button>
-          </div>
-        </form>
-
-        <h3>Published versions</h3>
-        <div className="table-wrap">
-          <table className="comp-table">
-            <thead>
-              <tr>
-                <th>Version</th>
-                <th>Created</th>
-                <th>Note</th>
-                <th>Providers priced</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.conversionRuleSets.map((set) => (
-                <tr key={set.version}>
-                  <td>
-                    v{set.version}
-                    {set.version === data.settings.activeConversionRuleVersion
-                      ? " (active)"
-                      : ""}
-                  </td>
-                  <td className="admin-nowrap">
-                    {formatDateTime(set.createdAt)}
-                  </td>
-                  <td className="muted">{set.note ?? "—"}</td>
-                  <td>{Object.keys(set.rates).length}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <AdminConversionRules
+          sets={data.conversionRuleSets}
+          activeVersion={data.effectiveConversionRuleVersion ?? data.settings.activeConversionRuleVersion}
+          onPublished={() => load("rules")}
+        />
       </section>
 
       <section className="panel glow-panel admin-panel">

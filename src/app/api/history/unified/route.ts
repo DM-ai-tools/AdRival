@@ -9,6 +9,7 @@ import {
   getProjectSpace,
   listProjects,
 } from "@/lib/db";
+import { competitorForList } from "@/lib/competitorView";
 import {
   errorResponse,
   HttpError,
@@ -87,7 +88,7 @@ export async function GET(request: Request) {
             : job.progress,
         },
         competitors: getCompetitorsByRun(runId).map((competitor) => ({
-          ...competitor,
+          ...competitorForList(competitor),
           pageAnalysis: maskPageAnalysis(competitor.pageAnalysis),
         })),
         credits: reportRunCredits(user.id, runId),

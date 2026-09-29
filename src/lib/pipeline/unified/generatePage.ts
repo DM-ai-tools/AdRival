@@ -45,7 +45,7 @@ export type UnifiedProgressInfo = {
   batchCount?: number;
 };
 
-function clampTokens(desired: number): number {
+export function clampTokens(desired: number): number {
   const fromEnv = Number(process.env.ANTHROPIC_MAX_OUTPUT_TOKENS || "");
   const envCap =
     Number.isFinite(fromEnv) && fromEnv >= 4000
@@ -59,7 +59,7 @@ type StreamedMessage = {
   stop_reason: string | null;
 };
 
-type ContentPart =
+export type ContentPart =
   | { type: "text"; text: string }
   | {
       type: "image";
@@ -70,12 +70,13 @@ type ContentPart =
       };
     };
 
-async function streamUnifiedMessage(input: {
+export async function streamUnifiedMessage(input: {
   model: string;
   maxTokens: number;
   content: ContentPart[];
   onProgress?: (info: { chars: number }) => void;
   signal?: AbortSignal;
+  system?: string;
 }): Promise<StreamedMessage> {
   if (input.signal?.aborted) {
     const err = new Error("Recreation stopped");
@@ -87,7 +88,7 @@ async function streamUnifiedMessage(input: {
     {
       model: input.model,
       max_tokens: input.maxTokens,
-      system: SYSTEM,
+      system: input.system || SYSTEM,
       messages: [{ role: "user", content: input.content }],
     },
     input.signal ? { signal: input.signal } : undefined,
@@ -117,7 +118,7 @@ async function streamUnifiedMessage(input: {
   return message as StreamedMessage;
 }
 
-function textFromMessage(message: StreamedMessage): string {
+export function textFromMessage(message: StreamedMessage): string {
   return message.content.map((block) => (block.type === "text" ? block.text || "" : "")).join("\n");
 }
 
@@ -224,7 +225,7 @@ export async function generateUnifiedPage(
   };
 
   const payload = parseUnifiedBriefPayload(brief);
-  const imageBudget = Math.min(Number(payload.imageBudget) || 1, 1);
+  const imageBudget = Math.min(Number(payload.imageBudget) || 1, 6);
   const { bodySections: bodyPlan } = splitBriefSections(payload);
 
   // ——— Pass A: deterministic spine (no Claude call) ———

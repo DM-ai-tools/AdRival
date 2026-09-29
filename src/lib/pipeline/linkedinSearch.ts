@@ -16,13 +16,18 @@ import {
   isLookupJobSuppressed,
   saveCompetitor,
   saveJob,
+  saveJobProgress,
   saveLookupAd,
   saveLookupJob,
 } from "../db";
 import {
   buildGuardrailContext,
   guardCompetitorHeuristic,
+  precheckCompetitor,
 } from "../guardrails";
+import { looksLikeEnglish } from "./adLanguage";
+import { searchQueriesForKeywords } from "./searchQueries";
+import { isCreditError } from "../accounting/errors";
 import {
   MAX_SEARCH_QUERIES_LINKEDIN,
   TARGET_COMPETITORS,
@@ -53,12 +58,19 @@ import { enrichLookupPageMetrics } from "./lookupEnrichment";
 import { linkedInCountriesFromGeo } from "../geo";
 
 const MAX_LI_PAGES = 5;
-const MAX_COMPANY_COUNT_PAGES = 5;
+const MAX_COMPANY_COUNT_PAGES = 3;
+/** How many advertisers ahead of the current one get their AI review started. */
+const LI_REVIEW_AHEAD = 3;
 
-/** Count company ads across LinkedIn Ad Library pages for active-ads gate. */
+/**
+ * Count company ads across LinkedIn Ad Library pages for active-ads gate.
+ * The company search is by name, so only ads from the same advertiser page
+ * (when known) are counted — not every company with a similar name.
+ */
 async function countLinkedInCompanyAds(
   companyName: string,
   countries: string,
+  pageId?: string | null,
 ): Promise<{
   count: number;
   maxDays: number;
@@ -88,6 +100,7 @@ async function countLinkedInCompanyAds(
       if (!id || seen.has(id)) continue;
       seen.add(id);
       const c = mapLinkedInAdToCandidate(raw);
+      if (pageId && c.pageId && c.pageId !== pageId) continue;
       withMeta.push(c);
       count += 1;
       if (c.daysRunning > maxDays) maxDays = c.daysRunning;
@@ -177,22 +190,11 @@ export async function runLinkedInSearch(
           categoryLabel: selectedCategory?.label || null,
           maxQueries: 6,
         })
-      : await (async () => {
-          const expanded = new Set<string>(keywords);
-          for (const kw of keywords) {
-            try {
-              for (const q of await expandKeywordQueries(kw, businessProfile, {
-                geoMode,
-                targetLocations,
-                selectedCategory,
-              }))
-                expanded.add(q);
-            } catch {
-              /* seed only */
-            }
-          }
-          return Array.from(expanded).slice(0, MAX_SEARCH_QUERIES_LINKEDIN);
-        })();
+      : await searchQueriesForKeywords(
+          keywords,
+          (kw) => expandKeywordQueries(kw, businessProfile, { geoMode, targetLocations, selectedCategory }),
+          MAX_SEARCH_QUERIES_LINKEDIN,
+        );
 
     outer: for (const query of queries) {
       if (isSearchJobSuppressed(jobId)) break outer;
@@ -203,7 +205,7 @@ export async function runLinkedInSearch(
         if (accepted.length >= TARGET_COMPETITORS) break outer;
         if (isSearchJobSuppressed(jobId)) break outer;
         job.progress.message = `LinkedIn keyword "${query}" — page ${pages + 1}…`;
-        saveJob(job);
+        saveJobProgress(job);
 
         let res;
         try {
@@ -214,7 +216,7 @@ export async function runLinkedInSearch(
           });
         } catch (err) {
           job.progress.message = `LinkedIn search error: ${(err as Error).message}`;
-          saveJob(job);
+          saveJobProgress(job);
           break;
         }
 
@@ -234,90 +236,130 @@ export async function runLinkedInSearch(
           byAdvertiser.set(c.pageId, list);
         }
 
+        const guardCtx = buildGuardrailContext({
+          businessProfile,
+          selectedCategoryLabel: selectedCategory?.label || null,
+          searchKeywords: keywords,
+          override: options?.guardrailOverride || null,
+          skipGuardrails: Boolean(options?.skipGuardrails),
+        });
+        const textOf = (list: AdCandidate[]) =>
+          list.map((a) => `${a.pageName}\n${a.title}\n${a.body}\n${a.fullText}`).join("\n");
+
+        // Cheap checks first (no AI): keyword in the copy, English, and the
+        // plugin / course / publisher / foreign-site pre-check.
+        const eligible: Array<[string, AdCandidate[]]> = [];
         for (const [pageId, pageAds] of byAdvertiser) {
-          if (accepted.length >= TARGET_COMPETITORS) break outer;
           if (seenAdvertisers.has(pageId) || analyzed.has(pageId)) continue;
           analyzed.add(pageId);
-
-          const pool = pageAds;
-          let primary = pickBestLinkedInCandidate(pool);
-          const signal = `${primary.title}\n${primary.body}\n${primary.fullText}`;
-          if (!hasServiceKeywordSignal(signal, signalOptions)) {
+          const copy = textOf(pageAds);
+          if (!hasServiceKeywordSignal(copy, signalOptions) || !looksLikeEnglish(copy)) {
             job.progress.rejected += 1;
             continue;
           }
+          const pre = precheckCompetitor(guardCtx, {
+            pageName: pageAds[0]?.pageName || "",
+            adText: copy,
+            landingPageUrls: pageAds.map((a) => a.landingPageUrl),
+            targetCountries: liCountries.split(","),
+          });
+          if (!pre.ok) {
+            job.progress.rejected += 1;
+            job.progress.message = `Skipped ${pageAds[0]?.pageName}: ${pre.reason}`;
+            continue;
+          }
+          eligible.push([pageId, pageAds]);
+        }
 
-          let filter;
-          try {
-            filter = await analyzeAdCandidate(
+        // Reviews for the next few advertisers run while the current one is decided.
+        const reviews = new Map<string, Promise<{ ok: true; value: Awaited<ReturnType<typeof analyzeAdCandidate>> } | { ok: false; error: unknown }>>();
+        const startReview = (index: number) => {
+          const entry = eligible[index];
+          if (!entry || reviews.has(entry[0])) return;
+          const pool = entry[1];
+          const first = pickBestLinkedInCandidate(pool);
+          reviews.set(
+            entry[0],
+            analyzeAdCandidate(
               keywords[0] || query,
-              primary,
+              first,
               null,
-              pool.filter((a) => a.adArchiveId !== primary.adArchiveId).slice(0, 5),
+              pool.filter((a) => a.adArchiveId !== first.adArchiveId).slice(0, 5),
               {
-                relaxed: accepted.length >= 2,
+                relaxed: accepted.length >= 5,
                 businessProfile,
                 searchKeywords: keywords,
                 selectedCategory,
+                targetCountry: liCountries.split(",")[0] || null,
               },
-            );
-          } catch {
+            ).then(
+              (value) => ({ ok: true as const, value }),
+              (error: unknown) => ({ ok: false as const, error }),
+            ),
+          );
+        };
+
+        for (const [index, [pageId, pageAds]] of eligible.entries()) {
+          if (accepted.length >= TARGET_COMPETITORS) break outer;
+          if (isSearchJobSuppressed(jobId)) break outer;
+          for (let j = index; j <= index + LI_REVIEW_AHEAD; j += 1) startReview(j);
+
+          const pool = pageAds;
+          const primary = pickBestLinkedInCandidate(pool);
+          job.progress.message = `AI reviewing ${primary.pageName} (${pool.length} ads)…`;
+          saveJobProgress(job);
+
+          const outcome = await reviews.get(pageId)!;
+          if (!outcome.ok) {
+            if (isCreditError(outcome.error)) throw outcome.error;
             job.progress.rejected += 1;
             continue;
           }
+          const filter = outcome.value;
 
           if (
             !filter.relevant ||
             (!businessProfile && !filter.isMarketingAgency)
           ) {
             job.progress.rejected += 1;
+            job.progress.message = `Rejected ${primary.pageName}: ${filter.reason}`;
             continue;
           }
 
-          const guard = guardCompetitorHeuristic(
-            buildGuardrailContext({
-              businessProfile,
-              selectedCategoryLabel: selectedCategory?.label || null,
-              searchKeywords: keywords,
-              override: options?.guardrailOverride || null,
-              skipGuardrails: Boolean(options?.skipGuardrails),
-            }),
-            {
-              pageName: primary.pageName,
-              adText: primary.fullText || primary.body,
-              landingPageUrl: primary.landingPageUrl,
-              services: filter.services,
-              llmReason: filter.reason,
-            },
-          );
+          const guard = guardCompetitorHeuristic(guardCtx, {
+            pageName: primary.pageName,
+            adText: textOf(pool),
+            landingPageUrl: primary.landingPageUrl,
+            services: filter.services,
+          });
           if (!guard.ok) {
             job.progress.rejected += 1;
             job.progress.message = `Guardrail blocked ${primary.pageName}: ${guard.reason}`;
-            saveJob(job);
+            saveJobProgress(job);
             continue;
           }
 
           job.progress.message = `Counting LinkedIn ads for ${primary.pageName}…`;
-          saveJob(job);
+          saveJobProgress(job);
 
           let activeCount = pageAds.length;
           try {
             const counted = await countLinkedInCompanyAds(
               primary.pageName,
               liCountries,
+              pageId,
             );
             if (counted.count > activeCount) activeCount = counted.count;
-            if (counted.sample) {
-              primary = pickBestLinkedInCandidate([primary, counted.sample]);
-            }
-          } catch {
+            // The reviewed ad stays the sample: a counted ad was never reviewed.
+          } catch (err) {
+            if (isCreditError(err)) throw err;
             // keep batch count
           }
 
           if (!meetsActiveAdsThreshold(activeCount, thresholds)) {
             job.progress.rejected += 1;
             job.progress.message = `Skipped ${primary.pageName}: ${activeCount} ads (need ≥${thresholds.minActiveAds})`;
-            saveJob(job);
+            saveJobProgress(job);
             continue;
           }
 
@@ -350,7 +392,7 @@ export async function runLinkedInSearch(
               liUrl,
             });
             job.progress.message = `Holding ${primary.pageName}: outside target geo — seeking locals first`;
-            saveJob(job);
+            saveJobProgress(job);
             continue;
           }
 

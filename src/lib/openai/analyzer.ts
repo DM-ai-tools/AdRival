@@ -72,6 +72,37 @@ const KEYWORD_STOPWORDS = new Set([
   "area",
   "city",
   "town",
+  // Words every ad uses ("Call now", "Book a strategy call", "our team") —
+  // as single tokens they matched unrelated advertisers. Whole keyword
+  // phrases that contain them still match.
+  "call",
+  "calls",
+  "book",
+  "booking",
+  "strategy",
+  "management",
+  "agency",
+  "agencies",
+  "marketing",
+  "digital",
+  "solution",
+  "solutions",
+  "expert",
+  "experts",
+  "team",
+  "growth",
+  "get",
+  "now",
+  "today",
+  "more",
+  "learn",
+  "help",
+  "plan",
+  "results",
+  "professional",
+  "quality",
+  "top",
+  "leading",
 ]);
 
 function tokenizeSignal(raw: string): string[] {
@@ -102,7 +133,34 @@ export function serviceSignalTokens(options?: ServiceSignalOptions): string[] {
   return Array.from(new Set(tokenizeSignal(parts.join(" "))));
 }
 
-/** 0–1 overlap of signal tokens present in ad copy. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Whole-word test, allowing a plural ending ("audit" matches "audits", not "auditorium"). */
+function hasWord(blob: string, token: string): boolean {
+  return new RegExp(`(?<![a-z0-9])${escapeRegExp(token)}(?:s|es)?(?![a-z0-9])`).test(blob);
+}
+
+/**
+ * Ad copy only: drops the CTA, URL, display-URL and page-category lines the
+ * ad mappers add to fullText, so "CTA: Call now" or a landing URL such as
+ * "/what-is-seo" cannot count as the advertiser selling the service.
+ */
+export function adCopyForSignal(text: string): string {
+  return String(text || "")
+    .split("\n")
+    .filter(
+      (line) =>
+        !/^\s*(cta|landing page url|caption \/ display url|page categories)\s*:/i.test(line) &&
+        !/^\s*(https?:\/\/|www\.)\S*\s*$/i.test(line) &&
+        !/^\s*[a-z0-9-]+(\.[a-z0-9-]+)+(\/\S*)?\s*$/i.test(line),
+    )
+    .join("\n")
+    .replace(/https?:\/\/\S+/gi, " ");
+}
+
+/** 0–1 overlap of signal tokens present in ad copy (whole words only). */
 export function serviceKeywordOverlapScore(
   text: string,
   options?: ServiceSignalOptions,
@@ -112,7 +170,7 @@ export function serviceKeywordOverlapScore(
   const blob = text.toLowerCase();
   let hits = 0;
   for (const t of tokens) {
-    if (blob.includes(t)) hits += 1;
+    if (hasWord(blob, t)) hits += 1;
   }
   return Math.min(1, hits / Math.min(4, tokens.length));
 }
@@ -158,7 +216,7 @@ export async function expandKeywordQueries(
     targetLocations?: BusinessLocation[] | null;
     selectedCategory?: BusinessCategory | null;
   },
-  model?: string,
+  model: string = OPENROUTER_FAST_MODEL,
 ): Promise<string[]> {
   const locLabels = (geoOptions?.targetLocations || [])
     .map((l) => l.suburb || l.city || l.label)
@@ -170,6 +228,14 @@ export async function expandKeywordQueries(
   const categoryLabel = geoOptions?.selectedCategory?.label || "";
 
   if (businessProfile) {
+    // An agency's rivals advertise "SEO agency" / "SEO services"; the bare
+    // word "SEO" mostly surfaces plugins, tools and how-to guides.
+    const agency = isAgencySeed(businessProfile, geoOptions?.selectedCategory);
+    const providerQueries = agency
+      ? /\b(agency|agencies|services?|company|consultant|firm|specialists?)\b/i.test(keyword)
+        ? [keyword]
+        : [`${keyword} agency`, `${keyword} services`]
+      : [];
     const raw = await jsonCompletion<{ queries: string[] }>(
       `You expand Ad Library / ads-transparency search queries to find DIRECT competitors
 for a business in a specific industry (NOT marketing agencies unless the business itself is an agency).
@@ -183,7 +249,12 @@ Industry context:
 ${wantLocal && locLabels.length ? `- Target markets: ${locLabels.join(", ")} — include location-qualified queries` : ""}
 
 Return queries that surface rivals in the SAME industry advertising similar products/services.
-Prefer precise service phrases from the seed keyword and offerings — avoid generic words like "business" or "online".`,
+Prefer precise service phrases from the seed keyword and offerings — avoid generic words like "business" or "online".
+Queries must find businesses that SELL the service, not software, plugins, courses, guides or news about the topic.${
+        agency
+          ? `\nThe business is an agency: every query should name the provider, e.g. "<service> agency", "<service> services", "<service> company".`
+          : ""
+      }`,
       `Seed keyword: "${keyword}"
 Also consider these suggested competitor keywords: ${businessProfile.competitorKeywords.join(", ")}
 Return 4-6 high-yield search queries that tightly match the seed keyword / offerings.${wantLocal && locLabels.length ? ` Include 1-2 with city/suburb: ${locLabels.join(", ")}.` : ""}`,
@@ -195,17 +266,26 @@ Return 4-6 high-yield search queries that tightly match the seed keyword / offer
     const geoSeeded =
       wantLocal && locLabels.length
         ? locLabels.slice(0, 2).flatMap((loc) => [
-            `${keyword} ${loc}`,
+            `${agency ? providerQueries[0] : keyword} ${loc}`,
             categoryLabel ? `${categoryLabel} ${loc}` : "",
           ])
         : [];
-    const seeded = [
-      keyword,
-      categoryLabel,
-      ...businessProfile.competitorKeywords.slice(0, 3),
-      ...geoSeeded,
-      ...queries,
-    ];
+    const seeded = agency
+      ? [
+          ...providerQueries,
+          ...geoSeeded,
+          ...queries,
+          categoryLabel,
+          ...businessProfile.competitorKeywords.slice(0, 3),
+          keyword,
+        ]
+      : [
+          keyword,
+          categoryLabel,
+          ...businessProfile.competitorKeywords.slice(0, 3),
+          ...geoSeeded,
+          ...queries,
+        ];
     return Array.from(
       new Set(seeded.map((q) => q.trim()).filter(Boolean)),
     ).slice(0, 8);
@@ -247,8 +327,22 @@ const adFilterSchema = z.object({
   isMarketingAgency: z.boolean(),
   services: z.union([z.array(z.string()), z.string()]),
   bodyEvidence: z.string().optional().default(""),
+  advertiserType: z.string().optional().default(""),
   reason: z.string(),
 });
+
+/** What kind of business the advertiser is, as judged from its ads. */
+export const ADVERTISER_TYPES = [
+  "agency",
+  "service_provider",
+  "software_tool",
+  "physical_product",
+  "education_or_content",
+  "marketplace_or_directory",
+  "media_or_publisher",
+  "other",
+] as const;
+export type AdvertiserType = (typeof ADVERTISER_TYPES)[number];
 
 export interface AdFilterResult {
   relevant: boolean;
@@ -257,6 +351,83 @@ export interface AdFilterResult {
   services: ServiceLabel[];
   bodyEvidence: string;
   reason: string;
+  advertiserType?: AdvertiserType | null;
+}
+
+function normalizeAdvertiserType(raw: unknown): AdvertiserType | null {
+  const t = String(raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  return (ADVERTISER_TYPES as readonly string[]).includes(t) ? (t as AdvertiserType) : null;
+}
+
+/** True when the seed business itself sells marketing services. */
+export function isAgencySeed(
+  profile: BusinessProfile | null | undefined,
+  selectedCategory?: BusinessCategory | null,
+  searchKeywords: string[] = [],
+): boolean {
+  if (!profile) return true;
+  return /agency|ppc|google ads|digital marketing|paid media|seo agency|marketing services/i.test(
+    [
+      profile.industry,
+      profile.subIndustry,
+      profile.positioningSummary,
+      ...(profile.offerings || []),
+      selectedCategory?.label || "",
+      ...searchKeywords,
+    ]
+      .filter(Boolean)
+      .join(" "),
+  );
+}
+
+/**
+ * Advertiser types that can never be a direct competitor of this seed.
+ * A service business competes with other providers of that service, not with
+ * the software, courses or publishers that talk about the same topic.
+ */
+export function blockedAdvertiserTypes(
+  profile: BusinessProfile | null | undefined,
+  selectedCategory?: BusinessCategory | null,
+  searchKeywords: string[] = [],
+): Set<AdvertiserType> {
+  const nonProvider: AdvertiserType[] = [
+    "software_tool",
+    "physical_product",
+    "education_or_content",
+    "marketplace_or_directory",
+    "media_or_publisher",
+  ];
+  if (isAgencySeed(profile, selectedCategory, searchKeywords)) return new Set(nonProvider);
+  const seedText = [profile?.industry, profile?.subIndustry].filter(Boolean).join(" ");
+  if (/\b(education|school|university|tutoring|training|academy|edtech|course)/i.test(seedText)) {
+    return new Set(["media_or_publisher"]);
+  }
+  if (/\b(saas|software|app|platform|tech)\b/i.test(seedText)) {
+    return new Set(["education_or_content", "media_or_publisher"]);
+  }
+  const serviceSeed =
+    selectedCategory?.type === "service" ||
+    (!selectedCategory && profile?.businessModel === "service");
+  if (serviceSeed) return new Set(nonProvider);
+  return new Set(["education_or_content", "media_or_publisher", "agency"]);
+}
+
+export function advertiserTypeLabel(t: AdvertiserType): string {
+  return (
+    {
+      agency: "a marketing agency",
+      service_provider: "a service provider",
+      software_tool: "a software tool",
+      physical_product: "a product brand",
+      education_or_content: "a course, guide or content brand",
+      marketplace_or_directory: "a marketplace or directory",
+      media_or_publisher: "a publisher",
+      other: "another kind of business",
+    } as Record<AdvertiserType, string>
+  )[t];
 }
 
 const SERVICE_ALIASES: Record<string, ServiceLabel> = {
@@ -349,11 +520,16 @@ export function hasServiceKeywordSignal(
     Boolean(options.selectedCategory);
 
   if (hasSearchContext) {
-    const overlap = serviceKeywordOverlapScore(text, options);
-    if (overlap > 0) return true;
-    // Soft pass only when explicitly filling / relaxed — never the default gate
-    if (options.softPass && text.trim().length >= 120) return true;
-    return false;
+    // Ad copy only, whole words only. No length-based soft pass: long copy
+    // with no keyword in it is still an unrelated advertiser.
+    const copy = adCopyForSignal(text);
+    if (serviceKeywordOverlapScore(copy, options) > 0) return true;
+    // Agencies often advertise the agency, not one service ("One agency,
+    // every channel"); the AI review then checks what they sell.
+    return (
+      isAgencySeed(profile, options.selectedCategory, options.searchKeywords || []) &&
+      hasAgencyPositioningSignal(copy)
+    );
   }
   return /google\s*ads|adwords|\bppc\b|paid search|paid media|media buying|seo\b|search engine|aeo|geo\b|answer engine|generative engine|\bsmm\b|social media marketing|social media management|meta ads|facebook ads|instagram ads|gmb|google business|google maps|digital marketing|marketing agency|advertising agency|lead gen|lead generation|performance marketing|growth agency|ads agency|ads audit|free audit/i.test(
     text,
@@ -385,6 +561,8 @@ export async function analyzeAdCandidate(
     businessProfile?: BusinessProfile | null;
     searchKeywords?: string[] | null;
     selectedCategory?: BusinessCategory | null;
+    /** Country the run searches in (ISO code, e.g. "AU"). */
+    targetCountry?: string | null;
   },
 ): Promise<AdFilterResult> {
   const scoreFloor = options?.relaxed
@@ -393,6 +571,18 @@ export async function analyzeAdCandidate(
   const profile = options?.businessProfile;
   const searchKeywords = options?.searchKeywords || [];
   const selectedCategory = options?.selectedCategory || null;
+  const targetCountry = String(options?.targetCountry || "").trim().toUpperCase() || null;
+  const agencySeed = isAgencySeed(profile, selectedCategory, searchKeywords);
+  const blockedTypes = profile
+    ? blockedAdvertiserTypes(profile, selectedCategory, searchKeywords)
+    : new Set<AdvertiserType>(["software_tool", "physical_product", "education_or_content", "marketplace_or_directory", "media_or_publisher"]);
+  const seedKind = agencySeed
+    ? "a marketing agency (sells done-for-you marketing services to other businesses)"
+    : blockedTypes.has("software_tool")
+      ? "a service provider"
+      : blockedTypes.has("agency")
+        ? "a product brand"
+        : "a business";
   const creatives = [ad, ...extraAds].map((a, i) => ({
     index: i + 1,
     daysRunning: a.daysRunning,
@@ -428,10 +618,29 @@ SEED BUSINESS:
 - Selected category: ${selectedCategory?.label || "n/a"}
 - Audience: ${profile.targetAudience || "n/a"}
 - Positioning: ${profile.positioningSummary}
+- The seed is ${seedKind}.${targetCountry ? `\n- Market: customers in ${targetCountry}` : ""}
 - Search keywords the user is matching on: ${keywordList}
 
-GOAL: Keep advertisers who sell the SAME (or clearly competing) service/product category.
+GOAL: Keep advertisers who SELL the SAME (or clearly competing) service/product to the same kind of customer.
+A competitor must be the same KIND of business as the seed. Mentioning the keyword is not enough:
+a plugin, proxy, rank tracker or other software that "helps with SEO", a "what is SEO" guide, a course,
+a blog, a news site or a directory is NOT a competitor of an SEO agency, even though its ad says "SEO".
 Reject: unrelated industries, vague "local business" ads, pure marketing agencies (unless the seed is an agency), and ads that only share a broad vertical without the same offering.
+
+advertiserType — what the ADVERTISER is (judge the company, not the topic of the ad):
+- agency: sells marketing / advertising / SEO services to other businesses (agencies, consultants, freelancers)
+- service_provider: sells a hands-on service it performs for the customer (clinic, trade, law firm, cleaner…)
+- software_tool: software, SaaS, app, plugin, extension, proxy/VPN, data or tracking tool, AI tool, self-serve platform
+- physical_product: sells goods
+- education_or_content: courses, coaching, guides, blogs, ebooks, "learn …" content as the offer
+- marketplace_or_directory: lists or matches many providers (marketplaces, directories, review/lead sites)
+- media_or_publisher: news, magazines, podcasts, influencers
+- other
+This seed may only compete with: ${ADVERTISER_TYPES.filter((t) => !blockedTypes.has(t) && t !== "other").join(", ")}.${
+      targetCountry
+        ? `\nIf the ads clearly serve a different country than ${targetCountry} (another country's phone numbers, prices, addresses or domain), set relevant=false.`
+        : ""
+    }
 
 CRITICAL READING RULES:
 - Read fullCreativeText / primaryBody before deciding.
@@ -442,7 +651,7 @@ CRITICAL READING RULES:
 Qualification for relevant=true:
 1) Ad copy clearly relates to "${keyword}" / selected category and seed offerings (score 0–1). Keyword match is mandatory — reject ads whose body does not mention or clearly imply the searched service/product.
 2) Same or tightly adjacent competitor — not a distant cousin in a huge industry.
-3) services: short tags for what they sell (free-form OK), e.g. ["Dental implants","Invisalign"].
+3) services: short tags for what THEY SELL (free-form OK), e.g. ["Dental implants","Invisalign"]. Name the actual product ("SEO plugin", "Residential proxies"), never the topic they mention.
 
 Reject (relevant=false) when:
 - Body is generic branding with no service/product match to the keywords
@@ -453,7 +662,8 @@ Reject (relevant=false) when:
 - Case-study landing pages for a software tool's customer are NOT agency competitors
 
 OUTPUT:
-- isMarketingAgency=true only if they are primarily a marketing agency.
+- isMarketingAgency=true only if they primarily sell marketing services to other businesses (agency, consultant, freelancer).
+- advertiserType: one of ${ADVERTISER_TYPES.join(", ")}.
 - relevant=true only for credible same-service competitors whose ads are keyword-relevant.`
     : `You qualify Facebook Ad Library advertisers for a MARKETING-AGENCY competitor finder.
 
@@ -480,6 +690,7 @@ OUTPUT:
 - services MUST be a JSON array, e.g. ["Google Ads","SEO"].
 - relevanceScore between 0 and 1.
 - isMarketingAgency=true ONLY when the advertiser's business is providing marketing services to other businesses.
+- advertiserType: one of ${ADVERTISER_TYPES.join(", ")} ("agency" for marketing agencies, "software_tool" for plugins/SaaS/proxies/AI tools, "education_or_content" for courses and guides).
 - relevant=true ONLY when all three pass AND isMarketingAgency=true.`;
 
   const raw = await jsonCompletion<{
@@ -504,48 +715,43 @@ OUTPUT:
       null,
       2,
     ),
-    `{ "relevant": boolean, "relevanceScore": number, "isMarketingAgency": boolean, "services": string[], "bodyEvidence": string, "reason": string }`,
+    `{ "relevant": boolean, "relevanceScore": number, "isMarketingAgency": boolean, "advertiserType": string, "services": string[], "bodyEvidence": string, "reason": string }`,
     OPENROUTER_FAST_MODEL,
   );
 
   const parsed = adFilterSchema.safeParse(raw);
+  const loose = raw as unknown as Record<string, unknown>;
   const services = normalizeServices(
     parsed.success
       ? parsed.data.services
-      : ((raw as { services?: string[] | string }).services ?? []),
+      : ((loose.services as string[] | string | undefined) ?? []),
     Boolean(profile),
   );
   const score = normalizeScore(
-    parsed.success
-      ? parsed.data.relevanceScore
-      : Number((raw as { relevanceScore?: number }).relevanceScore ?? 0),
+    parsed.success ? parsed.data.relevanceScore : Number(loose.relevanceScore ?? 0),
   );
-  const relevantFlag = parsed.success
-    ? parsed.data.relevant
-    : Boolean((raw as { relevant?: boolean }).relevant);
+  const relevantFlag = parsed.success ? parsed.data.relevant : Boolean(loose.relevant);
   const isAgency = parsed.success
     ? parsed.data.isMarketingAgency
-    : Boolean((raw as { isMarketingAgency?: boolean }).isMarketingAgency);
+    : Boolean(loose.isMarketingAgency);
   const bodyEvidence = parsed.success
     ? parsed.data.bodyEvidence || ""
-    : String((raw as { bodyEvidence?: string }).bodyEvidence || "");
+    : String(loose.bodyEvidence || "");
+  const advertiserType = normalizeAdvertiserType(
+    parsed.success ? parsed.data.advertiserType : loose.advertiserType,
+  );
   const reason = parsed.success
     ? parsed.data.reason
-    : String(
-        (raw as { reason?: string }).reason ||
-          "LLM response shape was invalid; applied soft parse",
-      );
-
-  const hasBody =
-    combinedLength >= 20 ||
-    Boolean(ad.body && ad.body.trim().length >= 20) ||
-    bodyEvidence.length > 6;
+    : String(loose.reason || "LLM response shape was invalid; applied soft parse");
 
   const creativeBlob = creatives
     .map((c) => c.fullCreativeText || "")
     .join("\n");
-  const agencySignal = hasAgencyPositioningSignal(creativeBlob);
-  const keywordOverlap = serviceKeywordOverlapScore(creativeBlob, {
+  // Judge copy only: URLs, CTA and display-URL lines are not evidence.
+  const copyBlob = adCopyForSignal(creativeBlob);
+  const hasBody = copyBlob.replace(/\s+/g, " ").trim().length >= 20;
+  const agencySignal = hasAgencyPositioningSignal(copyBlob);
+  const keywordOverlap = serviceKeywordOverlapScore(copyBlob, {
     businessProfile: profile,
     searchKeywords,
     selectedCategory,
@@ -573,52 +779,49 @@ OUTPUT:
       (agencySignal || score >= Math.max(scoreFloor, 0.55));
   }
 
-  // Agency / PPC searches: hard-reject AI tools, DIY platforms, workshops, courses
-  const agencySeed =
-    !profile ||
-    /agency|ppc|google ads|digital marketing|paid media|seo agency/i.test(
-      [
-        profile.industry,
-        profile.subIndustry,
-        profile.positioningSummary,
-        ...(profile.offerings || []),
-        selectedCategory?.label || "",
-        keywordList,
-      ]
-        .filter(Boolean)
-        .join(" "),
-    );
-  const toolOrEdu = detectAgencySopRejectReason(
-    `${creativeBlob}\n${services.join(" ")}\n${ad.landingPageUrl || ""}\n${ad.pageName || ""}`,
-  );
+  // The advertiser must be the same kind of business as the seed: an SEO
+  // agency does not compete with an SEO plugin, a proxy service or a guide.
+  const wrongType = advertiserType && blockedTypes.has(advertiserType) ? advertiserType : null;
+  // Agency seeds: the advertiser itself must sell marketing services.
+  const notAgency = Boolean(profile) && agencySeed && !isAgency && advertiserType !== "agency";
+  const toolOrEdu = agencySeed
+    ? detectAgencySopRejectReason(
+        `${copyBlob}\n${services.join(" ")}\n${ad.landingPageUrl || ""}\n${ad.pageName || ""}`,
+      )
+    : null;
   const diyService = services.some((s) => /\bdiy\b/i.test(s));
-  if (agencySeed && (toolOrEdu || diyService)) {
+  if (wrongType || notAgency || (agencySeed && (toolOrEdu || diyService))) {
     relevant = false;
   }
 
   return {
     relevant,
     relevanceScore: score,
-    isMarketingAgency: isAgency && !toolOrEdu && !diyService,
+    isMarketingAgency: isAgency && !toolOrEdu && !diyService && wrongType !== "software_tool",
     services,
     bodyEvidence,
-    reason: profile
-      ? toolOrEdu || diyService
-        ? `${reason} (rejected: ${toolOrEdu || "DIY positioning"} — not an agency competitor)`
-        : !hasBody
-        ? `${reason} (rejected: insufficient creative text)`
-        : keywordOverlap <= 0 && score < Math.max(scoreFloor + 0.15, 0.55)
-          ? `${reason} (rejected: weak keyword/service overlap in ad copy)`
-          : reason
-      : toolOrEdu || diyService
-        ? `${reason} (rejected: ${toolOrEdu || "DIY positioning"} — tool/workshop not agency)`
-        : !isAgency
-        ? `${reason} (rejected: not a marketing agency)`
-        : !hasBody
-          ? `${reason} (rejected: insufficient creative text)`
-          : !agencySignal && score < 0.55
-            ? `${reason} (rejected: weak agency positioning in ad copy)`
-            : reason,
+    advertiserType,
+    reason: wrongType
+      ? `${reason} (rejected: the advertiser is ${advertiserTypeLabel(wrongType)}, not the same kind of business)`
+      : profile
+        ? toolOrEdu || diyService
+          ? `${reason} (rejected: ${toolOrEdu || "DIY positioning"} — not an agency competitor)`
+          : notAgency
+            ? `${reason} (rejected: not a marketing agency)`
+            : !hasBody
+              ? `${reason} (rejected: insufficient creative text)`
+              : keywordOverlap <= 0 && score < Math.max(scoreFloor + 0.15, 0.55)
+                ? `${reason} (rejected: weak keyword/service overlap in ad copy)`
+                : reason
+        : toolOrEdu || diyService
+          ? `${reason} (rejected: ${toolOrEdu || "DIY positioning"} — tool/workshop not agency)`
+          : !isAgency
+            ? `${reason} (rejected: not a marketing agency)`
+            : !hasBody
+              ? `${reason} (rejected: insufficient creative text)`
+              : !agencySignal && score < 0.55
+                ? `${reason} (rejected: weak agency positioning in ad copy)`
+                : reason,
   };
 }
 

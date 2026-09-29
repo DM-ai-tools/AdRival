@@ -1,5 +1,6 @@
 "use client";
 
+import { stageLabel, statusLabel } from "@/lib/progressLabels";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import type {
@@ -25,6 +26,9 @@ interface LookupResultsProps {
   /** Reload lookup job + ads after leaving the offers dashboard */
   onReload?: () => void | Promise<void>;
   onStop?: () => void;
+  /** Start this lookup again with the same brand and platform. */
+  onRetry?: () => void;
+  retryBusy?: boolean;
 }
 
 function fmt(n?: number | null) {
@@ -465,6 +469,8 @@ export function LookupResults({
   onJobUpdated,
   onReload,
   onStop,
+  onRetry,
+  retryBusy,
 }: LookupResultsProps) {
   const page = job.selectedPage;
   const running = job.status === "running";
@@ -618,8 +624,17 @@ export function LookupResults({
               >
                 {stopping ? "Stopping…" : "Stop"}
               </button>
+            ) : onRetry ? (
+              <button
+                type="button"
+                className="ghost-btn"
+                disabled={retryBusy}
+                onClick={onRetry}
+              >
+                {retryBusy ? "Starting…" : job.status === "failed" ? "Retry lookup" : "Run again"}
+              </button>
             ) : null}
-            <span className={`status-pill status-${job.status}`}>{job.status}</span>
+            <span className={`status-pill status-${job.status}`}>{statusLabel(job.status)}</span>
           </div>
         </div>
         <div className="lookup-brand-bar">
@@ -702,7 +717,7 @@ export function LookupResults({
           </div>
           <div>
             <dt>Stage</dt>
-            <dd>{job.progress.stage}</dd>
+            <dd>{stageLabel(job.progress.stage)}</dd>
           </div>
         </dl>
       </section>

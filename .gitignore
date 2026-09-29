@@ -54,3 +54,10 @@ FRAMEWORK-COMPARISON-REPORT.md
 .idea
 .vscode
 *.swp
+
+# Local run logs
+/build.log
+/e2e.log
+/rg.log
+/unit.log
+/status.json

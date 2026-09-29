@@ -1,13 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatCredits, formatUsdMicros } from "@/lib/accounting/units";
-import {
-  confidenceLabel,
-  formatDateTime,
-  providerLabel,
-  usageSummary,
-} from "@/lib/credits/display";
+import { formatDateTime, providerLabel, usageSummary } from "@/lib/credits/display";
+import { callStatusLabel, confidenceLabel, operationLabel, shortId } from "@/lib/admin/labels";
+import { useDebouncedValue } from "./adminUi";
 import { PROVIDER_IDS } from "@/lib/types";
 import type { CreditReservation, ProviderCallRecord } from "@/lib/types";
 
@@ -18,7 +15,7 @@ interface UsageRow extends ProviderCallRecord {
 
 const PAGE_SIZE = 100;
 
-export default function AdminUsage() {
+export default function AdminUsage({ onOpenUser }: { onOpenUser?: (userId: string) => void }) {
   const [rows, setRows] = useState<UsageRow[]>([]);
   const [byProvider, setByProvider] = useState<
     Array<{ provider: string; calls: number; creditsCharged: number }>
@@ -33,6 +30,9 @@ export default function AdminUsage() {
   const [userId, setUserId] = useState("");
   const [projectId, setProjectId] = useState("");
   const [runId, setRunId] = useState("");
+  const debouncedProjectId = useDebouncedValue(projectId, 400);
+  const debouncedRunId = useDebouncedValue(runId, 400);
+  const requestSeq = useRef(0);
   const [provider, setProvider] = useState("");
   const [status, setStatus] = useState("");
   const [confidence, setConfidence] = useState("");
@@ -53,8 +53,8 @@ export default function AdminUsage() {
   const query = useMemo(() => {
     const params = new URLSearchParams();
     if (userId) params.set("userId", userId);
-    if (projectId.trim()) params.set("projectId", projectId.trim());
-    if (runId.trim()) params.set("runId", runId.trim());
+    if (debouncedProjectId.trim()) params.set("projectId", debouncedProjectId.trim());
+    if (debouncedRunId.trim()) params.set("runId", debouncedRunId.trim());
     if (provider) params.set("provider", provider);
     if (status) params.set("status", status);
     if (confidence) params.set("confidence", confidence);
@@ -65,9 +65,11 @@ export default function AdminUsage() {
       params.set("to", end.toISOString());
     }
     return params;
-  }, [userId, projectId, runId, provider, status, confidence, from, to]);
+  }, [userId, debouncedProjectId, debouncedRunId, provider, status, confidence, from, to]);
 
   const load = useCallback(async () => {
+    // Only the newest request may update the table.
+    const seq = ++requestSeq.current;
     setLoading(true);
     try {
       const params = new URLSearchParams(query);
@@ -77,6 +79,7 @@ export default function AdminUsage() {
         cache: "no-store",
       });
       const json = await res.json();
+      if (seq !== requestSeq.current) return;
       if (!res.ok) throw new Error(json.error || "Failed to load usage");
       setRows(json.rows ?? []);
       setByProvider(json.byProvider ?? []);
@@ -84,9 +87,9 @@ export default function AdminUsage() {
       setTotal(json.total ?? 0);
       setError(null);
     } catch (err) {
-      setError((err as Error).message);
+      if (seq === requestSeq.current) setError((err as Error).message);
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
   }, [query, offset]);
 
@@ -155,7 +158,7 @@ export default function AdminUsage() {
                 setProjectId(e.target.value);
                 setOffset(0);
               }}
-              placeholder="exact project id"
+              placeholder="Paste an id, or click a run below"
             />
           </label>
           <label className="credits-filter">
@@ -167,7 +170,7 @@ export default function AdminUsage() {
                 setRunId(e.target.value);
                 setOffset(0);
               }}
-              placeholder="exact run id"
+              placeholder="Paste an id, or click a run below"
             />
           </label>
           <label className="credits-filter">
@@ -199,15 +202,15 @@ export default function AdminUsage() {
               }}
             >
               <option value="">All statuses</option>
-              <option value="succeeded">succeeded</option>
-              <option value="failed">failed</option>
-              <option value="timeout">timeout</option>
-              <option value="not_billable">not_billable</option>
-              <option value="blocked">blocked</option>
+              <option value="succeeded">Succeeded</option>
+              <option value="failed">Failed</option>
+              <option value="timeout">Timed out</option>
+              <option value="not_billable">Not billed</option>
+              <option value="blocked">Blocked</option>
             </select>
           </label>
           <label className="credits-filter">
-            <span className="search-label">Confidence</span>
+            <span className="search-label">Billing</span>
             <select
               className="search-input"
               value={confidence}
@@ -216,12 +219,10 @@ export default function AdminUsage() {
                 setOffset(0);
               }}
             >
-              <option value="">Any confidence</option>
-              <option value="confirmed">confirmed</option>
-              <option value="estimated">estimated</option>
-              <option value="pending_reconciliation">
-                pending_reconciliation
-              </option>
+              <option value="">Any</option>
+              <option value="confirmed">Confirmed by provider</option>
+              <option value="estimated">Estimated</option>
+              <option value="pending_reconciliation">Waiting for billing check</option>
             </select>
           </label>
           <label className="credits-filter">
@@ -303,7 +304,7 @@ export default function AdminUsage() {
                       <td className="admin-nowrap">
                         {formatDateTime(res.createdAt)}
                       </td>
-                      <td>{res.status}</td>
+                      <td>{res.status.replace(/_/g, " ")}</td>
                       <td>{formatCredits(res.amountSubunits)}</td>
                       <td>{formatCredits(res.settledSubunits)}</td>
                       <td className="admin-nowrap">
@@ -330,56 +331,71 @@ export default function AdminUsage() {
                 <thead>
                   <tr>
                     <th>When</th>
-                    <th>Charged</th>
-                    <th>Initiated by</th>
-                    <th>Provider</th>
-                    <th>Model / endpoint</th>
-                    <th>Operation</th>
-                    <th>Project</th>
+                    <th>User</th>
+                    <th>Service</th>
+                    <th>For</th>
                     <th>Run</th>
-                    <th>Request id</th>
                     <th>Usage</th>
                     <th>Credits</th>
-                    <th>Est. cost</th>
-                    <th>Rules v</th>
-                    <th>Confidence</th>
-                    <th>Status</th>
+                    <th>Cost</th>
+                    <th>Billing</th>
+                    <th>Result</th>
                   </tr>
                 </thead>
                 <tbody>
                   {rows.map((call) => (
-                    <tr key={call.id}>
-                      <td className="admin-nowrap">
-                        {formatDateTime(call.startedAt)}
-                      </td>
-                      <td>{call.chargedUsername ?? call.chargedUserId}</td>
+                    <tr
+                      key={call.id}
+                      title={[
+                        call.model ?? call.endpoint,
+                        call.providerRequestId ? `request ${call.providerRequestId}` : null,
+                        `rules v${call.conversionRuleVersion}`,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    >
+                      <td className="admin-nowrap">{formatDateTime(call.startedAt)}</td>
                       <td>
-                        {call.initiatedByUsername ?? call.initiatedByUserId}
+                        {onOpenUser ? (
+                          <button type="button" className="link-btn" onClick={() => onOpenUser(call.chargedUserId)}>
+                            @{call.chargedUsername ?? shortId(call.chargedUserId)}
+                          </button>
+                        ) : (
+                          `@${call.chargedUsername ?? shortId(call.chargedUserId)}`
+                        )}
+                        {call.initiatedByUserId !== call.chargedUserId ? (
+                          <span className="muted"> · by @{call.initiatedByUsername ?? shortId(call.initiatedByUserId)}</span>
+                        ) : null}
                       </td>
-                      <td>{providerLabel(call.provider, "admin")}</td>
-                      <td>{call.model ?? call.endpoint ?? "—"}</td>
-                      <td>{call.operation}</td>
                       <td>
-                        {call.projectId
-                          ? `${call.projectKind}:${call.projectId}`
-                          : "—"}
+                        {providerLabel(call.provider, "admin")}
+                        {call.model ? <span className="muted"> · {call.model}</span> : null}
                       </td>
-                      <td>{call.runId ?? "—"}</td>
-                      <td>{call.providerRequestId ?? "—"}</td>
+                      <td>{operationLabel(call.operation)}</td>
+                      <td>
+                        {call.runId ? (
+                          <button
+                            type="button"
+                            className="link-btn"
+                            title={`Show only this run (${call.runId})`}
+                            onClick={() => {
+                              setRunId(call.runId!);
+                              setOffset(0);
+                            }}
+                          >
+                            {shortId(call.runId)}
+                          </button>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
                       <td>{usageSummary(call.usage)}</td>
                       <td>{formatCredits(call.creditsCharged)}</td>
-                      <td>
-                        {call.estimatedCostUsdMicros === null
-                          ? "No price configured"
-                          : formatUsdMicros(call.estimatedCostUsdMicros)}
-                      </td>
-                      <td>{call.conversionRuleVersion}</td>
+                      <td>{call.estimatedCostUsdMicros === null ? "—" : formatUsdMicros(call.estimatedCostUsdMicros)}</td>
                       <td>
                         <span
                           className={
-                            call.usageConfidence === "pending_reconciliation"
-                              ? "status-pill status-partial"
-                              : "status-pill"
+                            call.usageConfidence === "pending_reconciliation" ? "status-pill status-partial" : "status-pill"
                           }
                         >
                           {confidenceLabel(call.usageConfidence)}
@@ -396,7 +412,7 @@ export default function AdminUsage() {
                           }
                           title={call.errorMessage ?? undefined}
                         >
-                          {call.status}
+                          {callStatusLabel(call.status)}
                         </span>
                       </td>
                     </tr>

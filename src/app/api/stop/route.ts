@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import {
+  getJob,
+  getLookupJob,
   isLookupWorkInFlight,
   isSearchWorkInFlight,
   listJobs,
@@ -31,13 +33,21 @@ export async function POST(request: Request) {
     const searchJobIds: string[] = [];
     const lookupIds: string[] = [];
 
+    // Only stop a run that is actually working. Stopping a finished run would
+    // leave a stop flag on it that blocks re-running its offers report later.
     if (jobId) {
       resolveProjectAccess("search", jobId, user, "edit");
-      if (stopSearchJob(jobId, reason)) searchJobIds.push(jobId);
+      const job = getJob(jobId);
+      if (job && isSearchWorkInFlight(job) && stopSearchJob(jobId, reason)) {
+        searchJobIds.push(jobId);
+      }
     }
     if (lookupId) {
       resolveProjectAccess("lookup", lookupId, user, "edit");
-      if (stopLookupJob(lookupId, reason)) lookupIds.push(lookupId);
+      const job = getLookupJob(lookupId);
+      if (job && isLookupWorkInFlight(job) && stopLookupJob(lookupId, reason)) {
+        lookupIds.push(lookupId);
+      }
     }
 
     if (all) {

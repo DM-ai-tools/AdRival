@@ -22,8 +22,9 @@ function parseQuery(url: URL): UsageQuery {
     confidence: value("confidence") as UsageConfidence | undefined,
     from: value("from"),
     to: value("to"),
-    limit: Number(value("limit") ?? 200),
-    offset: Number(value("offset") ?? 0),
+    // A page is at most 500 calls; the CSV export asks for everything itself.
+    limit: Math.min(Math.max(Number(value("limit") ?? 200) || 200, 1), 500),
+    offset: Math.max(Number(value("offset") ?? 0) || 0, 0),
   };
 }
 

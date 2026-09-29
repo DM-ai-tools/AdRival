@@ -27,6 +27,9 @@ export async function POST(
     const { userId } = await params;
     const user = getUserById(userId);
     if (!user) throw new HttpError(404, "User not found", "not_found");
+    if (user.status === "deleted") {
+      throw new HttpError(409, "This account has been deleted and can't be changed", "user_deleted");
+    }
 
     let body: {
       action?: "set_allowance" | "add_credits" | "adjustment" | "set_reset_cadence";

@@ -30,7 +30,29 @@ import type {
 } from "@/lib/types";
 
 type Mode = "search" | "lookup" | "history";
+
+/** Stages in which a run is still working (mirrors the server's in-flight list). */
+const SEARCH_BUSY_STAGES = new Set([
+  "queued",
+  "expanding_queries",
+  "searching_ads",
+  "analyzing_ad",
+  "filling_quota",
+  "brand_review",
+  "analyzing_offers",
+  "searching_pages",
+  "fetching_ads",
+]);
+const LOOKUP_BUSY_STAGES = new Set([
+  "searching_pages",
+  "verifying_page",
+  "fetching_ads",
+  "analyzing_offers",
+]);
 type ResultsView = "website" | "preview" | "brand" | "offers";
+
+/** sessionStorage key for the last screen, restored when landing on a bare "/". */
+const LAST_VIEW_KEY = "adrival:lastView";
 
 export default function HomePage() {
   const [platform, setPlatform] = useState<AdPlatform>("facebook");
@@ -85,7 +107,10 @@ export default function HomePage() {
   const [fetchingCandidateId, setFetchingCandidateId] = useState<string | null>(
     null,
   );
+  const [pageError, setPageError] = useState<string | null>(null);
+  const [runAgainBusy, setRunAgainBusy] = useState(false);
   const historyReportRef = useRef<HTMLDivElement | null>(null);
+  const lastSearchStage = useRef<string | null>(null);
   const liveSearchId = useRef<string | null>(null);
   const liveLookupId = useRef<string | null>(null);
 
@@ -117,10 +142,13 @@ export default function HomePage() {
     setJob(data.job);
     setCompetitors(data.competitors ?? []);
     setSearchCredits((data.credits as RunCredits) ?? null);
-    // Surface brand-review stage on the Brand review tab
-    if (data.job?.progress?.stage === "brand_review") {
+    // Open the Brand review tab when a brand review starts, but only then:
+    // doing it on every poll would stop the user looking at other tabs.
+    const stage = data.job?.progress?.stage ?? null;
+    if (stage === "brand_review" && lastSearchStage.current !== "brand_review") {
       setResultsView("brand");
     }
+    lastSearchStage.current = stage;
   }, []);
 
   const pollHistorySearch = useCallback(async (id: string) => {
@@ -302,13 +330,86 @@ export default function HomePage() {
         setSelectedHistory(null);
       } catch (err) {
         console.error(err);
-        alert((err as Error).message);
+        setPageError((err as Error).message);
       } finally {
         setFetchingCandidateId(null);
       }
     },
     [],
   );
+
+  /** Start the same lookup again: same brand name, platform and matched page. */
+  const retryLookup = useCallback(async (source: LookupJob) => {
+    setRunAgainBusy(true);
+    setPageError(null);
+    try {
+      const res = await fetch("/api/lookup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: source.queryName,
+          platform: source.platform,
+          forcedCandidate: source.selectedPage ?? undefined,
+          businessUrl: source.businessUrl ?? undefined,
+          spaceId: source.spaceId ?? null,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "The lookup could not be started. Try again.");
+      setMode("lookup");
+      if (source.platform) setPlatform(source.platform as AdPlatform);
+      liveLookupId.current = data.lookupId;
+      setLookupId(data.lookupId);
+      setLookupQuery(data.queryName || source.queryName);
+      setLookupJob(null);
+      setLookupAds([]);
+      setSelectedHistory(null);
+    } catch (err) {
+      setPageError((err as Error).message);
+    } finally {
+      setRunAgainBusy(false);
+    }
+  }, []);
+
+  /** Start a new search with exactly the inputs an earlier run used. */
+  const runSearchAgain = useCallback(async (source: SearchJob) => {
+    setRunAgainBusy(true);
+    setPageError(null);
+    try {
+      const res = await fetch("/api/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          keywords: source.keywords?.length ? source.keywords : [source.keyword],
+          platform: source.platform,
+          geo: source.geo,
+          geoMode: source.geoMode,
+          selectedCategory: source.selectedCategory ?? null,
+          businessUrl: source.businessUrl ?? null,
+          businessProfile: source.businessProfile ?? null,
+          skipGuardrails: Boolean(source.skipGuardrails),
+          guardrailOverride: source.guardrailOverride ?? null,
+          spaceId: source.spaceId ?? null,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "The search could not be started. Try again.");
+      liveSearchId.current = data.jobId;
+      lastSearchStage.current = null;
+      setJobId(data.jobId);
+      setKeywords(data.keywords ?? [data.keyword]);
+      if (data.platform) setPlatform(data.platform as AdPlatform);
+      setJob(null);
+      setCompetitors([]);
+      setSearchCredits(null);
+      setResultsView("preview");
+      setMode("search");
+    } catch (err) {
+      setPageError((err as Error).message);
+    } finally {
+      setRunAgainBusy(false);
+    }
+  }, []);
 
   const clearAllHistory = useCallback(async () => {
     setDeletingId("__all__");
@@ -337,51 +438,211 @@ export default function HomePage() {
     }
   }, [loadHistory]);
 
+  // Poll quickly while something is running, slowly once the run is idle.
+  // Actions started from this page (offers, brand review, page analysis)
+  // update state themselves or run their own poll, so idle polling only has
+  // to catch changes made elsewhere.
+  const searchBusy =
+    job?.status === "running" ||
+    SEARCH_BUSY_STAGES.has(job?.progress?.stage || "") ||
+    generatingSearchOffers ||
+    competitors.some(
+      (c) =>
+        c.pageAnalysis?.status === "pending" ||
+        c.recreatedPage?.status === "pending" ||
+        c.recreatedPage?.status === "design_pending",
+    );
   useEffect(() => {
     liveSearchId.current = jobId;
     if (!jobId) return;
     void pollSearch(jobId);
-    const t = setInterval(() => void pollSearch(jobId), 2500);
+    const t = setInterval(() => void pollSearch(jobId), searchBusy ? 2500 : 10_000);
     return () => clearInterval(t);
-  }, [jobId, pollSearch]);
+  }, [jobId, pollSearch, searchBusy]);
 
+  // A run opened from History keeps updating while it is still working,
+  // e.g. after a page refresh during a search.
+  const historySearchBusy =
+    historyJob?.status === "running" ||
+    SEARCH_BUSY_STAGES.has(historyJob?.progress?.stage || "") ||
+    generatingHistoryOffers;
   useEffect(() => {
     if (mode !== "history" || selectedHistory?.kind !== "search") return;
-    const running =
-      historyJob?.progress?.stage === "analyzing_offers" ||
-      generatingHistoryOffers;
-    if (!running) return;
+    if (!historySearchBusy) return;
     const id = selectedHistory.id;
     void pollHistorySearch(id);
     const t = setInterval(() => void pollHistorySearch(id), 2500);
     return () => clearInterval(t);
-  }, [
-    mode,
-    selectedHistory,
-    historyJob?.progress?.stage,
-    generatingHistoryOffers,
-    pollHistorySearch,
-  ]);
+  }, [mode, selectedHistory, historySearchBusy, pollHistorySearch]);
 
+  const historyLookupBusy =
+    historyLookupJob?.status === "running" ||
+    LOOKUP_BUSY_STAGES.has(historyLookupJob?.progress?.stage || "");
+  useEffect(() => {
+    if (mode !== "history" || selectedHistory?.kind !== "lookup") return;
+    if (!historyLookupBusy) return;
+    const id = selectedHistory.id;
+    const poll = async () => {
+      const res = await fetch(`/api/lookup/status?lookupId=${encodeURIComponent(id)}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.job) setHistoryLookupJob(data.job as LookupJob);
+      if (Array.isArray(data.ads)) setHistoryLookupAds(data.ads as LookupAdRecord[]);
+      setHistoryCredits((data.credits as RunCredits) ?? null);
+    };
+    void poll();
+    const t = setInterval(() => void poll(), 2500);
+    return () => clearInterval(t);
+  }, [mode, selectedHistory, historyLookupBusy]);
+
+  const lookupBusy =
+    lookupJob?.status === "running" ||
+    LOOKUP_BUSY_STAGES.has(lookupJob?.progress?.stage || "") ||
+    lookupAds.some((a) => a.pageAnalysis?.status === "pending");
   useEffect(() => {
     liveLookupId.current = lookupId;
     if (!lookupId) return;
     void pollLookup(lookupId);
-    const t = setInterval(() => void pollLookup(lookupId), 2500);
+    const t = setInterval(() => void pollLookup(lookupId), lookupBusy ? 2500 : 10_000);
     return () => clearInterval(t);
-  }, [lookupId, pollLookup]);
+  }, [lookupId, pollLookup, lookupBusy]);
 
   useEffect(() => {
     if (mode === "history") void loadHistory();
   }, [mode, loadHistory]);
 
-  useEffect(() => {
-    if (job && job.status !== "running") void loadHistory();
-  }, [job?.status, loadHistory, job]);
+  // ── Where the user is, kept in the address bar ──────────────────────────
+  // ?mode=search&run=<id>&tab=offers, ?mode=lookup&lookup=<id>,
+  // ?mode=history&item=search:<id>. A refresh, a shared link or the Back
+  // button returns to the same run and tab. The last place is also kept for
+  // this browser tab, so links back to "/" (from credits, admin, a recreated
+  // page) land where the user left off.
+  const pendingHistoryItem = useRef<string | null>(null);
+  const applyingUrl = useRef(true);
+  const lastPushed = useRef<string>("");
+
+  const applyViewParams = useCallback((params: URLSearchParams) => {
+    applyingUrl.current = true;
+    const nextMode = params.get("mode");
+    if (nextMode === "search" || nextMode === "lookup" || nextMode === "history") {
+      setMode(nextMode);
+    }
+    const run = params.get("run");
+    if (run && run !== liveSearchId.current) {
+      liveSearchId.current = run;
+      lastSearchStage.current = null;
+      setJobId(run);
+      setJob(null);
+      setCompetitors([]);
+    }
+    const tab = params.get("tab");
+    if (tab === "website" || tab === "preview" || tab === "brand" || tab === "offers") {
+      setResultsView(tab);
+    }
+    const lookup = params.get("lookup");
+    if (lookup && lookup !== liveLookupId.current) {
+      liveLookupId.current = lookup;
+      setLookupId(lookup);
+      setLookupJob(null);
+      setLookupAds([]);
+    }
+    pendingHistoryItem.current = params.get("item");
+    lastPushed.current = params.toString();
+    // If some of the address could not be applied (e.g. a tab with no run),
+    // stop waiting for the state to match it.
+    window.setTimeout(() => {
+      applyingUrl.current = false;
+    }, 500);
+  }, []);
 
   useEffect(() => {
-    if (lookupJob && lookupJob.status !== "running") void loadHistory();
-  }, [lookupJob?.status, loadHistory, lookupJob]);
+    let params = new URLSearchParams(window.location.search);
+    if (![...params.keys()].length) {
+      try {
+        const saved = sessionStorage.getItem(LAST_VIEW_KEY);
+        if (saved) params = new URLSearchParams(saved);
+      } catch {
+        /* storage unavailable */
+      }
+    }
+    applyViewParams(params);
+    const onPop = () => applyViewParams(new URLSearchParams(window.location.search));
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [applyViewParams]);
+
+  useEffect(() => {
+    const params = new URLSearchParams();
+    params.set("mode", mode);
+    if (mode === "search" && jobId) {
+      params.set("run", jobId);
+      params.set("tab", resultsView);
+    }
+    if (mode === "lookup" && lookupId) params.set("lookup", lookupId);
+    if (mode === "history" && selectedHistory) {
+      params.set("item", `${selectedHistory.kind}:${selectedHistory.id}`);
+    } else if (mode === "history" && pendingHistoryItem.current) {
+      params.set("item", pendingHistoryItem.current);
+    }
+    const next = params.toString();
+    // While a restored address is still being applied, the state lags behind
+    // it; don't write the old state over the address.
+    if (applyingUrl.current) {
+      if (next === lastPushed.current) {
+        applyingUrl.current = false;
+        try {
+          sessionStorage.setItem(LAST_VIEW_KEY, next);
+        } catch {
+          /* storage unavailable */
+        }
+        // Restored from this tab's last place: show it in the address too.
+        if (!window.location.search && next) window.history.replaceState(null, "", `?${next}`);
+      }
+      return;
+    }
+    try {
+      sessionStorage.setItem(LAST_VIEW_KEY, next);
+    } catch {
+      /* storage unavailable */
+    }
+    if (next === lastPushed.current) return;
+    // A different screen or run is a new Back-button entry; a tab change only
+    // updates the current one.
+    const prev = new URLSearchParams(lastPushed.current);
+    const sameScreen =
+      prev.get("mode") === params.get("mode") &&
+      prev.get("run") === params.get("run") &&
+      prev.get("lookup") === params.get("lookup");
+    if (sameScreen) {
+      window.history.replaceState(null, "", `?${next}`);
+    } else {
+      window.history.pushState(null, "", `?${next}`);
+    }
+    lastPushed.current = next;
+  }, [mode, jobId, lookupId, resultsView, selectedHistory]);
+
+  // Reopen the history item named in the address once the list has loaded.
+  useEffect(() => {
+    const wanted = pendingHistoryItem.current;
+    if (!wanted || mode !== "history" || !historyRuns.length) return;
+    const found = historyRuns.find((r) => `${r.kind}:${r.id}` === wanted);
+    pendingHistoryItem.current = null;
+    if (found && (selectedHistory?.id !== found.id || selectedHistory.kind !== found.kind)) {
+      void loadHistoryItem(found);
+    }
+  }, [mode, historyRuns, selectedHistory, loadHistoryItem]);
+
+  // Refresh the history list when a run finishes. Depend on the status only:
+  // every poll returns a new job object, which would reload history each time.
+  const jobStatus = job?.status;
+  useEffect(() => {
+    if (jobStatus && jobStatus !== "running") void loadHistory();
+  }, [jobStatus, loadHistory]);
+
+  const lookupStatus = lookupJob?.status;
+  useEffect(() => {
+    if (lookupStatus && lookupStatus !== "running") void loadHistory();
+  }, [lookupStatus, loadHistory]);
 
   const searchRunning = job?.status === "running";
   const searchOffersRunning = job?.progress?.stage === "analyzing_offers";
@@ -454,6 +715,15 @@ export default function HomePage() {
       </header>
 
       <ClientSpaceBar />
+
+      {pageError ? (
+        <div className="notice notice-error" role="alert">
+          <p>{pageError}</p>
+          <button type="button" className="link-btn" onClick={() => setPageError(null)}>
+            Dismiss
+          </button>
+        </div>
+      ) : null}
 
       <div className="tab-bar tab-bar-wide mode-bar" role="tablist">
         <button
@@ -529,6 +799,10 @@ export default function HomePage() {
                   : undefined
               }
               stopJobId={jobId}
+              createdAt={job.createdAt}
+              updatedAt={job.updatedAt}
+              onRunAgain={() => void runSearchAgain(job)}
+              runAgainBusy={runAgainBusy}
             />
           )}
 
@@ -712,6 +986,8 @@ export default function HomePage() {
                 if (lookupId) await pollLookup(lookupId);
               }}
               onStop={refreshAfterStop}
+              onRetry={() => void retryLookup(lookupJob)}
+              retryBusy={runAgainBusy}
             />
           )}
           {!lookupJob && lookupQuery && (
@@ -801,9 +1077,22 @@ export default function HomePage() {
                   if (selectedHistory) await loadHistoryItem(selectedHistory);
                 }}
                 onStop={refreshAfterStop}
+                onRetry={() => void retryLookup(historyLookupJob)}
+                retryBusy={runAgainBusy}
               />
             ) : historyJob ? (
               <>
+                <ProgressPanel
+                  keyword={historyJob.keyword}
+                  status={historyJob.status}
+                  progress={historyJob.progress}
+                  createdAt={historyJob.createdAt}
+                  updatedAt={historyJob.updatedAt}
+                  stopJobId={selectedHistory.id}
+                  onStop={refreshAfterStop}
+                  onRunAgain={() => void runSearchAgain(historyJob)}
+                  runAgainBusy={runAgainBusy}
+                />
                 <div className="results-head">
                   <h2>
                     {historyJob.keyword}{" "}
