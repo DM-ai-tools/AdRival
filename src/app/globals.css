@@ -4801,6 +4801,9 @@ select.search-input {
 .admin-org-tab {
   display: grid;
   gap: 16px;
+  /* Sit above the fixed .atmosphere backdrop, like the panels do. */
+  position: relative;
+  z-index: 1;
 }
 .admin-org-badge {
   display: inline-block;

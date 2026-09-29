@@ -132,6 +132,8 @@ export default function AdminOrgs({ onOpenUser }: { onOpenUser: (userId: string)
         </button>
       </form>
 
+      <div className="panel glow-panel admin-panel">
+        <h2>Client organisations</h2>
       <div className="table-wrap">
         <table className="comp-table">
           <thead>
@@ -202,6 +204,7 @@ export default function AdminOrgs({ onOpenUser }: { onOpenUser: (userId: string)
             )}
           </tbody>
         </table>
+      </div>
       </div>
     </section>
   );
