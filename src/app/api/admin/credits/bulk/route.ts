@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getUserById } from "@/lib/db";
-import { errorResponse, HttpError, requireAdmin } from "@/lib/authz";
+import { adminScope, errorResponse, HttpError, requireAdmin, userInScope } from "@/lib/authz";
 import { recordAudit } from "@/lib/accounting/records";
 import { addCredits, getCreditSummary } from "@/lib/accounting/service";
 import { parseCreditsInput } from "@/lib/accounting/units";
@@ -38,7 +38,7 @@ export async function POST(request: Request) {
     const skipped: Array<{ userId: string; reason: string }> = [];
     for (const userId of ids) {
       const user = getUserById(userId);
-      if (!user) {
+      if (!user || !userInScope(adminScope(admin), user)) {
         skipped.push({ userId, reason: "not found" });
         continue;
       }

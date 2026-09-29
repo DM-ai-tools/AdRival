@@ -346,6 +346,14 @@ function AccountTab({
   const [pending, setPending] = useState<Pending>(null);
   const [tempPassword, setTempPassword] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  // Organisations are listed only for platform admins (the API refuses others).
+  const [orgs, setOrgs] = useState<Array<{ id: string; name: string; archivedAt?: string | null }> | null>(null);
+  const [orgChoice, setOrgChoice] = useState<string>(user.orgId ?? "");
+  useEffect(() => {
+    void adminFetch<{ organizations: Array<{ id: string; name: string; archivedAt?: string | null }> }>("/api/admin/orgs")
+      .then((d) => setOrgs(d.organizations.filter((o) => !o.archivedAt)))
+      .catch(() => setOrgs(null));
+  }, []);
 
   async function patch(body: Record<string, unknown>, okText: string) {
     setBusy(true);
@@ -408,7 +416,9 @@ function AccountTab({
         ? pending.to === "admin"
           ? {
               title: `Make @${user.username} an admin?`,
-              description: "Admins have unlimited credits and can see and change every account, run and setting.",
+              description: user.orgId
+                ? "Admins have unlimited credits and can see and change every account and run in their organisation."
+                : "Admins have unlimited credits and can see and change every account, run and setting.",
               label: "Make admin",
               tone: "danger" as const,
               run: () => patch({ role: "admin" }, "Now an admin."),
@@ -482,6 +492,40 @@ function AccountTab({
       </div>
       {detail.loginLocked ? (
         <p className="form-hint">Sign-in is locked for 15 minutes after repeated wrong passwords.</p>
+      ) : null}
+
+      {orgs ? (
+        <>
+          <h3>Organisation</h3>
+          <form
+            className="admin-inline-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void patch(
+                { orgId: orgChoice || null },
+                orgChoice ? `Moved to ${orgs.find((o) => o.id === orgChoice)?.name ?? "the organisation"}.` : "Moved to your organisation.",
+              );
+            }}
+          >
+            <label className="admin-field">
+              <span className="search-label">Belongs to</span>
+              <select className="search-input" value={orgChoice} onChange={(e) => setOrgChoice(e.target.value)} disabled={busy || isMe}>
+                <option value="">Your organisation (platform)</option>
+                {orgs.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button type="submit" className="chip-btn" disabled={busy || isMe || orgChoice === (user.orgId ?? "")}>
+              Move
+            </button>
+          </form>
+          <p className="form-hint">
+            A client organisation&apos;s admins see only its own people and runs. Moving signs this person out.
+          </p>
+        </>
       ) : null}
 
       <h3>Delete account</h3>

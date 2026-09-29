@@ -397,6 +397,29 @@ Who did what and when, in plain words, newest first. Filter by **Area** (credits
 
 ---
 
+## Organisations (client admins on the same app)
+
+Use this when a client shares your deployment. **Organisations** appears only for platform administrators (admins who don't belong to an organisation).
+
+1. Open **Organisations**, enter the client's organisation name, their admin's username and display name, and click **Create organisation and admin**.
+2. Copy the temporary password shown once and send it privately. They must choose a new password at first sign-in.
+
+What the client's admins get:
+
+- Their own history starts empty. They see and manage only their organisation: its users, runs, usage, audit entries, low-credit alerts and client spaces.
+- They never see your runs or accounts, and they can't change, suspend or add credits to anyone outside their organisation. A run id from outside returns "not found".
+- Users they create join their organisation automatically.
+- Like your admins, they have unlimited credits and can add credits to their own users. Runs use this deployment's API keys.
+- **Settings**, **Organisations**, credit rates, billing checks and vendor balances stay platform-only. So does out-of-credit vendor alerts: only you can top up the vendor accounts.
+- An organisation always keeps at least one active admin of its own. As a platform admin you can still change or remove them.
+
+What you keep:
+
+- Your own history, exactly as before.
+- Every tab shows every organisation. Users show an organisation tag, and you can move a person between organisations from their panel (**Account → Organisation**). Moving signs them out.
+
+---
+
 ## 9. Settings
 
 Settings is global. A change here applies to everyone, unless a person has their own allowance, reset schedule or limits (Users → open → Credits or Limits).

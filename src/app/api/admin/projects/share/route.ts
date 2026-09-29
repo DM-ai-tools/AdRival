@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getProject, getUserById } from "@/lib/db";
-import { errorResponse, HttpError, requireAdmin } from "@/lib/authz";
+import { adminScope, errorResponse, HttpError, ownerInScope, requireAdmin, userInScope } from "@/lib/authz";
 import {
   recordAudit,
   removeMembership,
@@ -41,7 +41,9 @@ export async function POST(request: Request) {
     const role = body.role === "editor" ? "editor" : "viewer";
 
     const project = getProject(projectKind, projectId);
-    if (!project) throw new HttpError(404, "Project not found", "not_found");
+    if (!project || !ownerInScope(adminScope(admin), project.ownerUserId)) {
+      throw new HttpError(404, "Project not found", "not_found");
+    }
     if (!project.ownerUserId) {
       throw new HttpError(
         409,
@@ -51,7 +53,7 @@ export async function POST(request: Request) {
     }
 
     const recipient = getUserById(userId);
-    if (!recipient || recipient.status !== "active") {
+    if (!recipient || recipient.status !== "active" || !userInScope(adminScope(admin), recipient)) {
       throw new HttpError(400, "Recipient must be an active user");
     }
     if (recipient.id === project.ownerUserId) {
@@ -89,6 +91,9 @@ export async function DELETE(request: Request) {
     const projectKind = parseKind(url.searchParams.get("projectKind"));
     const projectId = url.searchParams.get("projectId") ?? "";
     const userId = url.searchParams.get("userId") ?? "";
+    if (!ownerInScope(adminScope(admin), getProject(projectKind, projectId)?.ownerUserId)) {
+      throw new HttpError(404, "Share not found", "not_found");
+    }
 
     const removed = removeMembership(projectKind, projectId, userId);
     if (!removed) throw new HttpError(404, "Share not found", "not_found");

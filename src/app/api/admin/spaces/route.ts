@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
-import { errorResponse, HttpError, requireAdmin } from "@/lib/authz";
+import { adminScope, errorResponse, HttpError, ownerInScope, requireAdmin, userInScope } from "@/lib/authz";
 import { recordAudit } from "@/lib/accounting/records";
 import {
   archiveProjectSpace,
   assignRunsToSpace,
   createProjectSpace,
+  getProject,
   getProjectSpace,
   getUserById,
   listProjectSpaces,
@@ -23,8 +24,9 @@ export const runtime = "nodejs";
 
 export async function GET() {
   try {
-    await requireAdmin();
-    const users = listUsers().filter((u) => u.status === "active");
+    const admin = await requireAdmin();
+    const scope = adminScope(admin);
+    const users = listUsers().filter((u) => u.status === "active" && userInScope(scope, u));
     const db = readDb();
     const memberships = listSpaceMemberships();
     const runs = [
@@ -50,9 +52,11 @@ export async function GET() {
         updatedAt: job.updatedAt,
         createdAt: job.createdAt,
       })),
-    ];
+    ].filter((run) => ownerInScope(scope, run.ownerUserId));
 
-    const spaces = listProjectSpaces({ includeArchived: true }).map((space) => {
+    const spaces = listProjectSpaces({ includeArchived: true })
+      .filter((space) => ownerInScope(scope, space.ownerUserId))
+      .map((space) => {
       const owner = getUserById(space.ownerUserId);
       const spaceRuns = runs.filter(
         (run) => run.spaceId === space.id && !run.archivedAt,
@@ -134,6 +138,7 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const admin = await requireAdmin();
+    const scope = adminScope(admin);
     let body: {
       action?: string;
       clientName?: string;
@@ -152,7 +157,7 @@ export async function POST(request: Request) {
     if (body.action === "create") {
       const clientName = String(body.clientName ?? "").trim();
       const owner = getUserById(String(body.ownerUserId ?? ""));
-      if (!owner || owner.status !== "active") {
+      if (!owner || owner.status !== "active" || !userInScope(scope, owner)) {
         throw new HttpError(400, "Choose an active owner");
       }
       if (clientName.length < 2) {
@@ -170,7 +175,9 @@ export async function POST(request: Request) {
     }
 
     const space = getProjectSpace(String(body.spaceId ?? ""));
-    if (!space) throw new HttpError(404, "Client space not found", "not_found");
+    if (!space || !ownerInScope(scope, space.ownerUserId)) {
+      throw new HttpError(404, "Client space not found", "not_found");
+    }
 
     if (body.action === "restore") {
       const result = restoreProjectSpace(space.id);
@@ -205,7 +212,7 @@ export async function POST(request: Request) {
 
     if (body.action === "share") {
       const target = getUserById(String(body.userId ?? ""));
-      if (!target || target.status !== "active") {
+      if (!target || target.status !== "active" || !userInScope(scope, target)) {
         throw new HttpError(400, "Choose an active user to share with");
       }
       if (target.id === space.ownerUserId) {
@@ -245,7 +252,7 @@ export async function POST(request: Request) {
 
     if (body.action === "transfer") {
       const target = getUserById(String(body.ownerUserId ?? ""));
-      if (!target || target.status !== "active") {
+      if (!target || target.status !== "active" || !userInScope(scope, target)) {
         throw new HttpError(400, "Choose an active user");
       }
       setProjectSpaceOwner(space.id, target.id);
@@ -288,7 +295,9 @@ export async function POST(request: Request) {
           kind: run.kind as ProjectKind,
           id: String(run.id ?? ""),
         }))
-        .filter((run) => run.id);
+        .filter((run) => run.id)
+        // Only runs the admin may manage.
+        .filter((run) => ownerInScope(scope, getProject(run.kind, run.id)?.ownerUserId));
       const moved = assignRunsToSpace(space.id, runs);
       recordAudit({
         actorUserId: admin.id,

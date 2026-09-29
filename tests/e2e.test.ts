@@ -884,6 +884,70 @@ describe("admin tools", () => {
   });
 });
 
+describe("client organisations", () => {
+  test("a client admin starts fresh and sees only their own organisation", async () => {
+    const root = await loggedIn("rootadmin");
+    const created = await root.post("/api/admin/orgs", {
+      action: "create",
+      name: "Acme Client",
+      adminUsername: "acme_admin",
+      adminDisplayName: "Acme Admin",
+    });
+    assert.equal(created.status, 200);
+    const { temporaryPassword, organization } = (await created.json()) as {
+      temporaryPassword: string;
+      organization: { id: string };
+    };
+
+    // First sign-in with the temporary password, then choose a real one.
+    const acme = client();
+    assert.equal((await acme.login("acme_admin", temporaryPassword)).status, 200);
+    assert.equal(
+      (await acme.post("/api/auth/change-password", {
+        currentPassword: temporaryPassword,
+        newPassword: PASSWORD,
+        confirmPassword: PASSWORD,
+      })).status,
+      200,
+    );
+
+    // Fresh history: nothing from the platform's users.
+    const history = (await (await acme.get("/api/history/unified")).json()) as { runs: Array<{ id: string }> };
+    assert.equal(history.runs.length, 0, "the client admin's history starts empty");
+
+    // Admin area is limited to their organisation.
+    const users = (await (await acme.get("/api/admin/users")).json()) as { users: Array<{ username: string }> };
+    assert.deepEqual(users.users.map((u) => u.username), ["acme_admin"]);
+    const runs = (await (await acme.get("/api/admin/runs")).json()) as { runs: Array<{ id: string }> };
+    assert.ok(!runs.runs.some((r) => r.id === ids.aliceSearch), "platform runs are not listed");
+
+    // Platform runs and accounts are out of reach, even by id.
+    assert.equal((await acme.get(`/api/history/unified?kind=search&runId=${ids.aliceSearch}`)).status, 404);
+    assert.equal((await acme.patch(`/api/admin/users/${ids.admin}`, { status: "suspended" })).status, 404);
+    assert.equal((await acme.post(`/api/admin/users/${ids.alice}/credits`, { action: "add_credits", credits: "5", reason: "x" })).status, 404);
+    // Platform-only areas.
+    assert.equal((await acme.get("/api/admin/settings")).status, 403);
+    assert.equal((await acme.get("/api/admin/orgs")).status, 403);
+    assert.equal((await acme.post("/api/admin/usage/reconcile", { reservationId: "x", outcome: "billed", note: "x" })).status, 403);
+
+    // Users they create join their organisation.
+    const made = await acme.post("/api/admin/users", { username: "acme_user", displayName: "Acme User", role: "user", orgId: null });
+    assert.equal(made.status, 200);
+    const rootUsers = (await (await root.get("/api/admin/users")).json()) as {
+      users: Array<{ username: string; orgId: string | null; orgName: string | null }>;
+    };
+    const acmeUser = rootUsers.users.find((u) => u.username === "acme_user");
+    assert.equal(acmeUser?.orgId, organization.id);
+    assert.equal(acmeUser?.orgName, "Acme Client");
+
+    // The platform admin still sees everything, including the organisation.
+    assert.ok(rootUsers.users.some((u) => u.username === "alice"));
+    assert.equal((await root.get(`/api/history/unified?kind=search&runId=${ids.aliceSearch}`)).status, 200);
+    const orgs = (await (await root.get("/api/admin/orgs")).json()) as { organizations: Array<{ name: string; userCount: number }> };
+    assert.equal(orgs.organizations.find((o) => o.name === "Acme Client")?.userCount, 2);
+  });
+});
+
 describe("existing functionality still works", () => {
   test("the signed-in app shell, history and health endpoints all respond", async () => {
     const alice = await loggedIn("alice");

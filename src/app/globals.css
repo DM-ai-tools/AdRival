@@ -4796,3 +4796,18 @@ select.search-input {
   white-space: nowrap;
   flex: 1 0 auto;
 }
+
+/* Admin — client organisations */
+.admin-org-tab {
+  display: grid;
+  gap: 16px;
+}
+.admin-org-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  background: rgba(99, 102, 241, 0.12);
+  color: inherit;
+}

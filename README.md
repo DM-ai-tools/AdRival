@@ -51,6 +51,14 @@ node scripts/import-history.mjs --url https://YOUR-APP.up.railway.app --secret Y
 ```
 
 Use `--mode merge` to keep any production-only rows. Default is `replace`.
+
+Imported runs keep an owner that exists on the server. Otherwise they are matched to the server account with the same username. Add `--owner <server username>` to give every run that still has no match (including runs with no owner at all) to that account, so they appear in its history:
+
+```bash
+node scripts/import-history.mjs --url https://YOUR-APP.up.railway.app --secret YOUR_SECRET --mode merge --owner your_admin_username
+```
+
+The response lists how many runs were kept, matched by username, given to the fallback owner, or left unmatched.
 Remove `HISTORY_IMPORT_SECRET` from Railway when finished.
 
 Deploy options:

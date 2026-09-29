@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getProjectSpace, getUserById, readDb } from "@/lib/db";
-import { errorResponse, requireAdmin } from "@/lib/authz";
+import { adminScope, errorResponse, requireAdmin, scopedUserIds } from "@/lib/authz";
 import { usageByRun } from "@/lib/accounting/service";
 
 export const runtime = "nodejs";
@@ -17,7 +17,8 @@ function isInternalRun(id: string): boolean {
  */
 export async function GET(request: Request) {
   try {
-    await requireAdmin();
+    const admin = await requireAdmin();
+    const allowed = scopedUserIds(adminScope(admin));
     const p = new URL(request.url).searchParams;
     const q = (p.get("q") || "").trim().toLowerCase();
     const owner = p.get("owner") || "";
@@ -64,6 +65,8 @@ export async function GET(request: Request) {
         })),
     ]
       .filter((run) => !isInternalRun(run.id))
+      // Organisation admins see only runs owned by their organisation's users.
+      .filter((run) => !allowed || (run.ownerUserId !== null && allowed.has(run.ownerUserId)))
       .filter((run) => !kind || run.kind === kind)
       .filter((run) => !status || run.status === status)
       .filter((run) => !owner || run.ownerUserId === owner)

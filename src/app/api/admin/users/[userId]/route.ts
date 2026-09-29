@@ -2,8 +2,10 @@ import { NextResponse } from "next/server";
 import {
   countActiveAdmins,
   archiveProjectSpace,
+  getOrganization,
   getProjectSpace,
   getUserById,
+  listUsers,
   listProjects,
   listProjectSpaces,
   listSpaceMemberships,
@@ -14,7 +16,7 @@ import {
   toPublicUser,
   updateUser,
 } from "@/lib/db";
-import { errorResponse, HttpError, requireAdmin } from "@/lib/authz";
+import { adminScope, assertUserInScope, errorResponse, HttpError, requireAdmin, userInScope } from "@/lib/authz";
 import {
   listMemberships,
   queryLedger,
@@ -29,12 +31,12 @@ import {
   usageByProvider,
   usageByRun,
 } from "@/lib/accounting/service";
-import type { UserRole } from "@/lib/types";
+import type { AppUser, UserRole } from "@/lib/types";
 
 export const runtime = "nodejs";
 
 /** Guard the "last active admin" invariant for demotion, suspension, deletion. */
-function assertNotLastActiveAdmin(userId: string) {
+function assertNotLastActiveAdmin(userId: string, actor: AppUser) {
   const user = getUserById(userId);
   if (!user || user.role !== "admin" || user.status !== "active") return;
   if (countActiveAdmins() <= 1) {
@@ -44,6 +46,19 @@ function assertNotLastActiveAdmin(userId: string) {
       "last_admin",
     );
   }
+  // An organisation keeps at least one admin of its own; platform admins may override.
+  if (user.orgId && actor.orgId) {
+    const orgAdmins = listUsers().filter(
+      (u) => u.orgId === user.orgId && u.role === "admin" && u.status === "active",
+    ).length;
+    if (orgAdmins <= 1) {
+      throw new HttpError(
+        409,
+        "This is the organisation's last active administrator. Promote another admin first.",
+        "last_org_admin",
+      );
+    }
+  }
 }
 
 export async function GET(
@@ -51,10 +66,10 @@ export async function GET(
   { params }: { params: Promise<{ userId: string }> },
 ) {
   try {
-    await requireAdmin();
+    const admin = await requireAdmin();
     const { userId } = await params;
     const user = getUserById(userId);
-    if (!user) throw new HttpError(404, "User not found", "not_found");
+    assertUserInScope(admin, user);
 
     return NextResponse.json({
       user: toPublicUser(user),
@@ -100,7 +115,7 @@ export async function PATCH(
     const admin = await requireAdmin();
     const { userId } = await params;
     const user = getUserById(userId);
-    if (!user) throw new HttpError(404, "User not found", "not_found");
+    assertUserInScope(admin, user);
 
     let body: {
       displayName?: string;
@@ -111,6 +126,8 @@ export async function PATCH(
       maxConcurrentRuns?: number | null;
       allowedProviders?: string[] | null;
       blockedModels?: string[] | null;
+      /** Platform admins only: move the user into an organisation (null = platform level). */
+      orgId?: string | null;
     } = {};
     try {
       body = await request.json();
@@ -150,7 +167,7 @@ export async function PATCH(
       if (body.role !== "admin" && body.role !== "user") {
         return NextResponse.json({ error: "Invalid role" }, { status: 400 });
       }
-      if (body.role === "user") assertNotLastActiveAdmin(userId);
+      if (body.role === "user") assertNotLastActiveAdmin(userId, admin);
       patch.role = body.role;
       // A role change must not keep working with an old session.
       patch.bumpSessionEpoch = true;
@@ -162,7 +179,7 @@ export async function PATCH(
         return NextResponse.json({ error: "Invalid status" }, { status: 400 });
       }
       if (body.status === "suspended") {
-        assertNotLastActiveAdmin(userId);
+        assertNotLastActiveAdmin(userId, admin);
         patch.suspendedAt = new Date().toISOString();
         // Suspension takes effect immediately, including for open sessions.
         patch.bumpSessionEpoch = true;
@@ -197,6 +214,24 @@ export async function PATCH(
       details.blockedModels = (body.blockedModels ?? []).join(",") || null;
     }
 
+    if (body.orgId !== undefined && (body.orgId || null) !== (user.orgId ?? null)) {
+      if (admin.orgId) {
+        throw new HttpError(403, "Only platform administrators can move users between organisations.", "forbidden");
+      }
+      if (userId === admin.id) {
+        throw new HttpError(409, "You can't move your own account into an organisation", "self_lockout");
+      }
+      const org = body.orgId ? getOrganization(String(body.orgId)) : null;
+      if (body.orgId && (!org || org.archivedAt)) {
+        return NextResponse.json({ error: "That organisation does not exist" }, { status: 400 });
+      }
+      if (user.role === "admin" && !user.orgId) assertNotLastActiveAdmin(userId, admin);
+      patch.orgId = org?.id ?? null;
+      // What the account can see changes, so its sessions start fresh.
+      patch.bumpSessionEpoch = true;
+      details.orgId = org?.id ?? null;
+    }
+
     const updated = updateUser(userId, patch);
     if (!updated) throw new HttpError(404, "User not found", "not_found");
 
@@ -225,11 +260,11 @@ export async function DELETE(
     const admin = await requireAdmin();
     const { userId } = await params;
     const user = getUserById(userId);
-    if (!user) throw new HttpError(404, "User not found", "not_found");
+    assertUserInScope(admin, user);
     if (user.id === admin.id) {
       throw new HttpError(409, "You cannot delete your own account", "self_delete");
     }
-    assertNotLastActiveAdmin(userId);
+    assertNotLastActiveAdmin(userId, admin);
 
     const url = new URL(request.url);
     const projectAction = url.searchParams.get("projects") ?? "";
@@ -244,7 +279,7 @@ export async function DELETE(
     }
     if (projectAction === "transfer") {
       const target = getUserById(transferToUserId);
-      if (!target || target.status !== "active") {
+      if (!target || target.status !== "active" || !userInScope(adminScope(admin), target)) {
         throw new HttpError(
           400,
           "Transfer target must be an active user",
@@ -260,8 +295,9 @@ export async function DELETE(
       } else if (projectAction === "transfer") {
         setProjectOwner(project.kind, project.id, transferToUserId);
       } else {
-        // Back to the admin-only unassigned area.
-        setProjectOwner(project.kind, project.id, null);
+        // Back to the admin-only unassigned area — for an organisation admin that
+        // area is theirs, so the runs stay inside the organisation.
+        setProjectOwner(project.kind, project.id, admin.orgId ? admin.id : null);
       }
     }
 

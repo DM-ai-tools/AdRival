@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getUserById, readDb } from "@/lib/db";
-import { errorResponse, requireAdmin } from "@/lib/authz";
+import { adminScope, errorResponse, requireAdmin, scopedUserIds } from "@/lib/authz";
 import {
   queryProviderCalls,
   usageByProvider,
@@ -60,9 +60,10 @@ function csvCell(value: unknown): string {
 
 export async function GET(request: Request) {
   try {
-    await requireAdmin();
+    const admin = await requireAdmin();
     const url = new URL(request.url);
-    const query = parseQuery(url);
+    // Organisation admins only ever see their organisation's usage.
+    const query: UsageQuery = { ...parseQuery(url), chargedUserIds: scopedUserIds(adminScope(admin)) };
     const wantsCsv = url.searchParams.get("format") === "csv";
 
     if (wantsCsv) {
@@ -125,7 +126,7 @@ export async function GET(request: Request) {
       total,
       byProvider: usageByProvider(query),
       reservations: query.runId
-        ? reservations.filter((r) => r.runId === query.runId)
+        ? reservations.filter((r) => r.runId === query.runId && (!query.chargedUserIds || query.chargedUserIds.has(r.userId)))
         : [],
     });
   } catch (err) {

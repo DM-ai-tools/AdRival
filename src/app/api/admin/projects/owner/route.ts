@@ -5,7 +5,7 @@ import {
   setProjectArchived,
   setProjectOwner,
 } from "@/lib/db";
-import { errorResponse, HttpError, requireAdmin } from "@/lib/authz";
+import { adminScope, errorResponse, HttpError, ownerInScope, requireAdmin, userInScope } from "@/lib/authz";
 import { recordAudit } from "@/lib/accounting/records";
 import type { ProjectKind } from "@/lib/types";
 
@@ -42,7 +42,10 @@ export async function POST(request: Request) {
     const projectKind = parseKind(body.projectKind);
     const projectId = String(body.projectId ?? "");
     const project = getProject(projectKind, projectId);
-    if (!project) throw new HttpError(404, "Project not found", "not_found");
+    const scope = adminScope(admin);
+    if (!project || !ownerInScope(scope, project.ownerUserId)) {
+      throw new HttpError(404, "Project not found", "not_found");
+    }
 
     if (body.archived !== undefined) {
       setProjectArchived(projectKind, projectId, Boolean(body.archived));
@@ -59,9 +62,12 @@ export async function POST(request: Request) {
 
     if (body.ownerUserId !== undefined) {
       const nextOwnerId = body.ownerUserId;
+      if (nextOwnerId === null && scope.kind === "org") {
+        throw new HttpError(400, "Choose a new owner in your organisation");
+      }
       if (nextOwnerId !== null) {
         const owner = getUserById(String(nextOwnerId));
-        if (!owner || owner.status !== "active") {
+        if (!owner || owner.status !== "active" || !userInScope(scope, owner)) {
           throw new HttpError(400, "Owner must be an active user");
         }
       }

@@ -59,6 +59,8 @@ export default function AdminOverview({ onOpenUser }: { onOpenUser?: (userId: st
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [balances, setBalances] = useState<{ rows: ProviderBalance[]; checkedAt: string } | null>(null);
+  /** Client organisation admins don't see the platform's vendor balances. */
+  const [balancesHidden, setBalancesHidden] = useState(false);
   const [balancesBusy, setBalancesBusy] = useState(false);
   const [reconcile, setReconcile] = useState<{ row: OverviewPayload["pendingReconciliation"][number]; outcome: "billed" | "not_billed" } | null>(null);
 
@@ -77,9 +79,13 @@ export default function AdminOverview({ onOpenUser }: { onOpenUser?: (userId: st
   const loadBalances = useCallback(async (refresh = false) => {
     setBalancesBusy(true);
     try {
-      const json = await adminFetch<{ providerBalances: ProviderBalance[]; checkedAt: string }>(
+      const json = await adminFetch<{ providerBalances: ProviderBalance[]; checkedAt: string; hidden?: boolean }>(
         `/api/admin/overview?part=balances${refresh ? "&refresh=1" : ""}`,
       );
+      if (json.hidden) {
+        setBalancesHidden(true);
+        return;
+      }
       setBalances({ rows: json.providerBalances, checkedAt: json.checkedAt });
     } catch {
       setBalances(null);
@@ -263,6 +269,8 @@ export default function AdminOverview({ onOpenUser }: { onOpenUser?: (userId: st
           </details>
         ) : null}
 
+        {balancesHidden ? null : (
+        <>
         <div className="progress-head">
           <h3>Provider account balances</h3>
           <button type="button" className="chip-btn" disabled={balancesBusy} onClick={() => void loadBalances(true)}>
@@ -301,6 +309,8 @@ export default function AdminOverview({ onOpenUser }: { onOpenUser?: (userId: st
               </table>
             </div>
           </>
+        )}
+        </>
         )}
       </section>
 

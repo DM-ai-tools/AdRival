@@ -25,6 +25,8 @@ export interface AdminUserRow extends AppUserPublic {
   spaceCount: number;
   lastLoginAt: string | null;
   loginLocked: boolean;
+  /** Client organisation name; null for platform-level accounts. */
+  orgName?: string | null;
 }
 
 type SortKey = "name" | "credits" | "lastLogin" | "created" | "runs";
@@ -246,6 +248,7 @@ export default function AdminUsers({ initialUserId }: { initialUserId?: string |
                         <strong>{user.displayName}</strong>
                         <br />
                         <span className="muted">@{user.username}</span>
+                        {user.orgName ? <span className="admin-org-badge">{user.orgName}</span> : null}
                         {user.loginLocked ? <span className="admin-flag"> Locked out</span> : null}
                         {user.mustChangePassword ? <span className="admin-flag is-quiet"> Must change password</span> : null}
                       </td>
@@ -360,9 +363,18 @@ function CreateUserDialog({ onClose, onCreated }: { onClose: () => void; onCreat
   const [displayName, setDisplayName] = useState("");
   const [role, setRole] = useState("user");
   const [allowance, setAllowance] = useState("");
+  const [orgId, setOrgId] = useState("");
+  const [orgs, setOrgs] = useState<Array<{ id: string; name: string }> | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<{ username: string; password: string; notice?: string } | null>(null);
+
+  // Only platform admins may place a user in an organisation; for anyone else this list is refused.
+  useEffect(() => {
+    void adminFetch<{ organizations: Array<{ id: string; name: string; archivedAt?: string | null }> }>("/api/admin/orgs")
+      .then((d) => setOrgs(d.organizations.filter((o) => !o.archivedAt)))
+      .catch(() => setOrgs(null));
+  }, []);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -371,7 +383,7 @@ function CreateUserDialog({ onClose, onCreated }: { onClose: () => void; onCreat
     try {
       const json = await adminFetch<{ user: { username: string }; temporaryPassword: string; notice?: string }>(
         "/api/admin/users",
-        { method: "POST", json: { username, displayName, role, allowanceCredits: allowance } },
+        { method: "POST", json: { username, displayName, role, allowanceCredits: allowance, orgId: orgId || null } },
       );
       setCreated({ username: json.user.username, password: json.temporaryPassword, notice: json.notice });
       onCreated();
@@ -419,6 +431,19 @@ function CreateUserDialog({ onClose, onCreated }: { onClose: () => void; onCreat
                 <option value="admin">Admin (unlimited credits, full access)</option>
               </select>
             </label>
+            {orgs && orgs.length ? (
+              <label className="admin-field">
+                <span className="search-label">Organisation</span>
+                <select className="search-input" value={orgId} onChange={(e) => setOrgId(e.target.value)} disabled={busy}>
+                  <option value="">Your organisation (platform)</option>
+                  {orgs.map((o) => (
+                    <option key={o.id} value={o.id}>
+                      {o.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
             <label className="admin-field">
               <span className="search-label">Starting credits</span>
               <input className="search-input" value={allowance} onChange={(e) => setAllowance(e.target.value)} placeholder="Default from settings" inputMode="decimal" disabled={busy} />

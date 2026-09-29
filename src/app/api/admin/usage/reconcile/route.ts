@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { errorResponse, HttpError, requireAdmin } from "@/lib/authz";
+import { errorResponse, HttpError, requirePlatformAdmin } from "@/lib/authz";
 import { recordAudit } from "@/lib/accounting/records";
 import {
   listPendingReconciliation,
@@ -11,7 +11,7 @@ export const runtime = "nodejs";
 
 export async function GET() {
   try {
-    await requireAdmin();
+    await requirePlatformAdmin();
     return NextResponse.json({ pending: listPendingReconciliation() });
   } catch (err) {
     return errorResponse(err, { audience: "admin" });
@@ -24,7 +24,7 @@ export async function GET() {
  */
 export async function POST(request: Request) {
   try {
-    const admin = await requireAdmin();
+    const admin = await requirePlatformAdmin();
 
     let body: {
       reservationId?: string;

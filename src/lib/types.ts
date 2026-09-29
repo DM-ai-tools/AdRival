@@ -1100,12 +1100,27 @@ export interface DatabaseShape {
   spaceMemberships?: SpaceMembership[];
   auditLogs?: AuditLogEntry[];
   adminAlerts?: AdminAlert[];
+  /** Client organisations sharing this deployment. Users without orgId are platform level. */
+  organizations?: Organization[];
   loginAttempts?: LoginAttemptRecord[];
   ledgerSeq?: number;
   auditSeq?: number;
 }
 
 export type UserRole = "admin" | "user";
+
+/**
+ * A client organisation on a shared deployment. Its admins manage only its own
+ * users, runs and usage; platform admins (no orgId) see every organisation.
+ */
+export interface Organization {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  createdByUserId: string | null;
+  archivedAt?: string | null;
+}
 export type UserStatus = "active" | "suspended" | "deleted";
 
 /** Stored in data/store.json — passwordHash never sent to clients. */
@@ -1136,6 +1151,8 @@ export interface AppUser {
   deletedAt?: string | null;
   /** Last successful sign-in. */
   lastLoginAt?: string | null;
+  /** Client organisation. Absent/null = platform level (sees every organisation when admin). */
+  orgId?: string | null;
 }
 
 export type AppUserPublic = Pick<
@@ -1147,6 +1164,7 @@ export type AppUserPublic = Pick<
   | "status"
   | "mustChangePassword"
   | "createdAt"
+  | "orgId"
 >;
 
 /* ─────────────────────────── Projects & sharing ─────────────────────────── */

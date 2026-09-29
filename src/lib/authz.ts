@@ -8,6 +8,7 @@ import {
   listProjects,
   listProjectSpaces,
   listSpaceMemberships,
+  orgUserIds,
   toPublicUser,
   type ProjectOwnership,
 } from "@/lib/db";
@@ -95,6 +96,56 @@ export async function requireAdmin(): Promise<AppUser> {
   return user;
 }
 
+/* ───────────────────────────── Admin scope ──────────────────────────────── */
+
+/**
+ * What an administrator may manage. Platform admins (no organisation) manage
+ * everything; an organisation's admins manage only that organisation's users
+ * and the runs, spaces, usage and audit entries belonging to them.
+ */
+export type AdminScope = { kind: "platform" } | { kind: "org"; orgId: string };
+
+export function adminScope(user: AppUser): AdminScope {
+  return user.orgId ? { kind: "org", orgId: user.orgId } : { kind: "platform" };
+}
+
+export function isPlatformAdmin(user: AppUser | null | undefined): boolean {
+  return Boolean(user && user.role === "admin" && !user.orgId);
+}
+
+/** Global settings, credit rates, billing checks, imports and organisations. */
+export async function requirePlatformAdmin(): Promise<AppUser> {
+  const user = await requireAdmin();
+  if (user.orgId) {
+    throw new HttpError(403, "Only platform administrators can do that.", "forbidden");
+  }
+  return user;
+}
+
+export function userInScope(scope: AdminScope, target: { orgId?: string | null } | null | undefined): boolean {
+  if (scope.kind === "platform") return true;
+  return Boolean(target && target.orgId === scope.orgId);
+}
+
+/** Runs and spaces belong to their owner's organisation; unowned rows are platform-only. */
+export function ownerInScope(scope: AdminScope, ownerUserId: string | null | undefined): boolean {
+  if (scope.kind === "platform") return true;
+  if (!ownerUserId) return false;
+  return userInScope(scope, getUserById(ownerUserId));
+}
+
+/** User ids an admin may see, or null for all of them. */
+export function scopedUserIds(scope: AdminScope): Set<string> | null {
+  return scope.kind === "platform" ? null : orgUserIds(scope.orgId);
+}
+
+/** 404 unless the target user is inside the admin's scope (ids cannot be probed). */
+export function assertUserInScope(admin: AppUser, target: AppUser | null | undefined): asserts target is AppUser {
+  if (!target || !userInScope(adminScope(admin), target)) {
+    throw new HttpError(404, "User not found", "not_found");
+  }
+}
+
 /* ─────────────────────────── Project authorization ──────────────────────── */
 
 export interface ProjectAccess {
@@ -132,7 +183,7 @@ export function resolveSpaceAccess(
   if (!space || space.archivedAt) {
     throw new HttpError(404, "Not found", "not_found");
   }
-  if (user.role === "admin") {
+  if (user.role === "admin" && ownerInScope(adminScope(user), space.ownerUserId)) {
     return { spaceId, role: "owner", clientName: space.clientName };
   }
   const role = spaceRoleFor(spaceId, user);
@@ -193,7 +244,7 @@ export function resolveProjectAccess(
     return { project, role: "owner", isAdminOverride: false };
   }
 
-  if (user.role === "admin") {
+  if (user.role === "admin" && ownerInScope(adminScope(user), project.ownerUserId)) {
     recordAudit({
       actorUserId: user.id,
       actorUsername: user.username,

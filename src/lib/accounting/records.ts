@@ -257,8 +257,17 @@ export function queryAudit(filter?: {
   from?: string;
   to?: string;
   limit?: number;
+  /** Only entries done by or to one of these users (an organisation). */
+  userIds?: Set<string> | null;
 }): AuditLogEntry[] {
   const rows = (readDb().auditLogs ?? []).filter((e) => {
+    if (
+      filter?.userIds &&
+      !(e.actorUserId && filter.userIds.has(e.actorUserId)) &&
+      !(e.targetUserId && filter.userIds.has(e.targetUserId))
+    ) {
+      return false;
+    }
     if (filter?.actorUserId && e.actorUserId !== filter.actorUserId) return false;
     if (filter?.targetUserId && e.targetUserId !== filter.targetUserId) {
       return false;

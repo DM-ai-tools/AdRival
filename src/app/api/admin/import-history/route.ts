@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
-import { getStoreStats, mergeStore, replaceStore } from "@/lib/db";
+import { getStoreStats, getUserByUsername, mergeStore, replaceStore } from "@/lib/db";
 import { getSessionUser } from "@/lib/authz";
 import { recordAudit } from "@/lib/accounting/records";
 import type { DatabaseShape } from "@/lib/types";
@@ -36,7 +36,8 @@ async function authorize(req: NextRequest): Promise<
     return { ok: true, actorUserId: null, actorUsername: "import-secret" };
   }
   const user = await getSessionUser();
-  if (user?.role === "admin") {
+  // Platform administrators only — an organisation admin must never replace the store.
+  if (user?.role === "admin" && !user.orgId) {
     return { ok: true, actorUserId: user.id, actorUsername: user.username };
   }
   return { ok: false };
@@ -69,6 +70,12 @@ export async function POST(req: NextRequest) {
 
   const modeParam = (req.nextUrl.searchParams.get("mode") || "replace").toLowerCase();
   const mode = modeParam === "merge" ? "merge" : "replace";
+  // Runs whose owner can't be matched on this server go to this account.
+  const ownerParam = req.nextUrl.searchParams.get("owner")?.trim() || "";
+  const fallbackOwner = ownerParam ? getUserByUsername(ownerParam) : null;
+  if (ownerParam && (!fallbackOwner || fallbackOwner.status === "deleted")) {
+    return NextResponse.json({ error: `No account named "${ownerParam}" on this server` }, { status: 400 });
+  }
 
   let payload: Partial<DatabaseShape>;
   try {
@@ -85,7 +92,8 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const result = mode === "merge" ? mergeStore(payload) : replaceStore(payload);
+    const options = { fallbackOwnerUserId: fallbackOwner?.id ?? null };
+    const result = mode === "merge" ? mergeStore(payload, options) : replaceStore(payload, options);
     recordAudit({
       actorUserId: auth.actorUserId,
       actorUsername: auth.actorUsername,
@@ -95,6 +103,8 @@ export async function POST(req: NextRequest) {
         jobsAfter: result.after.jobs,
         competitorsAfter: result.after.competitors,
         lookupJobsAfter: result.after.lookupJobs,
+        owners: result.owners ? JSON.stringify(result.owners) : null,
+        fallbackOwner: fallbackOwner?.username ?? null,
       },
     });
     return NextResponse.json({

@@ -3,6 +3,7 @@ import path from "path";
 import type {
   AppSettings,
   AppUser,
+  Organization,
   AdminAlert,
   AppUserPublic,
   CompetitorRecord,
@@ -658,7 +659,66 @@ function writeDb(db: DatabaseShape) {
  * always preserved from the live store so a history import can never clobber
  * billing or authorization data.
  */
-function normalizeDb(input: Partial<DatabaseShape> | null | undefined): DatabaseShape {
+export type ImportOwnerOptions = {
+  /** Server account that receives imported runs whose owner is unknown here (or unowned). */
+  fallbackOwnerUserId?: string | null;
+};
+
+export type ImportOwnerSummary = {
+  kept: number;
+  matchedByUsername: number;
+  assignedToFallback: number;
+  unresolved: number;
+};
+
+/**
+ * Imported runs carry the owner ids of the machine they came from. Keep an
+ * owner that exists on this server, otherwise match the account by username
+ * (the import file carries its own users), otherwise use the fallback owner.
+ */
+function remapImportedOwners(
+  db: DatabaseShape,
+  incomingUsers: AppUser[] | undefined,
+  options: ImportOwnerOptions,
+): ImportOwnerSummary {
+  const serverIds = new Set((db.users ?? []).map((u) => u.id));
+  const serverByUsername = new Map((db.users ?? []).map((u) => [u.username.toLowerCase(), u.id]));
+  const idMap = new Map<string, string>();
+  for (const user of incomingUsers ?? []) {
+    const match = serverByUsername.get(String(user.username || "").toLowerCase());
+    if (match) idMap.set(user.id, match);
+  }
+  const summary: ImportOwnerSummary = { kept: 0, matchedByUsername: 0, assignedToFallback: 0, unresolved: 0 };
+  const fallback = options.fallbackOwnerUserId && serverIds.has(options.fallbackOwnerUserId)
+    ? options.fallbackOwnerUserId
+    : null;
+  const fix = (row: { ownerUserId?: string | null }) => {
+    if (row.ownerUserId && serverIds.has(row.ownerUserId)) {
+      summary.kept += 1;
+      return;
+    }
+    const mapped = row.ownerUserId ? idMap.get(row.ownerUserId) : undefined;
+    if (mapped) {
+      row.ownerUserId = mapped;
+      summary.matchedByUsername += 1;
+    } else if (fallback) {
+      row.ownerUserId = fallback;
+      summary.assignedToFallback += 1;
+    } else {
+      summary.unresolved += 1;
+    }
+  };
+  for (const job of db.jobs) fix(job);
+  for (const job of db.lookupJobs ?? []) fix(job);
+  return summary;
+}
+
+let lastImportOwners: ImportOwnerSummary | null = null;
+
+function normalizeDb(
+  input: Partial<DatabaseShape> | null | undefined,
+  options: ImportOwnerOptions = {},
+): DatabaseShape {
   const current = ensureDb();
   const db = emptyDb();
   db.users = current.users;
@@ -673,6 +733,7 @@ function normalizeDb(input: Partial<DatabaseShape> | null | undefined): Database
   db.spaceMemberships = current.spaceMemberships;
   db.auditLogs = current.auditLogs;
   db.adminAlerts = current.adminAlerts;
+  db.organizations = current.organizations;
   db.loginAttempts = current.loginAttempts;
   db.ledgerSeq = current.ledgerSeq;
   db.auditSeq = current.auditSeq;
@@ -686,6 +747,7 @@ function normalizeDb(input: Partial<DatabaseShape> | null | undefined): Database
     db.searchCompetitorAds = input.searchCompetitorAds;
   }
   if (Array.isArray(input.deletedRunIds)) db.deletedRunIds = input.deletedRunIds;
+  lastImportOwners = remapImportedOwners(db, Array.isArray(input.users) ? input.users : undefined, options);
   return db;
 }
 
@@ -701,27 +763,29 @@ export function getStoreStats(db: DatabaseShape = ensureDb()) {
 }
 
 /** Replace the entire JSON store (used for local → production history import). */
-export function replaceStore(payload: Partial<DatabaseShape>): {
+export function replaceStore(payload: Partial<DatabaseShape>, options: ImportOwnerOptions = {}): {
   before: ReturnType<typeof getStoreStats>;
   after: ReturnType<typeof getStoreStats>;
+  owners: ImportOwnerSummary | null;
 } {
   const before = getStoreStats();
-  const next = normalizeDb(payload);
+  const next = normalizeDb(payload, options);
   writeDb(next);
-  return { before, after: getStoreStats(next) };
+  return { before, after: getStoreStats(next), owners: lastImportOwners };
 }
 
 /**
  * Merge local history into the existing store by id (keeps production-only rows).
  * Incoming records win on id conflicts.
  */
-export function mergeStore(payload: Partial<DatabaseShape>): {
+export function mergeStore(payload: Partial<DatabaseShape>, options: ImportOwnerOptions = {}): {
   before: ReturnType<typeof getStoreStats>;
   after: ReturnType<typeof getStoreStats>;
+  owners: ImportOwnerSummary | null;
 } {
   const before = getStoreStats();
   const current = ensureDb();
-  const incoming = normalizeDb(payload);
+  const incoming = normalizeDb(payload, options);
 
   const byId = <T extends { id: string }>(existing: T[], next: T[]) => {
     const map = new Map<string, T>();
@@ -767,7 +831,7 @@ export function mergeStore(payload: Partial<DatabaseShape>): {
   );
 
   writeDb(merged);
-  return { before, after: getStoreStats(merged) };
+  return { before, after: getStoreStats(merged), owners: lastImportOwners };
 }
 
 export function getSeenPageIds(): Set<string> {
@@ -1359,6 +1423,7 @@ export function createUser(input: {
   status?: UserStatus;
   mustChangePassword?: boolean;
   createdByUserId?: string | null;
+  orgId?: string | null;
 }): AppUser {
   return transaction((db) => {
     if (!db.users) db.users = [];
@@ -1382,6 +1447,7 @@ export function createUser(input: {
       createdAt: now,
       updatedAt: now,
       createdByUserId: input.createdByUserId ?? null,
+      orgId: input.orgId ?? null,
     };
     db.users.unshift(user);
     return user;
@@ -1402,6 +1468,7 @@ export type UserPatch = Partial<
     | "suspendedAt"
     | "deletedAt"
     | "lastLoginAt"
+    | "orgId"
   >
 > & {
   /** Invalidates every existing session for this user. */
@@ -1438,7 +1505,59 @@ export function toPublicUser(user: AppUser): AppUserPublic {
     status: user.status,
     mustChangePassword: user.mustChangePassword,
     createdAt: user.createdAt,
+    orgId: user.orgId ?? null,
   };
+}
+
+/* ────────────────────────────── Organisations ───────────────────────────── */
+
+export function listOrganizations(options?: { includeArchived?: boolean }): Organization[] {
+  const rows = readDb().organizations ?? [];
+  return options?.includeArchived ? rows : rows.filter((o) => !o.archivedAt);
+}
+
+export function getOrganization(id: string | null | undefined): Organization | null {
+  if (!id) return null;
+  return (readDb().organizations ?? []).find((o) => o.id === id) ?? null;
+}
+
+export function createOrganization(input: { name: string; createdByUserId: string | null }): Organization {
+  return transaction((db) => {
+    if (!db.organizations) db.organizations = [];
+    const name = input.name.replace(/\s+/g, " ").trim().slice(0, 120);
+    if (!name) throw new Error("Organisation name is required");
+    if (db.organizations.some((o) => !o.archivedAt && o.name.toLowerCase() === name.toLowerCase())) {
+      throw new Error("An organisation with that name already exists");
+    }
+    const now = new Date().toISOString();
+    const org: Organization = {
+      id: crypto.randomUUID(),
+      name,
+      createdAt: now,
+      updatedAt: now,
+      createdByUserId: input.createdByUserId,
+      archivedAt: null,
+    };
+    db.organizations.unshift(org);
+    return org;
+  });
+}
+
+export function renameOrganization(id: string, name: string): Organization | null {
+  return transaction((db) => {
+    const org = (db.organizations ?? []).find((o) => o.id === id);
+    if (!org) return null;
+    const clean = name.replace(/\s+/g, " ").trim().slice(0, 120);
+    if (!clean) throw new Error("Organisation name is required");
+    org.name = clean;
+    org.updatedAt = new Date().toISOString();
+    return org;
+  });
+}
+
+/** Ids of every user in an organisation (any status). */
+export function orgUserIds(orgId: string): Set<string> {
+  return new Set((readDb().users ?? []).filter((u) => u.orgId === orgId).map((u) => u.id));
 }
 
 /* ────────────────────────────── App settings ────────────────────────────── */

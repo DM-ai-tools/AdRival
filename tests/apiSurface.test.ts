@@ -33,6 +33,7 @@ const ADMIN_ROUTES_WITH_SECRET = new Set([
 const AUTH_CALLS = [
   "requireUser(",
   "requireAdmin(",
+  "requirePlatformAdmin(",
   "getSessionUser(",
   "resolveProjectAccess(",
 ];
@@ -92,7 +93,8 @@ describe("API surface", () => {
       .filter((r) => r.name.startsWith(ADMIN_PREFIX))
       .filter((r) => !PUBLIC_ROUTES.has(r.name))
       .filter((r) => !ADMIN_ROUTES_WITH_SECRET.has(r.name))
-      .filter((r) => !r.source.includes("requireAdmin("))
+      // requirePlatformAdmin() calls requireAdmin() first, then narrows further.
+      .filter((r) => !r.source.includes("requireAdmin(") && !r.source.includes("requirePlatformAdmin("))
       .map((r) => r.name);
 
     assert.deepEqual(

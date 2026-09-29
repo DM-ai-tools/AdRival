@@ -26,6 +26,8 @@ function arg(name, fallback = "") {
 const url = (arg("url") || process.env.ADRIVAL_URL || "").replace(/\/$/, "");
 const secret = arg("secret") || process.env.HISTORY_IMPORT_SECRET || "";
 const mode = (arg("mode") || "replace").toLowerCase() === "merge" ? "merge" : "replace";
+// Server username that receives runs whose owner doesn't exist on the server.
+const owner = arg("owner") || process.env.IMPORT_OWNER || "";
 
 if (!url || !secret) {
   console.error(
@@ -42,7 +44,7 @@ if (!fs.existsSync(storePath)) {
 const body = fs.readFileSync(storePath, "utf8");
 JSON.parse(body); // validate
 
-const endpoint = `${url}/api/admin/import-history?mode=${mode}`;
+const endpoint = `${url}/api/admin/import-history?mode=${mode}${owner ? `&owner=${encodeURIComponent(owner)}` : ""}`;
 console.log(`Uploading ${storePath} (${body.length} bytes) → ${endpoint}`);
 
 const res = await fetch(endpoint, {

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { toPublicUser, updateUser } from "@/lib/db";
+import { getOrganization, toPublicUser, updateUser } from "@/lib/db";
 import { errorResponse, requireUser } from "@/lib/authz";
 import { getCreditSummary } from "@/lib/accounting/service";
 import {
@@ -17,6 +17,9 @@ export async function GET() {
     return NextResponse.json({
       user: toPublicUser(user),
       credits: getCreditSummary(user.id),
+      /** Client organisation name, or null for platform-level accounts. */
+      orgName: getOrganization(user.orgId)?.name ?? null,
+      platformAdmin: user.role === "admin" && !user.orgId,
     });
   } catch (err) {
     return errorResponse(err);

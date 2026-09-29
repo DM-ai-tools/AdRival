@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import AdminAlerts from "./AdminAlerts";
 import AdminAudit from "./AdminAudit";
+import AdminOrgs from "./AdminOrgs";
 import AdminOverview from "./AdminOverview";
 import AdminProjects from "./AdminProjects";
 import AdminRuns from "./AdminRuns";
@@ -12,9 +13,10 @@ import AdminUsage from "./AdminUsage";
 import AdminUsers from "./AdminUsers";
 import { adminFetch } from "./adminUi";
 
-type Tab = "overview" | "alerts" | "users" | "runs" | "usage" | "projects" | "audit" | "settings";
+type Tab = "overview" | "alerts" | "users" | "runs" | "usage" | "projects" | "audit" | "orgs" | "settings";
 
-const TABS: Array<{ id: Tab; label: string }> = [
+/** platformOnly tabs are hidden from a client organisation's admins. */
+const TABS: Array<{ id: Tab; label: string; platformOnly?: boolean }> = [
   { id: "overview", label: "Overview" },
   { id: "alerts", label: "Alerts" },
   { id: "users", label: "Users" },
@@ -22,7 +24,8 @@ const TABS: Array<{ id: Tab; label: string }> = [
   { id: "usage", label: "Usage" },
   { id: "projects", label: "Client spaces" },
   { id: "audit", label: "Audit log" },
-  { id: "settings", label: "Settings" },
+  { id: "orgs", label: "Organisations", platformOnly: true },
+  { id: "settings", label: "Settings", platformOnly: true },
 ];
 
 function readUrl(): { tab: Tab; user: string | null } {
@@ -39,6 +42,15 @@ export default function AdminDashboard() {
   const [tab, setTab] = useState<Tab>("overview");
   const [openUser, setOpenUser] = useState<string | null>(null);
   const [alertCount, setAlertCount] = useState<number | null>(null);
+  // Until we know, show only the tabs every admin has.
+  const [me, setMe] = useState<{ platformAdmin: boolean; orgName: string | null } | null>(null);
+
+  useEffect(() => {
+    void adminFetch<{ platformAdmin?: boolean; orgName?: string | null }>("/api/auth/me")
+      .then((d) => setMe({ platformAdmin: Boolean(d.platformAdmin), orgName: d.orgName ?? null }))
+      .catch(() => setMe({ platformAdmin: false, orgName: null }));
+  }, []);
+  const tabs = TABS.filter((t) => !t.platformOnly || me?.platformAdmin);
 
   // The tab (and an open user) live in the address, so refresh, Back and
   // shared links return to the same place.
@@ -82,8 +94,12 @@ export default function AdminDashboard() {
       <header className="product-header account-header">
         <div className="product-brand-block">
           <p className="brand">AdRival</p>
-          <h1>Administration</h1>
-          <p className="lede">Accounts, credit allowances, runs, usage, and client spaces.</p>
+          <h1>Administration{me?.orgName ? ` · ${me.orgName}` : ""}</h1>
+          <p className="lede">
+            {me?.orgName
+              ? `Your organisation's accounts, credits, runs, usage and client spaces.`
+              : "Accounts, credit allowances, runs, usage, and client spaces."}
+          </p>
         </div>
         <div className="header-link-row">
           <Link href="/credits" className="ghost-btn">
@@ -96,7 +112,7 @@ export default function AdminDashboard() {
       </header>
 
       <div className="tab-bar tab-bar-wide admin-tab-bar" role="tablist">
-        {TABS.map((t) => (
+        {tabs.map((t) => (
           <button
             key={t.id}
             type="button"
@@ -122,7 +138,8 @@ export default function AdminDashboard() {
       {tab === "usage" ? <AdminUsage onOpenUser={showUser} /> : null}
       {tab === "projects" ? <AdminProjects /> : null}
       {tab === "audit" ? <AdminAudit onOpenUser={showUser} /> : null}
-      {tab === "settings" ? <AdminSettings /> : null}
+      {tab === "orgs" && me?.platformAdmin ? <AdminOrgs onOpenUser={showUser} /> : null}
+      {tab === "settings" && me?.platformAdmin ? <AdminSettings /> : null}
     </main>
   );
 }

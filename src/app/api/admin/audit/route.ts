@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getJob, getLookupJob, getProjectSpace, getUserById } from "@/lib/db";
-import { errorResponse, requireAdmin } from "@/lib/authz";
+import { adminScope, errorResponse, requireAdmin, scopedUserIds } from "@/lib/authz";
 import { queryAudit } from "@/lib/accounting/records";
 import {
   ROUTINE_AUDIT_ACTIONS,
@@ -31,7 +31,7 @@ function projectTitle(kind?: string | null, id?: string | null): string | null {
  */
 export async function GET(request: Request) {
   try {
-    await requireAdmin();
+    const admin = await requireAdmin();
     const url = new URL(request.url);
     const p = url.searchParams;
     const limit = Math.min(Math.max(Number(p.get("limit")) || 200, 1), 2000);
@@ -45,6 +45,7 @@ export async function GET(request: Request) {
       // An end date includes that whole day.
       to: toDate ? (toDate.length === 10 ? `${toDate}T23:59:59.999Z` : toDate) : undefined,
       limit,
+      userIds: scopedUserIds(adminScope(admin)),
     });
 
     const view = rows.map((e) => {

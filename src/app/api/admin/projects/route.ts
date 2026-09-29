@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getUserById, listProjects } from "@/lib/db";
-import { errorResponse, requireAdmin } from "@/lib/authz";
+import { adminScope, errorResponse, ownerInScope, requireAdmin } from "@/lib/authz";
 import { listMemberships } from "@/lib/accounting/records";
 import type { ProjectKind } from "@/lib/types";
 
@@ -12,12 +12,15 @@ export const runtime = "nodejs";
  */
 export async function GET(request: Request) {
   try {
-    await requireAdmin();
+    const admin = await requireAdmin();
+    const scope = adminScope(admin);
     const url = new URL(request.url);
     const unassignedOnly = url.searchParams.get("unassigned") === "1";
     const ownerUserId = url.searchParams.get("ownerUserId") || undefined;
 
-    const projects = listProjects({ unassignedOnly, ownerUserId });
+    const projects = listProjects({ unassignedOnly, ownerUserId }).filter((p) =>
+      ownerInScope(scope, p.ownerUserId),
+    );
     const memberships = listMemberships();
 
     return NextResponse.json({
@@ -48,7 +51,8 @@ export async function GET(request: Request) {
           shares,
         };
       }),
-      unassignedCount: listProjects({ unassignedOnly: true }).length,
+      // Unowned legacy runs are a platform matter.
+      unassignedCount: scope.kind === "platform" ? listProjects({ unassignedOnly: true }).length : 0,
     });
   } catch (err) {
     return errorResponse(err, { audience: "admin" });

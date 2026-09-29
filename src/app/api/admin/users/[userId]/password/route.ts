@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getUserById, updateUser } from "@/lib/db";
-import { errorResponse, HttpError, requireAdmin } from "@/lib/authz";
+import { assertUserInScope, errorResponse, HttpError, requireAdmin } from "@/lib/authz";
 import { hashPassword } from "@/lib/auth/password";
 import { generateTemporaryPassword } from "@/lib/auth/bootstrap";
 import { recordAudit } from "@/lib/accounting/records";
@@ -20,7 +20,7 @@ export async function POST(
     const admin = await requireAdmin();
     const { userId } = await params;
     const user = getUserById(userId);
-    if (!user) throw new HttpError(404, "User not found", "not_found");
+    assertUserInScope(admin, user);
     if (user.status === "deleted") {
       throw new HttpError(409, "Account is deleted", "deleted");
     }

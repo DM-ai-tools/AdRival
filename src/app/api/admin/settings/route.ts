@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getAppSettings, updateAppSettings } from "@/lib/db";
-import { errorResponse, HttpError, requireAdmin } from "@/lib/authz";
+import { errorResponse, HttpError, requirePlatformAdmin } from "@/lib/authz";
 import {
   getActiveConversionRuleSet,
   listConversionRuleSets,
@@ -26,7 +26,7 @@ export const runtime = "nodejs";
 
 export async function GET() {
   try {
-    await requireAdmin();
+    await requirePlatformAdmin();
     return NextResponse.json({
       settings: getAppSettings(),
       conversionRuleSets: listConversionRuleSets(),
@@ -46,7 +46,7 @@ export async function GET() {
 
 export async function PUT(request: Request) {
   try {
-    const admin = await requireAdmin();
+    const admin = await requirePlatformAdmin();
 
     let body: {
       publicSignupEnabled?: boolean;
@@ -137,7 +137,7 @@ export async function PUT(request: Request) {
 /** Publish a new conversion rule version. Existing charges keep their version. */
 export async function POST(request: Request) {
   try {
-    const admin = await requireAdmin();
+    const admin = await requirePlatformAdmin();
 
     let body: {
       rates?: Record<string, Record<string, Record<string, number>>>;

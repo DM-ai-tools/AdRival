@@ -864,6 +864,8 @@ export function getCreditSummary(userId: string): CreditSummary {
 
 export interface UsageQuery {
   chargedUserId?: string;
+  /** Limit to calls charged to any of these users (an organisation). */
+  chargedUserIds?: Set<string> | null;
   projectId?: string;
   projectKind?: ProjectKind;
   runId?: string;
@@ -884,6 +886,7 @@ export function queryProviderCalls(query: UsageQuery = {}): {
     if (query.chargedUserId && c.chargedUserId !== query.chargedUserId) {
       return false;
     }
+    if (query.chargedUserIds && !query.chargedUserIds.has(c.chargedUserId)) return false;
     if (query.projectId && c.projectId !== query.projectId) return false;
     if (query.projectKind && c.projectKind !== query.projectKind) return false;
     if (query.runId && c.runId !== query.runId) return false;

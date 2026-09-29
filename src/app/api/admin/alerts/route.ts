@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { errorResponse, HttpError, requireAdmin } from "@/lib/authz";
+import { adminScope, errorResponse, HttpError, requireAdmin, requirePlatformAdmin, userInScope } from "@/lib/authz";
 import { acknowledgeAdminAlerts, listAdminAlerts, listUsers } from "@/lib/db";
 import { getCreditSummary } from "@/lib/accounting/service";
 import { recordAudit } from "@/lib/accounting/records";
@@ -15,10 +15,11 @@ export const runtime = "nodejs";
  */
 export async function GET(request: Request) {
   try {
-    await requireAdmin();
+    const admin = await requireAdmin();
+    const scope = adminScope(admin);
     const showAll = new URL(request.url).searchParams.get("all") === "1";
     const lowCredit = listUsers()
-      .filter((user) => user.status === "active" && user.role !== "admin")
+      .filter((user) => user.status === "active" && user.role !== "admin" && userInScope(scope, user))
       .map((user) => ({ user, credits: getCreditSummary(user.id) }))
       .filter((row) => row.credits.lowCredit)
       .map((row) => ({
@@ -30,7 +31,8 @@ export async function GET(request: Request) {
         warningCredits: formatCredits(row.credits.lowCreditWarningSubunits),
       }));
 
-    const all = listAdminAlerts();
+    // Out-of-credit vendor accounts are the platform's to fix, not a client organisation's.
+    const all = scope.kind === "platform" ? listAdminAlerts() : [];
     const open = all.filter((alert) => !alert.acknowledgedAt);
     const providerCredits = (showAll ? all : open).map((alert) => ({
       id: alert.id,
@@ -65,7 +67,7 @@ export async function GET(request: Request) {
 /** Dismiss provider alerts. Body: { alertIds: string[] } */
 export async function POST(request: Request) {
   try {
-    const admin = await requireAdmin();
+    const admin = await requirePlatformAdmin();
     const body = (await request.json().catch(() => ({}))) as { alertIds?: unknown };
     const ids = Array.isArray(body.alertIds) ? body.alertIds.map(String).filter(Boolean) : [];
     if (!ids.length) throw new HttpError(400, "Choose at least one alert");

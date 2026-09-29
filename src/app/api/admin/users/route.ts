@@ -2,13 +2,15 @@ import { NextResponse } from "next/server";
 import {
   createUser,
   getAppSettings,
+  getOrganization,
+  listOrganizations,
   getUserByUsername,
   listProjectSpaces,
   listProjects,
   listUsers,
   toPublicUser,
 } from "@/lib/db";
-import { errorResponse, requireAdmin } from "@/lib/authz";
+import { adminScope, errorResponse, requireAdmin, userInScope } from "@/lib/authz";
 import { hashPassword } from "@/lib/auth/password";
 import { generateTemporaryPassword } from "@/lib/auth/bootstrap";
 import {
@@ -27,7 +29,9 @@ export const runtime = "nodejs";
 /** Admin user list with credit and project counts. Never includes hashes. */
 export async function GET(request: Request) {
   try {
-    await requireAdmin();
+    const admin = await requireAdmin();
+    const scope = adminScope(admin);
+    const orgNames = new Map(listOrganizations({ includeArchived: true }).map((o) => [o.id, o.name]));
     const url = new URL(request.url);
     const search = url.searchParams.get("search")?.trim().toLowerCase() ?? "";
     const roleFilter = url.searchParams.get("role") ?? "";
@@ -35,8 +39,12 @@ export async function GET(request: Request) {
 
     const projects = listProjects();
     const spaces = listProjectSpaces();
+    const orgFilter = url.searchParams.get("org") ?? "";
     const rows = listUsers({ includeDeleted: true })
+      .filter((user) => userInScope(scope, user))
       .filter((user) => {
+        if (orgFilter === "platform" && user.orgId) return false;
+        if (orgFilter && orgFilter !== "platform" && user.orgId !== orgFilter) return false;
         if (
           search &&
           !user.username.includes(search) &&
@@ -58,6 +66,7 @@ export async function GET(request: Request) {
         spaceCount: spaces.filter((s) => s.ownerUserId === user.id).length,
         lastLoginAt: user.lastLoginAt ?? null,
         loginLocked: isLoginLocked(user.username).locked,
+        orgName: user.orgId ? orgNames.get(user.orgId) ?? "Unknown organisation" : null,
       }));
 
     return NextResponse.json(
@@ -91,6 +100,8 @@ export async function POST(request: Request) {
       role?: UserRole;
       status?: UserStatus;
       allowanceCredits?: string | number;
+      /** Platform admins only: put the user in a client organisation. */
+      orgId?: string | null;
     } = {};
     try {
       body = await request.json();
@@ -113,6 +124,15 @@ export async function POST(request: Request) {
     }
 
     const role: UserRole = body.role === "admin" ? "admin" : "user";
+    // Organisation admins always create users inside their own organisation.
+    let orgId: string | null = admin.orgId ?? null;
+    if (!admin.orgId && body.orgId) {
+      const org = getOrganization(String(body.orgId));
+      if (!org || org.archivedAt) {
+        return NextResponse.json({ error: "That organisation does not exist" }, { status: 400 });
+      }
+      orgId = org.id;
+    }
     const settings = getAppSettings();
     const allowance =
       body.allowanceCredits === undefined || body.allowanceCredits === ""
@@ -134,6 +154,7 @@ export async function POST(request: Request) {
       status: "active",
       mustChangePassword: true,
       createdByUserId: admin.id,
+      orgId,
     });
     initializeUserCredits(user.id, {
       allowanceSubunits: allowance,
@@ -145,7 +166,7 @@ export async function POST(request: Request) {
       actorUsername: admin.username,
       action: "admin.user.create",
       targetUserId: user.id,
-      details: { username, role, allowanceSubunits: allowance },
+      details: { username, role, allowanceSubunits: allowance, orgId },
     });
 
     return NextResponse.json({

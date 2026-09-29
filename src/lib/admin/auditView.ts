@@ -22,6 +22,8 @@ const ACTION_LABELS: Record<string, string> = {
   "admin.settings.update": "Changed settings",
   "admin.conversion_rules.publish": "Published conversion rules",
   "admin.space.create": "Created a client space",
+  "admin.org.create": "Created an organisation",
+  "admin.org.rename": "Renamed an organisation",
   "admin.space.rename": "Renamed a client space",
   "admin.space.restore": "Restored a client space",
   "admin.space.delete": "Archived a client space",
