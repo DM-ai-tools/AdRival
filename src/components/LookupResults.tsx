@@ -377,8 +377,8 @@ function AdCard({
               {bridging
                 ? "Opening…"
                 : ad.recreationCompetitorId
-                  ? "Content & design again"
-                  : "Content & design"}
+                  ? "Recreate again"
+                  : "Recreate for my brand"}
             </button>
           </>
         ) : null}

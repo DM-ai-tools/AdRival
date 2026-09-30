@@ -104,6 +104,9 @@ export function LookupForm({ platform, onStarted, disabled }: LookupFormProps) {
           {loading ? "Starting…" : "Fetch ads"}
         </button>
       </div>
+      {!loading && !disabled && !spaceId ? (
+        <p className="form-hint run-blocked-reason">Choose or create a client space at the top of the page to start.</p>
+      ) : null}
       <label htmlFor="lookup-business-url" className="search-label" style={{ marginTop: 12 }}>
         Your brand website{" "}
         <span className="muted">(for landing page content &amp; design)</span>

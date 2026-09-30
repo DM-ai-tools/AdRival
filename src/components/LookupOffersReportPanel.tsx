@@ -44,8 +44,17 @@ function FunnelBadge({ stage }: { stage?: FunnelStage | null }) {
         : value === "BOFU"
           ? "offers-funnel-bofu"
           : "";
+  // Plain words with the marketing term in the tooltip.
+  const words: Record<string, [string, string]> = {
+    TOFU: ["Awareness", "Top of funnel (TOFU): reaching people who don't know the business yet"],
+    MOFU: ["Consideration", "Middle of funnel (MOFU): people comparing options"],
+    BOFU: ["Ready to buy", "Bottom of funnel (BOFU): people ready to book or buy"],
+  };
+  const [label, title] = words[value] || ["Stage unclear", "The funnel stage could not be told from the ad"];
   return (
-    <span className={`offers-funnel-badge ${mod}`.trim()}>{value}</span>
+    <span className={`offers-funnel-badge ${mod}`.trim()} title={title}>
+      {label}
+    </span>
   );
 }
 
@@ -138,7 +147,7 @@ export function LookupOffersTeaser({
       : progress?.offersPhase === "landing_pages"
         ? "Landing pages"
         : progress?.offersPhase === "ladder"
-          ? "Value ladder"
+          ? "Offer ladder"
           : progress?.offersPhase === "starting"
             ? "Starting"
             : pending
@@ -149,7 +158,7 @@ export function LookupOffersTeaser({
     <section className={`panel offers-teaser ${pending ? "is-analyzing" : ""}`}>
       <div className="offers-teaser-main">
         <div>
-          <h2>Offers intelligence</h2>
+          <h2>Offers dashboard</h2>
           <p className="muted">
             {pending
               ? progress?.message ||
@@ -174,7 +183,7 @@ export function LookupOffersTeaser({
               disabled={Boolean(pending)}
               onClick={onGenerate}
             >
-              {generating || pending ? "Working…" : "Generate report"}
+              {generating || pending ? "Working…" : "Build offers dashboard"}
             </button>
           ) : null}
           {ready && onGenerate ? (
@@ -424,7 +433,7 @@ export function LookupOffersDashboard({
               "services",
               `Services (${report.services?.uniqueServices ?? serviceNodes.length})`,
             ],
-            ["ladder", `Value ladders (${coreLadders.length})`],
+            ["ladder", `Offer ladders (${coreLadders.length})`],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -447,7 +456,7 @@ export function LookupOffersDashboard({
             href={`/api/lookup/offers-report/export?lookupId=${encodeURIComponent(job.id)}&part=${section === "ladder" ? "ladders" : section}`}
             download
           >
-            Download {section === "ladder" ? "value ladders" : section === "pages" ? "landing pages" : "creatives & offers"} (Excel)
+            Download {section === "ladder" ? "offer ladders" : section === "pages" ? "landing pages" : "creatives & offers"} (Excel)
           </a>
         ) : null}
         <a
@@ -572,11 +581,11 @@ export function LookupOffersDashboard({
           ) : null}
 
           <section className="offers-block">
-            <h2>Offer value ladder</h2>
+            <h2>Offer ladder</h2>
             <p className="muted offers-block-lead">
               {coreLadders.length > 0
                 ? `${coreLadders.length} core landing-page offer${coreLadders.length === 1 ? "" : "s"} with mapped ad-copy ladders.`
-                : "No value ladder found — analyze landing pages, then Refresh."}
+                : "No offer ladder found — analyse landing pages, then rebuild the dashboard."}
             </p>
             {coreLadders.length > 0 ? (
               <button
@@ -584,7 +593,7 @@ export function LookupOffersDashboard({
                 className="ghost-btn"
                 onClick={() => setSection("ladder")}
               >
-                View value ladders →
+                View offer ladders →
               </button>
             ) : null}
           </section>
@@ -932,13 +941,13 @@ export function LookupOffersDashboard({
       {section === "ladder" ? (
         <div className="offers-dash-body">
           <section className="offers-block">
-            <h2>Offer value ladders</h2>
+            <h2>Offer ladders</h2>
             <p className="muted offers-block-lead">
               Every offer found, cheapest first. Select one to see its details and the ad copy behind it.
               {report.valueLadder?.summary ? ` ${report.valueLadder.summary}` : ""}
             </p>
             {coreLadders.length === 0 ? (
-              <EmptyRefreshHint label="No value ladder found." />
+              <EmptyRefreshHint label="No offer ladder found." />
             ) : (
               <OfferWorkspace
                 offers={coreLadders.map((l) => {

@@ -60,7 +60,10 @@ export function OfferWorkspace({
   ads,
   adsLoading,
   getAds,
+  initialSelection,
 }: {
+  /** Offer to show first, e.g. when arriving from Insights. */
+  initialSelection?: { id: string; competitor: string } | null;
   /** Search run id; enables "Open full offer page". */
   jobId?: string | null;
   offers: LookupCoreOfferLadder[];
@@ -71,7 +74,7 @@ export function OfferWorkspace({
 }) {
   const [competitor, setCompetitor] = useState<string>("all");
   const [tier, setTier] = useState<TierFilter>("all");
-  const [selected, setSelected] = useState<{ id: string; competitor: string } | null>(null);
+  const [selected, setSelected] = useState<{ id: string; competitor: string } | null>(initialSelection ?? null);
   const [showAllAds, setShowAllAds] = useState(false);
 
   const allGroups = useMemo(() => groupByCompetitor(offers), [offers]);
@@ -104,6 +107,16 @@ export function OfferWorkspace({
   }, [sequence, selected]);
 
   useEffect(() => setShowAllAds(false), [selected?.id, selected?.competitor]);
+
+  // Arriving with an offer picked (from Insights): bring its tile into view.
+  useEffect(() => {
+    if (!initialSelection) return;
+    const key = `${initialSelection.competitor}::${initialSelection.id}`;
+    const el = document.querySelector(`[data-offer-key="${CSS.escape(key)}"]`);
+    el?.scrollIntoView({ block: "center", behavior: "smooth" });
+    // Only on arrival.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const index = selected
     ? sequence.findIndex((s) => s.id === selected.id && s.competitor === selected.competitor)
@@ -188,6 +201,7 @@ export function OfferWorkspace({
                           type="button"
                           className={`offer-ws-chip is-${o.ticketTier}${active ? " active" : ""}`}
                           aria-pressed={active}
+                          data-offer-key={`${g.name}::${o.id}`}
                           onClick={() => setSelected({ id: o.id, competitor: g.name })}
                         >
                           <span className="offer-ws-chip-tier">{tierName(o.ticketTier)}</span>

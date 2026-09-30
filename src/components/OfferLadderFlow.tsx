@@ -181,7 +181,8 @@ export function adsForOffer(
   // The same creative is often stored several times: show it once.
   const copies = new Set<string>();
   const unique = out.filter((ad) => {
-    const key = `${ad.title || ""}|${ad.body || ""}`.toLowerCase().replace(/\s+/g, " ").trim();
+    // Per advertiser: two competitors running the same wording are two ads.
+    const key = `${ad.pageName}|${ad.title || ""}|${ad.body || ""}`.toLowerCase().replace(/\s+/g, " ").trim();
     if (copies.has(key)) return false;
     copies.add(key);
     return true;

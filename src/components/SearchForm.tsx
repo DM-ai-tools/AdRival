@@ -252,7 +252,7 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
   return (
     <form onSubmit={handleSubmit} className="search-form">
       <label htmlFor="businessUrl" className="search-label">
-        Business website URL
+        Your client&apos;s website <span className="muted">(recommended)</span>
       </label>
       <div className="search-row url-analyze-row">
         <input
@@ -266,16 +266,16 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
         />
         <button
           type="button"
-          className="ghost-btn"
+          className={profile ? "ghost-btn" : "search-btn"}
           disabled={disabled || loading || analyzing || !businessUrl.trim()}
           onClick={() => void analyzeUrl()}
         >
-          {analyzing ? "Analyzing…" : "Analyze URL"}
+          {analyzing ? "Analysing…" : profile ? "Analyse again" : "Analyse website"}
         </button>
       </div>
       <p className="form-hint">
-        Detects services/products, locations, and whether the business is
-        on-site or off-site so competitor keywords match the right geo.
+        Detects services, locations and whether the business serves customers on-site, so keywords and locations
+        match. It is also needed later to recreate competitor landing pages for your client.
       </p>
 
       {profile && (
@@ -301,7 +301,7 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
           <p>{profile.description}</p>
           {matchedSop && (
             <div className="sop-chip-row">
-              <span className="sop-chip">SOP: {matchedSop.label}</span>
+              <span className="sop-chip" title="Industry rules decide which kinds of advertisers count as competitors">Industry rules: {matchedSop.label}</span>
               <span className="form-hint" style={{ margin: 0 }}>
                 Blocks {matchedSop.excludeCompetitorTypes.slice(0, 3).join(", ")}
                 {matchedSop.excludeCompetitorTypes.length > 3 ? "…" : ""}
@@ -389,7 +389,7 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
                 onChange={() => setGuardrailChoice("enforce")}
                 disabled={disabled || loading}
               />
-              <span>Enforce industry SOP</span>
+              <span>Apply industry rules (recommended)</span>
             </label>
             <label className="geo-radio">
               <input
@@ -455,7 +455,7 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
       )}
 
       <fieldset className="geo-fieldset">
-        <legend className="search-label">Competitor geography mode</legend>
+        <legend className="search-label">Where competitors should be based</legend>
         <div className="geo-radio-grid" role="radiogroup">
           <label className="geo-radio">
             <input
@@ -487,7 +487,7 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
 
       <fieldset className="geo-fieldset">
         <legend className="search-label">
-          Ad Library market — {meta.short}
+          Country to search ads in — {meta.short}
         </legend>
         <div className="geo-radio-grid" role="radiogroup">
           {geoOptions.map((opt) => (
@@ -558,6 +558,11 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
             : `Find ${meta.short} competitors${profile ? ` in ${profile.industry}` : ""}`}
         </button>
       </div>
+      {!loading && !disabled && !spaceId ? (
+        <p className="form-hint run-blocked-reason">Choose or create a client space at the top of the page to start.</p>
+      ) : !loading && !disabled && !keywordsText.trim() ? (
+        <p className="form-hint run-blocked-reason">Add at least one keyword to search for.</p>
+      ) : null}
       {blockedCode ? (
         <RunBlockedNotice message={error || ""} code={blockedCode} />
       ) : error ? (

@@ -39,7 +39,7 @@ test("the offers workbook has every sheet, ads grouped by competitor and ladders
   const { buildOffersWorkbook } = await import("../src/lib/export/offersExcel");
   const buf = await buildOffersWorkbook({ title: "Competitor offers — SEO", subtitle: "", platform: "facebook", report, ads, focus: null, part: "all" });
   const wb = new ExcelJS.Workbook();
-  await wb.xlsx.load(buf);
+  await wb.xlsx.load(buf as unknown as ArrayBuffer);
   assert.deepEqual(
     wb.worksheets.map((s) => s.name),
     ["Summary", "Ads by competitor", "Creatives & offers", "Unique offers", "Offer ladders", "Landing pages"],
@@ -65,6 +65,6 @@ test("a single-tab download holds only that tab plus the summary", async () => {
   const { buildOffersWorkbook } = await import("../src/lib/export/offersExcel");
   const buf = await buildOffersWorkbook({ title: "t", subtitle: "", platform: null, report, ads, focus: null, part: "ads" });
   const wb = new ExcelJS.Workbook();
-  await wb.xlsx.load(buf);
+  await wb.xlsx.load(buf as unknown as ArrayBuffer);
   assert.deepEqual(wb.worksheets.map((s) => s.name), ["Summary", "Ads by competitor"]);
 });

@@ -11,6 +11,7 @@ import type {
 } from "@/lib/types";
 import { visibleOfferLadders } from "./OfferLadderFlow";
 import { OfferWorkspace } from "./OfferWorkspace";
+import { OfferInsights } from "./OfferInsights";
 import {
   offerFitsSearchedService,
   searchedServiceFocus,
@@ -37,8 +38,17 @@ function FunnelBadge({ stage }: { stage?: FunnelStage | null }) {
         : value === "BOFU"
           ? "offers-funnel-bofu"
           : "";
+  // Plain words with the marketing term in the tooltip.
+  const words: Record<string, [string, string]> = {
+    TOFU: ["Awareness", "Top of funnel (TOFU): reaching people who don't know the business yet"],
+    MOFU: ["Consideration", "Middle of funnel (MOFU): people comparing options"],
+    BOFU: ["Ready to buy", "Bottom of funnel (BOFU): people ready to book or buy"],
+  };
+  const [label, title] = words[value] || ["Stage unclear", "The funnel stage could not be told from the ad"];
   return (
-    <span className={`offers-funnel-badge ${mod}`.trim()}>{value}</span>
+    <span className={`offers-funnel-badge ${mod}`.trim()} title={title}>
+      {label}
+    </span>
   );
 }
 
@@ -223,8 +233,12 @@ export function SearchOffersTeaser({
     }
 
     const fromJob = filterToRoster(job.offersCompetitorIds || []);
+    // First visit: start with the competitors that advertise most (10+ active
+    // ads), or everyone, so the build button is ready to press.
+    const busy = roster.filter((c) => (c.activeAdsCount ?? 0) >= 10).map((c) => c.id);
+    const defaults = busy.length ? busy : rosterIds;
     hydratedJobRef.current = job.id;
-    setSelectedIds(fromSession.length > 0 ? fromSession : fromJob);
+    setSelectedIds(fromSession.length > 0 ? fromSession : fromJob.length > 0 ? fromJob : defaults);
   }, [
     selectCompetitors,
     job.id,
@@ -287,7 +301,7 @@ export function SearchOffersTeaser({
     <section className="panel offers-teaser">
       <div className="offers-teaser-main">
         <div>
-          <h2>Offers dashboard (keyword search)</h2>
+          <h2>{reportReady ? "Offers analysis" : "Build the offers dashboard"}</h2>
           <p className="muted">
             {running
               ? job.progress.message
@@ -476,7 +490,8 @@ export function SearchOffersTeaser({
 }
 
 /** Tab → name used on its download button. */
-const SECTION_EXPORT_LABEL: Record<"ads" | "pages" | "creatives" | "ladders", string> = {
+const SECTION_EXPORT_LABEL: Record<"insights" | "ads" | "pages" | "creatives" | "ladders", string> = {
+  insights: "insights (full report)",
   ads: "ads by competitor",
   pages: "landing pages",
   creatives: "creatives & offers",
@@ -492,8 +507,10 @@ export function SearchOffersDashboard({
   const [ads, setAds] = useState<SearchCompetitorAdRecord[]>([]);
   const [adsLoaded, setAdsLoaded] = useState(false);
   const [section, setSection] = useState<
-    "ads" | "pages" | "creatives" | "ladders"
-  >("ladders");
+    "insights" | "ads" | "pages" | "creatives" | "ladders"
+  >("insights");
+  /** Offer to open on the ladders tab when arriving from Insights. */
+  const [ladderFocus, setLadderFocus] = useState<{ id: string; competitor: string } | null>(null);
   const [selectedOffer, setSelectedOffer] = useState<string | null>(null);
   const [selectedPageKey, setSelectedPageKey] = useState<string | null>(null);
   const [funnelFilter, setFunnelFilter] = useState<FunnelStage | "all">("all");
@@ -506,7 +523,7 @@ export function SearchOffersDashboard({
   const [showAllPageAds, setShowAllPageAds] = useState(false);
 
   const needsRawAds =
-    section === "ads" || section === "ladders" || section === "pages";
+    section === "insights" || section === "ads" || section === "ladders" || section === "pages";
 
   useEffect(() => {
     if (!job.id || report?.status !== "completed" || !needsRawAds) return;
@@ -790,6 +807,14 @@ export function SearchOffersDashboard({
         <button
           type="button"
           role="tab"
+          className={`tab-btn ${section === "insights" ? "active" : ""}`}
+          onClick={() => setSection("insights")}
+        >
+          Insights
+        </button>
+        <button
+          type="button"
+          role="tab"
           className={`tab-btn ${section === "pages" ? "active" : ""}`}
           onClick={() => {
             setSection("pages");
@@ -818,7 +843,10 @@ export function SearchOffersDashboard({
           type="button"
           role="tab"
           className={`tab-btn ${section === "ladders" ? "active" : ""}`}
-          onClick={() => setSection("ladders")}
+          onClick={() => {
+            setLadderFocus(null);
+            setSection("ladders");
+          }}
         >
           Offer ladders
         </button>
@@ -827,7 +855,7 @@ export function SearchOffersDashboard({
       <div className="offers-export-row">
         <a
           className="ghost-btn"
-          href={`/api/search/offers-report/export?jobId=${encodeURIComponent(job.id)}&part=${section}`}
+          href={`/api/search/offers-report/export?jobId=${encodeURIComponent(job.id)}&part=${section === "insights" ? "all" : section}`}
           download
         >
           Download {SECTION_EXPORT_LABEL[section]} (Excel)
@@ -1290,12 +1318,27 @@ export function SearchOffersDashboard({
         </div>
       ) : null}
 
+      {section === "insights" ? (
+        <OfferInsights
+          ladders={ladders}
+          ads={visibleAds}
+          adsLoading={!adsLoaded}
+          summary={report.summary || report.valueLadder?.summary || null}
+          onOpenOffer={(id, competitor) => {
+            setLadderFocus({ id, competitor: competitor || "Other advertisers" });
+            setSection("ladders");
+          }}
+        />
+      ) : null}
+
       {section === "ladders" ? (
         <OfferWorkspace
+          key={ladderFocus ? `${ladderFocus.competitor}::${ladderFocus.id}` : "ladders"}
           jobId={job.id}
           offers={ladders}
           ads={visibleAds}
           adsLoading={needsRawAds && !adsLoaded}
+          initialSelection={ladderFocus}
         />
       ) : null}
     </section>

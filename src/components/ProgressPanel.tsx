@@ -21,6 +21,10 @@ interface ProgressPanelProps {
   /** Start the same search again with the inputs this run used. */
   onRunAgain?: () => void;
   runAgainBusy?: boolean;
+  /** What to do after a search finishes: go to the offers dashboard or the competitor list. */
+  onOpenOffers?: () => void;
+  onOpenCompetitors?: () => void;
+  offersReady?: boolean;
 }
 
 const REASON_LABELS: Array<[keyof NonNullable<JobProgress["rejectReasons"]>, string]> = [
@@ -46,6 +50,9 @@ export function ProgressPanel({
   onStop,
   onRunAgain,
   runAgainBusy,
+  onOpenOffers,
+  onOpenCompetitors,
+  offersReady,
 }: ProgressPanelProps) {
   const [stopping, setStopping] = useState(false);
   const [stopError, setStopError] = useState<string | null>(null);
@@ -180,6 +187,39 @@ export function ProgressPanel({
         <strong>{stageLabel(progress.stage)}</strong>
         {progress.message ? ` · ${progress.message}` : ""}
       </p>
+      {working ? (
+        <p className="progress-hint">
+          This keeps running if you leave the page. You can reopen it any time from History.
+        </p>
+      ) : null}
+      {finished && status !== "failed" && progress.accepted > 0 && onOpenOffers ? (
+        <div className="progress-next" role="note">
+          <p>
+            <strong>Next step:</strong>{" "}
+            {offersReady
+              ? "your offers dashboard is ready — see the top offers, ladders and ads."
+              : `review the ${progress.accepted} competitors below, then build the offers dashboard to see their offers, ladders and best ads.`}
+          </p>
+          <div className="progress-next-actions">
+            <button type="button" className="search-btn" onClick={onOpenOffers}>
+              {offersReady ? "Open offers dashboard →" : "Build offers dashboard →"}
+            </button>
+            {onOpenCompetitors ? (
+              <button type="button" className="ghost-btn" onClick={onOpenCompetitors}>
+                Review competitors
+              </button>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+      {finished && progress.accepted === 0 ? (
+        <div className="progress-next is-empty" role="note">
+          <p>
+            <strong>No competitors found.</strong> Try broader keywords, search the whole country instead of set
+            locations, or switch off industry rules in the search form, then run again.
+          </p>
+        </div>
+      ) : null}
       {working && elapsed !== null ? (
         <p className="progress-timing">
           Running for {formatDuration(elapsed)}

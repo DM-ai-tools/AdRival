@@ -239,7 +239,8 @@ export default function HomePage() {
       setHistoryCompetitors([]);
       setHistoryLookupJob(null);
       setHistoryLookupAds([]);
-      setHistoryResultsView(run.kind === "search" ? "website" : "preview");
+      // Open on the competitor list, like a live run.
+      setHistoryResultsView("preview");
       setHistoryOffersError(null);
       setHistoryCredits(null);
       setGeneratingHistoryOffers(false);
@@ -799,6 +800,9 @@ export default function HomePage() {
                   : undefined
               }
               stopJobId={jobId}
+              onOpenOffers={() => setResultsView("offers")}
+              onOpenCompetitors={() => setResultsView("preview")}
+              offersReady={job.offersReport?.status === "completed"}
               createdAt={job.createdAt}
               updatedAt={job.updatedAt}
               onRunAgain={() => void runSearchAgain(job)}
@@ -815,7 +819,8 @@ export default function HomePage() {
               <h2>
                 Results{" "}
                 <span className="muted-inline">
-                  {meta.short}
+                  {/* The run's own platform, not whatever the picker shows now. */}
+                  {(job?.platform && PLATFORM_META[job.platform as AdPlatform]?.short) || meta.short}
                   {keywords.length > 1 ? ` · ${keywords.length} keywords` : ""}
                   {competitors.length
                     ? ` · ${competitors.length} competitors`
@@ -840,7 +845,7 @@ export default function HomePage() {
                 className={`tab-btn ${resultsView === "preview" ? "active" : ""}`}
                 onClick={() => setResultsView("preview")}
               >
-                Preview
+                Competitors
               </button>
               <button
                 type="button"
@@ -935,7 +940,11 @@ export default function HomePage() {
                 />
                 <SearchOffersDashboard job={job} />
               </>
-            ) : null}
+            ) : (
+              <p className="empty-hint panel">
+                Run a keyword search first — the offers dashboard is built from the competitors it finds.
+              </p>
+            )}
             
           </section>
         </>
@@ -1092,6 +1101,9 @@ export default function HomePage() {
                   onStop={refreshAfterStop}
                   onRunAgain={() => void runSearchAgain(historyJob)}
                   runAgainBusy={runAgainBusy}
+                  onOpenOffers={() => setHistoryResultsView("offers")}
+                  onOpenCompetitors={() => setHistoryResultsView("preview")}
+                  offersReady={historyJob.offersReport?.status === "completed"}
                 />
                 <div className="results-head">
                   <h2>
@@ -1121,7 +1133,7 @@ export default function HomePage() {
                     className={`tab-btn ${historyResultsView === "preview" ? "active" : ""}`}
                     onClick={() => setHistoryResultsView("preview")}
                   >
-                    Preview
+                    Competitors
                   </button>
                   <button
                     type="button"
