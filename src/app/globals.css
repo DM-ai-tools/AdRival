@@ -293,16 +293,20 @@ a:hover {
 .results-subtabs {
   margin: 0 0 14px;
   width: auto;
-  max-width: 420px;
+  max-width: 100%;
+  /* On a narrow screen the tabs wrap to a second row instead of overlapping. */
+  flex-wrap: wrap;
 }
 
 .results-subtabs-wide {
   max-width: 720px;
 }
 
+/* Each tab is as wide as its label: a one-word label like "Competitors"
+   cannot wrap, so a shrunk tab let it spill over its neighbours. */
 .results-subtabs .tab-btn {
-  flex: 1;
-  min-width: 0;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .platform-context {
