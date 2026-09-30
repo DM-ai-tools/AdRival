@@ -29,7 +29,9 @@ test("the prompt carries the scene, the section, the business and what to avoid"
   );
   const prompt = buildImagePrompt({ scene: "A plumber fixing a kitchen sink pipe", purpose: "Hero image", aspect: "1920:1280", context, surroundings: around });
   assert.match(prompt, /A plumber fixing a kitchen sink pipe/);
-  assert.match(prompt, /plumbing business called Northside Plumbing/);
+  assert.match(prompt, /website of a plumbing business\./);
+  assert.doesNotMatch(prompt, /Northside Plumbing/, "the business name is never in the image prompt");
+  assert.match(prompt, /never write these words.*the business offers blocked drains, hot water/);
   assert.match(prompt, /Ballarat, VIC/);
   assert.match(prompt, /never write these words.*emergency plumbing in ballarat/);
   assert.doesNotMatch(prompt, /"Emergency plumbing in Ballarat"/);

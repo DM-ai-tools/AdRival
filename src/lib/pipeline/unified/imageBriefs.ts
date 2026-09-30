@@ -20,6 +20,8 @@ RULES
 - Hero and large section images are usually photographs of the client's real world: their customers, their place, their work.
 - Mediums: "photo" (people or places, documentary style), "still-life" (studio photograph of objects), "3d-render" (clean modern 3D objects), "illustration" (flat vector illustration). Use "illustration" only for abstract ideas that are hard to photograph.
 - Never ask for text, letters, numbers, logos, brand names, charts, dashboards, user interfaces or readable screens. Any screen is off, blank or turned away.
+- Never write the business name, service names or words from the page in a brief (the image model paints named things as labels). Describe objects and scenes instead: "a brass compass on a map", not "SEO".
+- No floating labels, tags, chips, icons or interface cards in the scene.
 - No stock clichés: handshakes, pointing at graphs, headset call-centre smiles, thumbs up, lightbulb-over-head.
 - Write each brief as 2-3 concrete sentences: the subject, what is happening or how the objects are arranged, the setting or backdrop.
 

@@ -327,11 +327,14 @@ ul,ol{margin:0 0 1em;padding-left:1.2em}
 .adr-muted{color:var(--text-muted)}
 .adr-accent{color:var(--text-safe)}
 .adr-grid{display:grid;gap:var(--gap)}
-.adr-grid--2{grid-template-columns:repeat(2,minmax(0,1fr))}
-.adr-grid--3{grid-template-columns:repeat(3,minmax(0,1fr))}
-.adr-grid--4{grid-template-columns:repeat(4,minmax(0,1fr))}
-.adr-grid--5{grid-template-columns:repeat(5,minmax(0,1fr))}
-.adr-grid--6{grid-template-columns:repeat(6,minmax(0,1fr))}
+.adr-grid>*{min-width:0}
+/* At most N columns, and never narrower than a readable card: a 4-card grid
+   inside half of a split drops to 2 columns instead of 4 slivers. */
+.adr-grid--2{grid-template-columns:repeat(auto-fit,minmax(min(100%,max(260px,calc((100% - var(--gap)) / 2))),1fr))}
+.adr-grid--3{grid-template-columns:repeat(auto-fit,minmax(min(100%,max(230px,calc((100% - 2 * var(--gap)) / 3))),1fr))}
+.adr-grid--4{grid-template-columns:repeat(auto-fit,minmax(min(100%,max(210px,calc((100% - 3 * var(--gap)) / 4))),1fr))}
+.adr-grid--5{grid-template-columns:repeat(auto-fit,minmax(min(100%,max(180px,calc((100% - 4 * var(--gap)) / 5))),1fr))}
+.adr-grid--6{grid-template-columns:repeat(auto-fit,minmax(min(100%,max(160px,calc((100% - 5 * var(--gap)) / 6))),1fr))}
 .adr-split{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,.95fr);gap:clamp(28px,5vw,72px);align-items:center}
 .adr-split--reverse>:first-child{order:2}
 .adr-stack>*+*{margin-top:16px}
@@ -340,6 +343,10 @@ ul,ol{margin:0 0 1em;padding-left:1.2em}
 .adr-section--alt .adr-card{background:var(--bg)}
 .adr-section--dark .adr-card{background:${darkCard};color:var(--text-on-dark);box-shadow:none;border:1px solid rgba(255,255,255,.12)}
 .adr-card h3{margin-bottom:.4em}
+/* Card headings stay inside their card: smaller than section headings, long words wrap. */
+.adr-grid :is(h3,h4),.adr-card :is(h3,h4){font-size:min(var(--h3),clamp(19px,1.1vw + 12px,26px));overflow-wrap:break-word;hyphens:auto}
+h1,h2{overflow-wrap:break-word}
+.adr-split>*{min-width:0}
 .adr-card p:last-child{margin-bottom:0}
 .adr-icon{width:48px;height:48px;border-radius:12px;display:grid;place-items:center;background:color-mix(in srgb, var(--primary) 14%, transparent);color:var(--text-safe);margin-bottom:16px;font-weight:700}
 .adr-num{font-family:var(--font-heading);font-weight:800;font-size:clamp(32px,4vw,52px);line-height:1;color:var(--text-safe)}
@@ -361,6 +368,9 @@ ul,ol{margin:0 0 1em;padding-left:1.2em}
 .adr-link:hover{text-decoration:underline}
 .adr-media{border-radius:var(--radius-card);overflow:hidden;background:var(--bg-alt)}
 .adr-media img{width:100%;height:100%;object-fit:cover}
+/* Labels laid over a photo get a solid chip so they read on any image. */
+.adr-media{position:relative}
+.adr-media>:is(.adr-badge,.adr-eyebrow,span,strong,p){background:color-mix(in srgb,var(--bg) 94%,transparent);color:var(--text);box-shadow:0 4px 14px rgba(15,23,42,.12);opacity:1;padding:6px 12px;border-radius:999px}
 .adr-badge{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:999px;font-size:13px;font-weight:600;background:color-mix(in srgb, var(--primary) 12%, transparent);color:var(--text-safe)}
 .adr-faq{max-width:860px;margin-inline:auto}
 .adr-faq details{border-bottom:1px solid var(--border);padding:18px 0}
@@ -443,6 +453,7 @@ ${styleCss(style)}`;
 - Components: .adr-card, .adr-icon (small tinted square, put an emoji-free glyph or number inside), .adr-list-check (tick list), .adr-quote (+ <cite>), .adr-logos (logo strip), .adr-faq (<details><summary>Q</summary><p>A</p></details>), .adr-media (image frame), .adr-placeholder (brand-coloured panel where no image is available)
 - Buttons: <a class="adr-btn adr-btn--primary" href="…">…</a>, secondary: .adr-btn--secondary, text link: .adr-link
 - Forms: never write form markup — put <div data-adrival-form></div> exactly where the competitor's form sits; the form is inserted there.
+LAYOUT RULES: a card grid inside one column of .adr-split uses .adr-grid--2 at most (a heading beside 4 cards → heading column + 2×2 grid). Put 3+ cards in a row only at full container width. Do not lay text, labels or badges over images; put them beside or under the image.
 RULES: no <style> blocks for colours, fonts, font sizes, buttons or cards. Only if a layout cannot be expressed with the classes, add ONE small <style> scoped to [data-section-id="…"] using var(--…) tokens — never hex colours, never :root, body or html.`;
 
   return {

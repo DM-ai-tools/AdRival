@@ -5,6 +5,7 @@ import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
 import { runBillable } from "@/lib/accounting/run";
 import { isCreditError } from "@/lib/accounting/errors";
 import type {
+  CompetitorRecord,
   LandingContentBlock,
   LandingContentDocument,
 } from "@/lib/types";
@@ -60,6 +61,51 @@ function brandFor(runId: string): { businessUrl: string | null; businessName: st
     businessUrl: url ? normalizeWebsite(url) : null,
     businessName: job?.businessProfile?.businessName || null,
   };
+}
+
+/**
+ * A page build takes 8-10 minutes, longer than the hosting proxy keeps a
+ * request open (it answers "upstream error" and the build result is lost).
+ * The build runs on after the response; the page follows it by polling.
+ * Errors that happen straight away (credits, missing analysis) still come
+ * back on this response.
+ */
+async function startBuild(
+  competitorId: string,
+  work: () => Promise<CompetitorRecord>,
+): Promise<NextResponse> {
+  const run = work();
+  const early = await Promise.race([
+    run.then(
+      (competitor) => ({ competitor }),
+      (error: unknown) => ({ error }),
+    ),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 2_000)),
+  ]);
+  if (early && "error" in early) throw early.error;
+  if (early) return NextResponse.json({ competitor: maskCompetitor(early.competitor), cached: false });
+  run.catch((err) => {
+    // The run saves its own failure on the page; this only covers a crash before it could.
+    console.error("[competitors/recreate-page] background build failed", err);
+    const latest = getCompetitor(competitorId);
+    const page = latest?.recreatedPage;
+    if (page && (page.status === "pending" || page.status === "design_pending")) {
+      updateCompetitor(competitorId, {
+        recreatedPage: {
+          ...page,
+          status: page.html ? "completed" : "failed",
+          error: sanitizeClientFacingText((err as Error)?.message || "Recreation failed"),
+          updatedAt: new Date().toISOString(),
+          progress: page.progress ? { ...page.progress, phase: "failed", message: "Recreation failed" } : page.progress,
+        },
+      });
+    }
+  });
+  const latest = getCompetitor(competitorId);
+  return NextResponse.json(
+    { competitor: latest ? maskCompetitor(latest) : null, cached: false, inFlight: true },
+    { status: 202 },
+  );
 }
 
 function maskCompetitor<T extends {
@@ -334,30 +380,32 @@ export async function POST(request: Request) {
       if (!userFeedback && validationLeftover && (action === "regenerate_design" || action === "revise_page")) {
         return NextResponse.json({ competitor: maskCompetitor(existing), cached: true });
       }
-      const competitor = await billed("recreate.generate_page", () =>
-        runUnifiedRecreation(competitorId, {
-          force: true,
-          userFeedback: userFeedback || undefined,
-          styleDirection,
-        }),
+      return startBuild(competitorId, () =>
+        billed("recreate.generate_page", () =>
+          runUnifiedRecreation(competitorId, {
+            force: true,
+            userFeedback: userFeedback || undefined,
+            styleDirection,
+          }),
+        ),
       );
-      return NextResponse.json({ competitor: maskCompetitor(competitor), cached: false });
     }
 
     // Default / regenerate_content / generate_content / generate_page → unified
-    const competitor = await billed("recreate.generate_page", () =>
-      runUnifiedRecreation(competitorId, {
-        force:
-          Boolean(body.force) ||
-          Boolean(userFeedback) ||
-          styleChanged ||
-          action === "regenerate_content" ||
-          action === "regenerate_page",
-        userFeedback: userFeedback || undefined,
-        styleDirection,
-      }),
+    return startBuild(competitorId, () =>
+      billed("recreate.generate_page", () =>
+        runUnifiedRecreation(competitorId, {
+          force:
+            Boolean(body.force) ||
+            Boolean(userFeedback) ||
+            styleChanged ||
+            action === "regenerate_content" ||
+            action === "regenerate_page",
+          userFeedback: userFeedback || undefined,
+          styleDirection,
+        }),
+      ),
     );
-    return NextResponse.json({ competitor: maskCompetitor(competitor), cached: false });
   } catch (err) {
     if (isCreditError(err)) {
       return NextResponse.json(

@@ -185,26 +185,26 @@ export function buildImagePrompt(input: {
   const kind =
     medium === "still-life" ? "A studio still-life photograph" : medium === "3d-render" ? "A 3D render" : medium === "illustration" ? "An illustration" : "A photograph";
   const peopleMedium = medium === "photo";
-  const business = [
-    c.industry
-      ? /\b(business|agency|company|firm|practice|clinic|studio|store|shop|service|services)$/i.test(c.industry.trim())
-        ? `a ${c.industry.trim().toLowerCase()}`
-        : `a ${c.industry.trim().toLowerCase()} business`
-      : "a professional services business",
-    c.clientName ? `called ${c.clientName}` : null,
-    c.services?.length ? `offering ${c.services.slice(0, 4).join(", ")}` : null,
-  ]
-    .filter(Boolean)
-    .join(" ");
+  // The business name and service names are never in the scene lines: the
+  // model paints them onto the picture as labels ("SEO", "Google Ads").
+  const business = c.industry
+    ? /\b(business|agency|company|firm|practice|clinic|studio|store|shop|service|services)$/i.test(c.industry.trim())
+      ? `a ${c.industry.trim().toLowerCase()}`
+      : `a ${c.industry.trim().toLowerCase()} business`
+    : "a professional services business";
+  const context = [
+    where?.cardHeading
+      ? `it illustrates ${[where.cardHeading, where.cardText].filter(Boolean).join(": ").toLowerCase()}, in a section about ${[where?.heading].filter(Boolean).join("").toLowerCase()}`
+      : where?.heading || where?.text
+        ? `the section is about ${[where?.heading, where?.text].filter(Boolean).join(". ").toLowerCase()}`
+        : null,
+    c.services?.length ? `the business offers ${c.services.slice(0, 4).join(", ").toLowerCase()}` : null,
+  ].filter(Boolean);
   const lines = [
     `${kind} for the website of ${business}.`,
     input.purpose ? `Where it appears: ${clip(input.purpose, 160)}.` : null,
     // The page's words are context only: quoted headings get painted onto screens.
-    where?.cardHeading || where?.heading || where?.text
-      ? `Context only (never write these words anywhere in the image): ${
-          where?.cardHeading ? `it illustrates ${[where.cardHeading, where.cardText].filter(Boolean).join(": ").toLowerCase()}, in a section about ` : "the section is about "
-        }${[where?.heading, where?.cardHeading ? null : where?.text].filter(Boolean).join(". ").toLowerCase()}`
-      : null,
+    context.length ? `Context only (never write these words anywhere in the image): ${context.join("; ")}` : null,
     `Subject: ${clip(input.scene, 900)}`,
     peopleMedium && c.location ? `Setting: ${c.location}, so architecture, light and people fit that place.` : null,
     peopleMedium && c.audience ? `Any people shown should feel like the business's customers or team: ${clip(c.audience, 160)}.` : null,
@@ -219,6 +219,7 @@ export function buildImagePrompt(input: {
     where?.groupSize && where.groupSize > 1
       ? "It sits in a row of cards with matching images, so keep the subject centred, similar in scale and on the same kind of background."
       : null,
+    "The picture contains no writing of any kind: no words, labels, tags, chips, badges, captions, floating interface cards, app screens or icons with text.",
     "Do not include: any text, letters, numbers, logos, brand names, watermarks, signage with words, screens showing readable content, or charts; no competitor branding; no stock-photo clichés (handshakes, pointing at graphs, headset call-centre smiles, thumbs up); no distorted hands or faces.",
   ];
   return lines.filter(Boolean).join("\n");

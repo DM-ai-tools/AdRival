@@ -54,7 +54,27 @@ function downloadText(text: string, filename: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
-type DesignCheckResult = NonNullable<NonNullable<RecreatedLandingPage["qualityReport"]>["designCheck"]>;
+/**
+ * Read a JSON reply. A proxy or crash page (plain text such as "upstream
+ * error", or HTML) becomes a readable error marked transient, because a page
+ * build may still be running on the server.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function readJson(res: Response): Promise<Record<string, any>> {
+  const text = await res.text().catch(() => "");
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    return {
+      error: res.ok
+        ? "The server sent an unexpected reply. Reload the page and try again."
+        : "The server took too long to answer. If a page was being built it keeps going, and this page updates when it finishes.",
+      transient: true,
+    };
+  }
+}
+
+type DesignCheckResult =NonNullable<NonNullable<RecreatedLandingPage["qualityReport"]>["designCheck"]>;
 
 /** What the design check (Impeccable + Vercel guidelines) found and fixed. */
 function DesignCheckDetails({ check }: { check: DesignCheckResult }) {
@@ -85,6 +105,30 @@ function DesignCheckDetails({ check }: { check: DesignCheckResult }) {
         {brand.map((f, i) => (
           <li key={`b-${i}`} className="muted">
             From the brand or stylesheet (left as is): {f.name}.
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
+type VisualReviewResult = NonNullable<NonNullable<RecreatedLandingPage["qualityReport"]>["visualReview"]>;
+
+/** What the side-by-side review against the competitor fixed and what is left. */
+function VisualReviewDetails({ review }: { review: VisualReviewResult }) {
+  const where = (id: string) => (id === "header" || id === "footer" ? `the ${id}` : `section ${id.replace("sec-", "")}`);
+  return (
+    <details className="recreate-quality">
+      <summary>
+        Side-by-side review:{" "}
+        <strong>{review.remaining.length ? `${review.remaining.length} part${review.remaining.length === 1 ? "" : "s"} to review` : "every part passed"}</strong>
+        {review.fixed.length ? ` · ${review.fixed.length} fixed and re-checked` : ""}
+      </summary>
+      <ul>
+        {review.fixed.length ? <li>Fixed and confirmed: {review.fixed.map(where).join(", ")}.</li> : null}
+        {review.remaining.map((r) => (
+          <li key={r.id}>
+            To review in {where(r.id)}: {r.flaws.join(" ")}
           </li>
         ))}
       </ul>
@@ -172,7 +216,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     const res = await fetch(
       `/api/competitors/recreate-page?competitorId=${encodeURIComponent(competitorId)}`,
     );
-    const data = await res.json();
+    const data = await readJson(res);
     if (!res.ok) throw new Error(data.error || "Failed to load");
     setCompetitor(data.competitor as CompetitorRecord);
     setCanEdit(data.access?.canEdit !== false);
@@ -186,11 +230,32 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     };
   }, [competitorId, syncFromPage]);
 
+  /**
+   * A build keeps running on the server after the request returns (the
+   * reply says inFlight), and a proxy time-out does not stop it either.
+   * Returns true while the build is still running, so polling follows it.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const followBuild = useCallback(async (data: Record<string, any>): Promise<boolean> => {
+    if (data.inFlight && data.competitor) {
+      setCompetitor(data.competitor as CompetitorRecord);
+      syncFromPage((data.competitor as CompetitorRecord).recreatedPage ?? null);
+      return true;
+    }
+    if (data.transient) {
+      const latest = await load().catch(() => null);
+      const rp = latest?.recreatedPage;
+      return Boolean(rp && (rp.status === "pending" || rp.status === "design_pending"));
+    }
+    return false;
+  }, [load, syncFromPage]);
+
   const generateContent = useCallback(
     async (force = false) => {
       setError(null);
       setGenerating(true);
       setView("design");
+      let running = false;
       try {
         const res = await fetch("/api/competitors/recreate-page", {
           method: "POST",
@@ -205,7 +270,9 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
               undefined,
           }),
         });
-        const data = await res.json();
+        const data = await readJson(res);
+        running = await followBuild(data);
+        if (running) return;
         if (!res.ok) throw new Error(data.error || "Page generation failed");
         const next = data.competitor as CompetitorRecord;
         setCompetitor(next);
@@ -214,10 +281,10 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
       } catch (err) {
         setError((err as Error).message);
       } finally {
-        setGenerating(false);
+        if (!running) setGenerating(false);
       }
     },
-    [competitorId, contentFeedback, designFeedback, styleDirection, syncFromPage],
+    [competitorId, contentFeedback, designFeedback, followBuild, styleDirection, syncFromPage],
   );
 
   const saveWebsite = useCallback(async () => {
@@ -229,7 +296,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ competitorId, action: "set_business_url", businessUrl: websiteDraft }),
       });
-      const data = await res.json().catch(() => ({}));
+      const data = await readJson(res);
       if (!res.ok) throw new Error(data.error || "The website could not be saved. Try again.");
       setBrand((data.brand as Brand | undefined) ?? null);
     } catch (err) {
@@ -247,7 +314,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ competitorId, action: "stop" }),
       });
-      const data = await res.json().catch(() => ({}));
+      const data = await readJson(res);
       if (!res.ok) throw new Error(data.error || "The page could not be stopped. Try again.");
       if (data.competitor) {
         setCompetitor(data.competitor as CompetitorRecord);
@@ -274,7 +341,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
           document: contentDoc || undefined,
         }),
       });
-      const data = await res.json();
+      const data = await readJson(res);
       if (!res.ok) throw new Error(data.error || "Failed to save");
       const next = data.competitor as CompetitorRecord;
       setCompetitor(next);
@@ -289,6 +356,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
   const approveAndBuild = useCallback(async () => {
     setError(null);
     setBuilding(true);
+    let running = false;
     try {
       const res = await fetch("/api/competitors/recreate-page", {
         method: "POST",
@@ -301,7 +369,9 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
           userFeedback: designFeedback.trim() || undefined,
         }),
       });
-      const data = await res.json();
+      const data = await readJson(res);
+      running = await followBuild(data);
+      if (running) return;
       if (!res.ok) throw new Error(data.error || "Design build failed");
       const next = data.competitor as CompetitorRecord;
       setCompetitor(next);
@@ -310,9 +380,9 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     } catch (err) {
       setError((err as Error).message);
     } finally {
-      setBuilding(false);
+      if (!running) setBuilding(false);
     }
-  }, [blocks, contentDoc, competitorId, designFeedback, syncFromPage]);
+  }, [blocks, contentDoc, competitorId, designFeedback, followBuild, syncFromPage]);
 
   const regenerateDesign = useCallback(async () => {
     setError(null);
@@ -320,6 +390,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     setView("design");
     setColorRefreshNote(null);
     setConfirmRedesignOpen(false);
+    let running = false;
     try {
       const res = await fetch("/api/competitors/recreate-page", {
         method: "POST",
@@ -333,7 +404,9 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
           userFeedback: designFeedback.trim() || undefined,
         }),
       });
-      const data = await res.json();
+      const data = await readJson(res);
+      running = await followBuild(data);
+      if (running) return;
       if (!res.ok) throw new Error(data.error || "Design regenerate failed");
       const next = data.competitor as CompetitorRecord;
       setCompetitor(next);
@@ -342,9 +415,9 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     } catch (err) {
       setError((err as Error).message);
     } finally {
-      setBuilding(false);
+      if (!running) setBuilding(false);
     }
-  }, [blocks, competitorId, designFeedback, styleDirection, syncFromPage]);
+  }, [blocks, competitorId, designFeedback, followBuild, styleDirection, syncFromPage]);
 
   const requestRegenerateDesign = useCallback(() => {
     if (page?.status === "completed" && page.html) {
@@ -375,7 +448,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
           action: "refresh_brand_colors",
         }),
       });
-      const data = await res.json();
+      const data = await readJson(res);
       if (!res.ok) throw new Error(data.error || "Brand color refresh failed");
       const next = data.competitor as CompetitorRecord;
       setCompetitor(next);
@@ -408,7 +481,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
             feedback: (imageFeedback[image.id] || "").trim() || undefined,
           }),
         });
-        const data = await res.json();
+        const data = await readJson(res);
         if (!res.ok) throw new Error(data.error || "Image regenerate failed");
         const next = data.competitor as CompetitorRecord;
         setCompetitor(next);
@@ -509,7 +582,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
         const res = await fetch(
           `/api/competitors/recreate-page?competitorId=${encodeURIComponent(competitorId)}`,
         );
-        const data = await res.json();
+        const data = await readJson(res);
         if (cancelled || !res.ok) return;
         const next = data.recreatedPage as RecreatedLandingPage | null;
         if (next) {
@@ -530,6 +603,8 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
             setGenerating(false);
             setBuilding(false);
             if (next.html) setView("design");
+            // Full refresh: shows the finished page, its images and any error.
+            void load().catch(() => undefined);
           }
         }
       } catch {
@@ -542,7 +617,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [building, competitorId, generating, page?.status]);
+  }, [building, competitorId, generating, load, page?.status]);
 
   const srcDoc = useMemo(() => (page?.html ? stripDraftBanner(page.html) : ""), [page?.html]);
 
@@ -785,7 +860,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
                         action: "generate_missing_images",
                       }),
                     });
-                    const data = await res.json();
+                    const data = await readJson(res);
                     if (!res.ok) throw new Error(data.error || "Image generation failed");
                     const next = data.competitor as CompetitorRecord;
                     setCompetitor(next);
@@ -1223,6 +1298,9 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
       ) : null}
       {page?.status === "completed" && page.qualityReport?.designCheck && view === "design" ? (
         <DesignCheckDetails check={page.qualityReport.designCheck} />
+      ) : null}
+      {page?.status === "completed" && page.qualityReport?.visualReview && view === "design" ? (
+        <VisualReviewDetails review={page.qualityReport.visualReview} />
       ) : null}
       {page?.sourceArchive && view === "content" ? (
         <p className="muted recreate-palette-note">

@@ -21,7 +21,8 @@ import { fetchRawLandingHtml } from "../htmlFetch";
 import { assertCanDraft, researchClientSite } from "../content/research";
 import { captureLayoutEvidence } from "../design/captureLayout";
 import { alignLayoutEvidence } from "../design/layoutEvidence";
-import { logoStatus } from "../design/constructPage";
+import { logoScore, logoStatus } from "../design/constructPage";
+import { pickBrandLogo } from "./logoCheck";
 import { assertPublicHttpUrl } from "../content/safeUrl";
 import { extractColorsViaFirecrawl } from "../brandColorSources";
 import type { BrandSiteAssets } from "../brandAssets";
@@ -153,6 +154,7 @@ function withLogoUrl(assets: BrandSiteAssets | null, logoUrl: string, businessUr
 async function ensureEmbeddableIdentityLogo(
   businessUrl: string,
   assets: BrandSiteAssets | null,
+  businessName: string,
 ): Promise<{ assets: BrandSiteAssets | null; identityLogoDataUri: string | null; warnings: string[] }> {
   const warnings: string[] = [];
   const candidates: string[] = [];
@@ -167,12 +169,28 @@ async function ensureEmbeddableIdentityLogo(
     if (image.kind === "logo") push(image.src);
   }
 
-  for (const url of candidates) {
-    if (url.startsWith("data:image/")) {
-      return { assets, identityLogoDataUri: url, warnings };
+  // Screenshots and photos the site marked as "logo" are skipped outright;
+  // the rest are looked at, and only the business's own logo is used.
+  const altOf = (url: string) => (assets?.images || []).find((image) => image.src === url)?.alt || "";
+  const viable = candidates.filter((url) => url.startsWith("data:image/") || logoScore(url, altOf(url), assets?.siteName || businessName) > -5);
+  const embeddedList: Array<{ url: string; dataUri: string }> = [];
+  for (const url of viable) {
+    if (embeddedList.length >= 5) break;
+    const dataUri = url.startsWith("data:image/") ? url : await embedRemoteAsset(url);
+    if (dataUri) embeddedList.push({ url, dataUri });
+  }
+  if (embeddedList.length) {
+    const pick = await pickBrandLogo({ candidates: embeddedList.map((e) => e.dataUri), businessName, businessUrl });
+    if (pick === undefined) return { assets, identityLogoDataUri: embeddedList[0].dataUri, warnings };
+    if (pick.index !== null) {
+      const chosen = embeddedList[pick.index];
+      return {
+        assets: chosen.url === assets?.logoUrl || chosen.url.startsWith("data:") ? assets : withLogoUrl(assets, chosen.url, businessUrl),
+        identityLogoDataUri: chosen.dataUri,
+        warnings,
+      };
     }
-    const embedded = await embedRemoteAsset(url);
-    if (embedded) return { assets, identityLogoDataUri: embedded, warnings };
+    warnings.push(`None of the logo images on the website is the company's own logo (${pick.reason || "checked visually"}); trying the site branding.`);
   }
 
   // Refresh via Firecrawl branding (v2 logo extraction) even when a cached brand bundle exists.
@@ -197,9 +215,18 @@ async function ensureEmbeddableIdentityLogo(
           nextAssets.images.push(image);
         }
       }
-      const embedded = firecrawlLogo.startsWith("data:")
+      let embedded = firecrawlLogo.startsWith("data:")
         ? firecrawlLogo
         : await embedRemoteAsset(firecrawlLogo);
+      if (embedded && !embeddedList.some((e) => e.dataUri === embedded)) {
+        const pick = await pickBrandLogo({ candidates: [embedded], businessName, businessUrl });
+        if (pick && pick.index === null) {
+          warnings.push("The site branding logo is not the company's own logo either.");
+          embedded = null;
+        }
+      } else if (embedded) {
+        embedded = null;
+      }
       if (embedded) {
         warnings.push("Identity logo embedded from site branding.");
         return { assets: nextAssets, identityLogoDataUri: embedded, warnings };
@@ -229,7 +256,7 @@ async function ensureEmbeddableIdentityLogo(
   }
 
   // Last resort: keep a remote https logo link so the page still shows branding.
-  const remoteFallback = candidates.find((url) => /^https?:\/\//i.test(url)) || assets?.logoUrl || null;
+  const remoteFallback = viable.find((url) => /^https?:\/\//i.test(url) && !embeddedList.some((e) => e.url === url)) || null;
   if (remoteFallback && /^https?:\/\//i.test(remoteFallback)) {
     warnings.push("Using remote logo URL because inlining failed.");
     return { assets, identityLogoDataUri: remoteFallback, warnings };
@@ -693,7 +720,7 @@ export async function runUnifiedRecreation(
       },
     });
 
-    const logoResolved = await ensureEmbeddableIdentityLogo(businessUrl, assets);
+    const logoResolved = await ensureEmbeddableIdentityLogo(businessUrl, assets, page.businessName || hostOf(businessUrl));
     assets = logoResolved.assets;
     const identityLogoDataUri = logoResolved.identityLogoDataUri;
     if (logoResolved.warnings.length) {
@@ -822,7 +849,7 @@ export async function runUnifiedRecreation(
           if (abortSignal.aborted) return;
           const phase: UnifiedStageId = /image/i.test(message)
             ? "generating_images"
-            : /compar|refin|checking the design|polish/i.test(message)
+            : /compar|refin|checking the design|polish|review|fixing/i.test(message)
               ? "checking"
               : "creating_page";
           if (phase === "generating_images") {
@@ -846,6 +873,10 @@ export async function runUnifiedRecreation(
         ...(report && report.score < 0.8 ? report.summary : []),
         ...(report?.content.copiedSentences.length ? [`Rewrite ${report.content.copiedSentences.length} sentence(s) copied from the competitor.`] : []),
         ...designCheckNotes(built.designCheck),
+        ...(built.visualReview?.remaining || [])
+          .filter((r) => r.severity >= 2)
+          .slice(0, 4)
+          .map((r) => `Review (${r.id === "header" || r.id === "footer" ? `the ${r.id}` : `section ${r.id.replace("sec-", "")}`}): ${r.flaws[0] || "needs a look"}`),
       ];
       stages = markStage(stages, "creating_page", "done");
       stages = markStage(stages, "generating_images", "done", `${built.imageReport.completed}/${built.imageReport.planned} images`);
@@ -878,6 +909,7 @@ export async function runUnifiedRecreation(
                   screenshots: blueprint.sections.filter((s) => s.crop).length,
                 },
                 designCheck: built.designCheck,
+                visualReview: built.visualReview,
               }
             : null,
           error: null,

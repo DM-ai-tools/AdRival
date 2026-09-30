@@ -41,13 +41,25 @@ function hostOf(url: string): string {
   }
 }
 
-function logoScore(src: string, alt = ""): number {
+/** The business name as it appears in file names and alt text ("Click Trends" → clicktrends, click-trends). */
+function nameKeys(siteName: string | null | undefined): string[] {
+  const words = String(siteName || "").toLowerCase().replace(/[^a-z0-9\s]+/g, " ").split(/\s+/).filter((w) => w.length >= 2);
+  if (!words.length) return [];
+  return [...new Set([words.join(""), words.join("-"), words.join("_"), words.join(" ")])].filter((k) => k.length >= 4);
+}
+
+export function logoScore(src: string, alt = "", siteName?: string | null): number {
   const hay = `${src} ${alt}`.toLowerCase();
   if (/favicon|clearbit|duckduckgo|s2\/favicons|apple-touch-icon/.test(hay)) return -10;
   let score = 0;
   if (/\/logo[-_.]|logo[-_.]?(light|white|dark)?\.(svg|png|webp|jpe?g)/.test(hay)) score += 8;
   if (/\blogo\b/.test(hay)) score += 3;
-  if (/preview|testimonial|hero|banner|screenshot|magento|handshake|people|photo/.test(hay)) score -= 10;
+  // Theme folders hold the site's own logo; upload folders also hold client and partner logos.
+  if (/\/themes?\/[^/]+\/(assets\/)?(img|images?)\//.test(hay)) score += 2;
+  if (nameKeys(siteName).some((key) => hay.includes(key))) score += 6;
+  // Screenshots, previews and photos are never the logo (a store preview once showed another brand's logo).
+  if (/preview|testimonial|hero|banner|screenshot|mockup|magento|shopify|store|handshake|people|photo|case[-_ ]?stud|portfolio/.test(hay)) score -= 12;
+  if (/\b(image|img|frame|untitled)[-_ ]?\d/.test(hay)) score -= 4;
   if (alt.trim().length > 48) score -= 5;
   return score;
 }
@@ -66,7 +78,7 @@ export function rankedLogos(assets: BrandSiteAssets | null | undefined): Array<{
     if (seen.has(image.src) || image.src === assets?.faviconUrl) return [];
     seen.add(image.src);
     const embedded = image.src.startsWith("data:image/") ? 20 : 0;
-    return [{ src: image.src, alt: image.alt || "", score: logoScore(image.src, image.alt || "") + embedded }];
+    return [{ src: image.src, alt: image.alt || "", score: logoScore(image.src, image.alt || "", assets?.siteName) + embedded }];
   }).filter((image) => image.score > 0).sort((a, b) => b.score - a.score);
 }
 
@@ -80,7 +92,16 @@ export function logoStatus(assets: BrandSiteAssets | null | undefined, preferLig
   const preferred = (assets?.logoUrl || "").trim() || null;
 
   if (!ranked.length) {
-    if (preferred) return { url: preferred, issue: null };
+    // The site's chosen logo, unless it is clearly a screenshot or photo.
+    const scoreOf = (src: string) =>
+      logoScore(src, rawLogos.find((image) => image.src === src)?.alt || "", assets?.siteName);
+    if (preferred && scoreOf(preferred) > -5) return { url: preferred, issue: null };
+    const hadCandidates = rawLogos.length > 0;
+    const usable = rawLogos.filter((image) => scoreOf(image.src) > -5);
+    rawLogos.splice(0, rawLogos.length, ...usable);
+    if (!rawLogos.length) {
+      return { url: null, issue: hadCandidates ? "The website's logo images look like screenshots or photos, so none was used as the company logo." : null };
+    }
     if (rawLogos.length > 1) {
       // Prefer the first logo mark over blocking recreate — export can still swap later.
       return {

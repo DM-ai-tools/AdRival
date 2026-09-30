@@ -3,6 +3,7 @@ import { generateGptImage2, hasRunwayKey, type GptImage2Ratio } from "../../runw
 import { OPENAI_IMAGE_MODEL, generateOpenAIImage, hasOpenAIImageKey, isOpenAIQuotaError } from "../../openai/images";
 import { buildImagePrompt, readSlotSurroundings, type ImageContext, type SlotSurroundings } from "./imagePrompt";
 import { planImageBriefs } from "./imageBriefs";
+import { checkLandingImage, redrawInstructions } from "./imageQa";
 import {
   applyImageSlotsToHtml,
   placeholderDataUri,
@@ -193,13 +194,31 @@ export async function executeImageSlots(input: {
       return;
     }
     try {
-      const made = await renderLandingImage({
+      let made = await renderLandingImage({
         slot,
         context,
         surroundings: surroundings.get(slot.id) || null,
         competitorId: input.competitorId,
         signal: input.signal,
       });
+      // Check for painted text or distortions; redraw once, keep the cleaner one.
+      const check = await checkLandingImage(made.dataUri, input.signal);
+      if (check && !check.clean && !input.signal?.aborted) {
+        try {
+          const again = await renderLandingImage({
+            slot,
+            context,
+            surroundings: surroundings.get(slot.id) || null,
+            revision: redrawInstructions(check.problems),
+            competitorId: input.competitorId,
+            signal: input.signal,
+          });
+          const second = await checkLandingImage(again.dataUri, input.signal);
+          if (!second || second.clean || second.problems.length <= check.problems.length) made = again;
+        } catch (err) {
+          if (isCreditFailure(err)) creditsExhausted = true;
+        }
+      }
       resolved.set(slot.id, made.dataUri);
       results[index] = imageRecord(slot, "ready", made.dataUri, made.taskId, made);
       completed += 1;

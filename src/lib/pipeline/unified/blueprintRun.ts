@@ -26,6 +26,7 @@ import { designSystemToDesignMd } from "../skills/designMd";
 import { industryBrief, type IndustryGuide } from "../skills/industry";
 import { imageContextFromProfile } from "./imagePrompt";
 import { styleGuide, type StyleDirection } from "../skills/playbook";
+import { reviewAndFixPage, type VisualReviewSummary } from "./visualReview";
 
 const NAV_LABEL: Partial<Record<SectionKind, string>> = {
   features: "Services",
@@ -165,6 +166,8 @@ export type BlueprintBuildResult = {
   report: FidelityReport | null;
   repairedSections: string[];
   designCheck: DesignCheckSummary | null;
+  /** Side-by-side review with the competitor, after the design check. */
+  visualReview: VisualReviewSummary | null;
   /** The page's style file (awesome-design-md format). */
   designMd: string;
 };
@@ -564,6 +567,28 @@ export async function buildFromBlueprint(input: {
     warnings.push(`The design check could not run: ${(err instanceof Error ? err.message : String(err)).slice(0, 140)}`);
   }
 
+  // ——— Side-by-side review with the competitor: fix what it flags, keep confirmed fixes ———
+  let visualReview: VisualReviewSummary | null = null;
+  if (!input.signal?.aborted) {
+    try {
+      input.onProgress("Reviewing the page side by side with the competitor…");
+      const reviewed = await reviewAndFixPage({
+        html,
+        blueprint,
+        classSystem: design.vocabulary,
+        designDirection: genInput.designDirection,
+        finish: (h) => applyDesignFixes(logos(h)).html,
+        signal: input.signal,
+        onProgress: (message) => input.onProgress(message),
+      });
+      html = reviewed.html;
+      visualReview = reviewed.summary;
+      warnings.push(...reviewed.warnings);
+    } catch (err) {
+      warnings.push(`The side-by-side review could not run: ${(err instanceof Error ? err.message : String(err)).slice(0, 140)}`);
+    }
+  }
+
   // Sections rebuilt during the checks may carry new light placeholders.
   html = retonePlaceholders(html, input.colors);
   // Images the writer added beyond the plan are listed as missing, so
@@ -586,5 +611,5 @@ export async function buildFromBlueprint(input: {
     industry: input.industry?.productType || null,
   });
 
-  return { html, imageReport, warnings, unresolved, report, repairedSections, designCheck, designMd };
+  return { html, imageReport, warnings, unresolved, report, repairedSections, designCheck, visualReview, designMd };
 }

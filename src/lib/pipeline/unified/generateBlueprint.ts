@@ -597,6 +597,32 @@ export function swapCtaLabels(html: string, competitorCtas: string[], label: str
 
 const FORM_HOLD_RE = /<div class="adr-form-panel">[\s\S]*?<\/form>\s*<\/div>/i;
 
+const ASSET_RE = /data:[a-z]+\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]{200,}/gi;
+const ASSET_TOKEN_RE = /adr-asset:\/\/(\d+)/g;
+
+/**
+ * Embedded images are swapped for short tokens while a section is rewritten,
+ * and put back after. A generated photo is megabytes of base64: sent as-is it
+ * overflows the request and the rewrite silently fails.
+ */
+export function holdAssets(html: string): { html: string; restore: (html: string) => string; count: number } {
+  const assets: string[] = [];
+  const out = html.replace(ASSET_RE, (uri) => {
+    assets.push(uri);
+    return `adr-asset://${assets.length - 1}`;
+  });
+  return {
+    html: out,
+    count: assets.length,
+    restore: (h) => h.replace(ASSET_TOKEN_RE, (m, i: string) => assets[Number(i)] ?? m),
+  };
+}
+
+/** The ids of the image slots in some HTML. */
+function slotIds(html: string): string[] {
+  return [...html.matchAll(/data-adrival-slot="([^"]+)"/gi)].map((m) => m[1]);
+}
+
 /** Take the built form out of a section while it is rewritten, and put it back after. */
 export function holdForm(sectionHtml: string): { html: string; restore: (html: string) => string } {
   const match = sectionHtml.match(FORM_HOLD_RE);
@@ -625,6 +651,7 @@ export async function rewordBlueprintSection(input: {
   label: string;
 }): Promise<string | null> {
   const held = holdForm(input.sectionHtml);
+  const assets = holdAssets(held.html);
   const result = await runJson({
     content: [{
       type: "text",
@@ -633,11 +660,11 @@ export async function rewordBlueprintSection(input: {
         competitorLinesToAvoid: input.copiedLines.slice(0, 12),
         client: { name: input.client.name, whatTheyDo: input.client.whatTheyDo, offerings: input.client.offerings.slice(0, 10), keyword: input.keyword },
         clientFacts: input.clientFacts.slice(0, 12),
-        sectionHtml: held.html,
+        sectionHtml: assets.html,
         outputContract: `{ "html": "the same <section>…</section> with only those lines reworded" }`,
       }),
     }],
-    maxTokens: Math.min(12_000, 2_000 + Math.ceil(held.html.length / 2.5)),
+    maxTokens: Math.min(12_000, 2_000 + Math.ceil(assets.html.length / 2.5)),
     label: input.label,
     pass: "polish",
     signal: input.signal,
@@ -647,9 +674,9 @@ export async function rewordBlueprintSection(input: {
   if (!/<section[\s>]/i.test(html)) return null;
   // Reject rewrites that changed the structure rather than the words.
   const tags = (h: string) => (h.match(/<[a-z][a-z0-9]*\b/gi) || []).length;
-  const before = tags(held.html);
+  const before = tags(assets.html);
   if (Math.abs(tags(html) - before) > Math.max(4, before * 0.12)) return null;
-  return held.restore(sanitizeFragment(html, "reword").html);
+  return held.restore(assets.restore(sanitizeFragment(html, "reword").html));
 }
 
 /** Regenerate one section with feedback about how it differs from the competitor. */
@@ -666,7 +693,7 @@ export async function regenerateBlueprintSection(input: BlueprintGenerationInput
     text: JSON.stringify({
       task: `Rebuild competitor section ${input.section.id} again. The previous attempt did not match the competitor closely enough.`,
       problems: input.problems,
-      previousAttempt: input.currentHtml.slice(0, 12_000),
+      previousAttempt: holdAssets(input.currentHtml).html.slice(0, 12_000),
       client: clientBrief(input),
       campaignOffer: input.campaignOffer,
       classSystem: input.design.vocabulary,
@@ -705,6 +732,7 @@ export async function polishBlueprintSection(input: {
   onProgress?: (info: UnifiedProgressInfo) => void;
 }): Promise<{ html: string; css: string } | null> {
   const held = holdForm(input.sectionHtml);
+  const assets = holdAssets(held.html);
   const parts: ContentPart[] = [];
   if (input.section.crop) parts.push(imagePart(input.section.crop));
   parts.push({
@@ -716,13 +744,13 @@ export async function polishBlueprintSection(input: {
       image: input.section.crop ? "Image 1: the competitor section this layout follows (layout reference only)." : null,
       classSystem: input.classSystem,
       designDirection: input.designDirection || null,
-      sectionHtml: held.html,
+      sectionHtml: assets.html,
       outputContract: `{ "html": "the same <section …>…</section> with the findings fixed" }`,
     }),
   });
   const result = await runJson({
     content: parts,
-    maxTokens: Math.min(14_000, 3_000 + Math.ceil(held.html.length / 2.5)),
+    maxTokens: Math.min(14_000, 3_000 + Math.ceil(assets.html.length / 2.5)),
     label: `Polishing section ${input.section.order + 1}`,
     pass: "polish",
     signal: input.signal,
@@ -732,8 +760,82 @@ export async function polishBlueprintSection(input: {
   if (!/<section[\s>]/i.test(html)) return null;
   // A polish keeps the structure; reject rewrites that rebuilt the section.
   const tags = (h: string) => (h.match(/<[a-z][a-z0-9]*\b/gi) || []).length;
-  const before = tags(held.html);
+  const before = tags(assets.html);
   if (Math.abs(tags(html) - before) > Math.max(6, before * 0.25)) return null;
   const cleaned = sanitizeFragment(html, input.section.id);
-  return { html: held.restore(cleaned.html), css: cleaned.css };
+  return { html: held.restore(assets.restore(cleaned.html)), css: cleaned.css };
+}
+
+/**
+ * Fix what the side-by-side review found in one part of the page (a section,
+ * the header or the footer). The model sees the competitor's version and the
+ * rebuilt one, with the reviewer's list of flaws. Copy, images, links and the
+ * form stay; layout, alignment and spacing may change to fix the flaws.
+ */
+export async function repairFromReview(input: {
+  /** A data-section-id, or "header" / "footer". */
+  target: string;
+  html: string;
+  competitorCrop: string | null;
+  rebuiltCrop: string | null;
+  flaws: string[];
+  fix: string;
+  classSystem: string;
+  designDirection?: BlueprintGenerationInput["designDirection"];
+  signal?: AbortSignal;
+  onProgress?: (info: UnifiedProgressInfo) => void;
+}): Promise<{ html: string; css: string } | null> {
+  const isChrome = input.target === "header" || input.target === "footer";
+  const tag = isChrome ? input.target : "section";
+  const held = holdForm(input.html);
+  const assets = holdAssets(held.html);
+  const parts: ContentPart[] = [];
+  const images: string[] = [];
+  if (input.competitorCrop) {
+    parts.push(imagePart(input.competitorCrop));
+    images.push(`Image ${images.length + 1}: the competitor's version (the layout to follow).`);
+  }
+  if (input.rebuiltCrop) {
+    parts.push(imagePart(input.rebuiltCrop));
+    images.push(`Image ${images.length + 1}: the rebuilt version as it renders now (what to fix).`);
+  }
+  parts.push({
+    type: "text",
+    text: JSON.stringify({
+      task: `A design reviewer compared the rebuilt ${isChrome ? input.target : `section ${input.target}`} with the competitor's side by side and found the flaws below. Fix every flaw so it renders cleanly and follows the competitor's layout.`,
+      images,
+      flaws: input.flaws.slice(0, 12),
+      reviewerFix: input.fix.slice(0, 1200),
+      rules: [
+        "Keep every word, link, button label and image: keep each <img> tag with its data-adrival-slot, data-logo-role and src exactly as given.",
+        `Keep the data-section-id and the ${FORM_SLOT_ATTR} slot if present.`,
+        "You may change the markup structure, classes and wrappers to fix layout, alignment, column widths and spacing.",
+        "Align text consistently: the heading, intro and body of one column share one left edge, or are all centred when the competitor centres them.",
+        "Card grids: 3 or more cards in a row only at full container width; beside a text column use .adr-grid--2.",
+        "No text over images unless the competitor does it; then put it on a solid chip.",
+        "Use the class system. Only if a layout cannot be expressed with classes, add one small <style> scoped to this part, var(--…) tokens only.",
+      ],
+      classSystem: input.classSystem,
+      designDirection: input.designDirection || null,
+      html: assets.html,
+      outputContract: `{ "html": "the fixed <${tag} …>…</${tag}>" }`,
+    }),
+  });
+  const result = await runJson({
+    content: parts,
+    maxTokens: Math.min(14_000, 3_000 + Math.ceil(assets.html.length / 2.2)),
+    label: `Fixing ${isChrome ? `the ${input.target}` : `section ${input.target.replace("sec-", "")}`} after review`,
+    pass: "polish",
+    signal: input.signal,
+    onProgress: input.onProgress,
+  });
+  const html = typeof result.json?.html === "string" ? result.json.html : "";
+  if (!new RegExp(`<${tag}[\\s>]`, "i").test(html)) return null;
+  // Every image must survive: a fix never drops a photo or the logo.
+  const after = new Set(slotIds(html));
+  if (slotIds(assets.html).some((id) => !after.has(id))) return null;
+  const logosBefore = (assets.html.match(/data-logo-role="company"/g) || []).length;
+  if ((html.match(/data-logo-role="company"/g) || []).length < logosBefore) return null;
+  const cleaned = sanitizeFragment(html, input.target);
+  return { html: held.restore(assets.restore(cleaned.html)), css: cleaned.css };
 }

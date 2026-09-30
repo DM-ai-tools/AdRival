@@ -1067,6 +1067,14 @@ export interface RecreatedLandingPage {
       polishedSections: string[];
       remaining: Array<{ rule: string; name: string; sectionId: string | null; action: "repair" | "report" }>;
     } | null;
+    /** Side-by-side review of each part against the competitor (flaws fixed and confirmed). */
+    visualReview?: {
+      reviewed: number;
+      rounds: number;
+      fixed: string[];
+      remaining: Array<{ id: string; severity: number; flaws: string[] }>;
+      measured: string[];
+    } | null;
   } | null;
   /** Style direction chosen for this recreation (see skills/recreate). */
   styleDirection?: "brand" | "minimal" | "soft" | "brutalist" | null;
