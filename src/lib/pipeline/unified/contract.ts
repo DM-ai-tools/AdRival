@@ -576,33 +576,25 @@ export function parseUnifiedResponse(raw: string): UnifiedGenerationResponse {
   throw new Error("The model response JSON could not be parsed. The page was not marked complete.");
 }
 
+/**
+ * Put each generated image into its slot: every <img data-adrival-slot="id">
+ * gets the new src, whatever order its attributes are in (a regex that
+ * expected the slot before src used to add a second src the browser ignored).
+ */
 export function applyImageSlotsToHtml(
   html: string,
   slots: Map<string, string>,
 ): string {
-  let out = html;
-  for (const [id, src] of slots) {
-    const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const attr = `data-adrival-slot="${id}"`;
-    if (out.includes(attr)) {
-      out = out.replace(
-        new RegExp(`(<img\\b[^>]*\\bdata-adrival-slot="${escaped}"[^>]*\\bsrc=")[^"]*(")`, "i"),
-        `$1${src}$2`,
-      );
-      if (!new RegExp(`data-adrival-slot="${escaped}"[^>]*src=`, "i").test(out) && new RegExp(`data-adrival-slot="${escaped}"`, "i").test(out)) {
-        out = out.replace(
-          new RegExp(`(<img\\b[^>]*\\bdata-adrival-slot="${escaped}")`, "i"),
-          `$1 src="${src}"`,
-        );
-      }
-      // Keep legacy regenerate hooks working alongside the unified slot id.
-      if (!new RegExp(`data-adrival-gen-id="${escaped}"`, "i").test(out)) {
-        out = out.replace(
-          new RegExp(`(<img\\b[^>]*\\bdata-adrival-slot="${escaped}")`, "i"),
-          `$1 data-adrival-gen-id="${id}"`,
-        );
-      }
-    }
-  }
-  return out;
+  if (!slots.size) return html;
+  return html.replace(/<img\b[^>]*>/gi, (tag) => {
+    const id = tag.match(/\bdata-adrival-slot="([^"]+)"/i)?.[1];
+    const src = id ? slots.get(id) : undefined;
+    if (!id || !src) return tag;
+    let next = /\ssrc="[^"]*"/i.test(tag)
+      ? tag.replace(/\ssrc="[^"]*"/i, () => ` src="${src}"`)
+      : tag.replace(/^<img\b/i, () => `<img src="${src}"`);
+    // Keep legacy regenerate hooks working alongside the unified slot id.
+    if (!/\bdata-adrival-gen-id=/i.test(next)) next = next.replace(/^<img\b/i, () => `<img data-adrival-gen-id="${id}"`);
+    return next;
+  });
 }

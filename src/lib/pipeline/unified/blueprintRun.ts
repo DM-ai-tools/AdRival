@@ -17,13 +17,14 @@ import {
   type BlueprintGenerationInput,
 } from "./generateBlueprint";
 import type { UnifiedProgressInfo } from "./generatePage";
-import { executeImageSlots } from "./images";
+import { executeImageSlots, placeholderRecords, unplannedPlaceholderSlots } from "./images";
 import { LEAD_FORM_ID } from "./leadForm";
 import { buildRecreateChromeLinks, scrubOffTopicChromeHtml, type CompetitorFormSpec } from "./recreateChrome";
 import { ensurePageChrome, injectIdentityLogo, injectProofLogos, validateAndPackageUnifiedPage } from "./validate";
 import { applyDesignFixes, findingsForPrompt, repairableCount, runDesignCheck, type DesignCheck } from "../skills/designAudit";
 import { designSystemToDesignMd } from "../skills/designMd";
 import { industryBrief, type IndustryGuide } from "../skills/industry";
+import { imageContextFromProfile } from "./imagePrompt";
 import { styleGuide, type StyleDirection } from "../skills/playbook";
 
 const NAV_LABEL: Partial<Record<SectionKind, string>> = {
@@ -271,12 +272,15 @@ export async function buildFromBlueprint(input: {
   html = logos(html);
 
   input.onProgress("Generating images…");
+  const imageContext = imageContextFromProfile(input.profile, { clientName: input.clientName, colors: input.colors });
   const imageResult = await executeImageSlots({
     html,
     slots: generated.response.imageSlots,
     colors: input.colors,
     competitorId: input.competitorId,
     previous: input.previousImages,
+    context: imageContext,
+    signal: input.signal,
     onProgress: (done, total) => input.onProgress(`Generating images (${done}/${total})…`),
   });
   html = fillEmptySlots(imageResult.html, input.colors);
@@ -400,6 +404,8 @@ export async function buildFromBlueprint(input: {
             colors: input.colors,
             competitorId: input.competitorId,
             previous: imageReport.images,
+            context: imageContext,
+            signal: input.signal,
           });
           next = more.html;
           imageReport = {
@@ -560,6 +566,17 @@ export async function buildFromBlueprint(input: {
 
   // Sections rebuilt during the checks may carry new light placeholders.
   html = retonePlaceholders(html, input.colors);
+  // Images the writer added beyond the plan are listed as missing, so
+  // "Generate missing images" can fill them later.
+  const extra = unplannedPlaceholderSlots(html, new Set(imageReport.images.map((image) => image.id)));
+  if (extra.length) {
+    imageReport = {
+      ...imageReport,
+      planned: imageReport.planned + extra.length,
+      placeholders: imageReport.placeholders + extra.length,
+      images: [...imageReport.images, ...placeholderRecords(extra)],
+    };
+  }
 
   const designMd = designSystemToDesignMd({
     design,

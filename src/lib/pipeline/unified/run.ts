@@ -28,7 +28,7 @@ import type { BrandSiteAssets } from "../brandAssets";
 import { sanitizeClientFacingText } from "../../clientFacing";
 import { buildUnifiedBrief } from "./brief";
 import { generateUnifiedPage, repairUnifiedPage, UnifiedRepairIncompleteError } from "./generatePage";
-import { executeImageSlots } from "./images";
+import { executeImageSlots, imageProvider, unplannedPlaceholderSlots } from "./images";
 import { ensurePageChrome, injectIdentityLogo, injectProofLogos, validateAndPackageUnifiedPage } from "./validate";
 import { buildRecreateChromeLinks, scrubOffTopicChromeHtml, extractCompetitorChromeFromHtml, type CompetitorChrome } from "./recreateChrome";
 import { verifyAndRepairUnifiedPage } from "./verifyPage";
@@ -42,6 +42,8 @@ import {
 } from "./blueprint";
 import { buildFromBlueprint } from "./blueprintRun";
 import { matchIndustry } from "../skills/industry";
+import { imageContextFromProfile } from "./imagePrompt";
+import { retonePlaceholders, type UnifiedImageSlot } from "./contract";
 import { applyDesignFixes, runDesignCheck } from "../skills/designAudit";
 import type { StyleDirection } from "../skills/playbook";
 import {
@@ -1006,6 +1008,8 @@ export async function runUnifiedRecreation(
       colors: brand.colors,
       competitorId,
       previous: page.generatedImages || [],
+      context: imageContextFromProfile(profile, { clientName: page.businessName, colors: brand.colors }),
+      signal: abortSignal,
       onProgress: (done, total, note) => {
         persist(competitorId, page, stages, "generating_images", note, {
           progress: {
@@ -1177,6 +1181,8 @@ export async function runUnifiedRecreation(
         colors: brand.colors,
         competitorId,
         previous: imageReport.images,
+        context: imageContextFromProfile(profile, { clientName: page.businessName, colors: brand.colors }),
+        signal: abortSignal,
       });
       html = imageRepair.html;
       imageReport = imageRepair.report.images.length ? imageRepair.report : imageReport;
@@ -1417,13 +1423,28 @@ export async function runUnifiedRecreation(
   }
 }
 
+/**
+ * Fill the images that could not be made when the page was built, in the page
+ * as it is: only the missing images are drawn and put into their slots. The
+ * page's copy, layout and design are not regenerated.
+ */
 export async function generateMissingUnifiedImages(competitorId: string): Promise<CompetitorRecord> {
   const competitor = getCompetitor(competitorId);
   if (!competitor?.recreatedPage?.html) throw new Error("No page is available to fill images for.");
+  if (!imageProvider()) {
+    throw new Error("No image service is configured. Add an OpenAI API key (or a Runway key) in the environment.");
+  }
   const page = competitor.recreatedPage;
-  const pending = (page.generatedImages || []).filter((image) => image.slotState === "failed" && image.prompt);
-  if (!pending.length) return competitor;
-  const slots = pending.map((image, index) => ({
+  const html = page.html || "";
+  const pending = (page.generatedImages || []).filter(
+    (image) => image.slotState === "failed" && image.prompt && html.includes(`data-adrival-slot="${image.id}"`),
+  );
+  // Image slots the writer added beyond the plan, still showing a placeholder.
+  const unplanned = unplannedPlaceholderSlots(html, new Set((page.generatedImages || []).map((image) => image.id)));
+  if (!pending.length && !unplanned.length) return competitor;
+  const job = getJob(competitor.runId);
+  const colors = page.brandColors || job?.businessProfile?.brandColors || { primary: "#0F7A6C", secondary: "#134E4A", accent: "#F59E0B", background: "#FFFFFF", text: "#0F172A" };
+  const slots: UnifiedImageSlot[] = pending.map((image, index) => ({
     id: image.id,
     sectionId: image.id,
     purpose: image.label,
@@ -1435,37 +1456,59 @@ export async function generateMissingUnifiedImages(competitorId: string): Promis
     kind: "illustrative" as const,
     priority: index + 1,
   }));
+  slots.push(...unplanned);
   const result = await executeImageSlots({
-    html: page.html || "",
+    html,
     slots,
-    colors: page.brandColors,
+    colors,
     competitorId,
     previous: [],
+    context: imageContextFromProfile(job?.businessProfile || null, { clientName: page.businessName, colors }),
+    onProgress: (done, total) => {
+      const latest = getCompetitor(competitorId)?.recreatedPage || page;
+      updateCompetitor(competitorId, {
+        recreatedPage: {
+          ...latest,
+          progress: {
+            phase: "generating_images",
+            message: done < total ? `Generating images (${done} of ${total} done)…` : "Putting the images into the page…",
+            pct: Math.round((done / Math.max(1, total)) * 100),
+            stages: latest.progress?.stages || initialStages(),
+            details: latest.progress?.details,
+          },
+        },
+      });
+    },
   });
   const merged = (page.generatedImages || []).map((image) => {
     const next = result.report.images.find((item) => item.id === image.id);
     return next || image;
   });
-  const placeholders = result.report.placeholders > 0;
+  for (const image of result.report.images) {
+    if (!merged.some((item) => item.id === image.id)) merged.push(image);
+  }
+  const stillMissing = merged.filter((image) => image.slotState === "failed").length;
+  // Keep every other review note; only the image note changes.
+  const PLACEHOLDER_NOTE = "Page ready with image placeholders. Generate missing images when credits allow.";
+  const otherNotes = (page.publishBlockers || []).filter((note) => !/image placeholders/i.test(note));
+  const publishBlockers = stillMissing ? [...otherNotes, PLACEHOLDER_NOTE] : otherNotes;
   updateCompetitor(competitorId, {
     recreatedPage: {
       ...page,
-      html: result.html,
+      html: retonePlaceholders(result.html, colors),
       generatedImages: merged,
-      publishReady: !placeholders,
-      publishBlockers: placeholders
-        ? ["Page ready with image placeholders. Generate missing images when credits allow."]
-        : [],
+      publishReady: publishBlockers.length === 0,
+      publishBlockers,
       updatedAt: new Date().toISOString(),
       progress: {
         phase: "ready",
-        message: placeholders ? "Page ready with image placeholders" : "Ready",
+        message: stillMissing ? `Page ready with ${stillMissing} image placeholder${stillMissing === 1 ? "" : "s"}` : "Ready",
         pct: 100,
         stages: page.progress?.stages || initialStages(),
         details: {
           ...page.progress?.details,
-          imagesCompleted: result.report.completed,
-          imagesPlanned: result.report.planned,
+          imagesCompleted: merged.filter((image) => image.slotState === "ready" || image.slotState === "reused").length,
+          imagesPlanned: merged.length,
           imagesSkippedCredits: result.report.skippedCredits,
         },
       },

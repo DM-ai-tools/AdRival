@@ -1,5 +1,7 @@
 import type { BrandColors, GeneratedLandingImage } from "../../types";
 import { generateGptImage2, hasRunwayKey, type GptImage2Ratio } from "../../runway/client";
+import { OPENAI_IMAGE_MODEL, generateOpenAIImage, hasOpenAIImageKey, isOpenAIQuotaError } from "../../openai/images";
+import { buildImagePrompt, readSlotSurroundings, type ImageContext, type SlotSurroundings } from "./imagePrompt";
 import {
   applyImageSlotsToHtml,
   placeholderDataUri,
@@ -24,11 +26,70 @@ function asRatio(value: string): GptImage2Ratio {
   return (allowed.includes(value as GptImage2Ratio) ? value : "1920:1088") as GptImage2Ratio;
 }
 
+/**
+ * Which service draws the images: OpenAI's GPT Image 2 when OPENAI_API_KEY is
+ * set (or IMAGE_PROVIDER=openai), Runway otherwise. IMAGE_PROVIDER=runway
+ * forces Runway.
+ */
+export function imageProvider(): "openai" | "runway" | null {
+  const forced = process.env.IMAGE_PROVIDER?.trim().toLowerCase();
+  if (forced === "runway") return hasRunwayKey() ? "runway" : null;
+  if (hasOpenAIImageKey()) return "openai";
+  return hasRunwayKey() ? "runway" : null;
+}
+
+/** Draw one image and return it as a data URI to embed in the page. */
+export async function renderLandingImage(input: {
+  slot: Pick<UnifiedImageSlot, "id" | "purpose" | "prompt" | "aspectRatio" | "alt">;
+  context: ImageContext;
+  surroundings?: SlotSurroundings | null;
+  revision?: string | null;
+  competitorId: string;
+  signal?: AbortSignal;
+}): Promise<{ dataUri: string; provider: "openai" | "runway"; model: string; taskId: string | null; finalPrompt: string }> {
+  const provider = imageProvider();
+  if (!provider) throw new Error("No image service is configured.");
+  const finalPrompt = buildImagePrompt({
+    scene: input.slot.prompt,
+    purpose: input.slot.purpose,
+    alt: input.slot.alt,
+    aspect: input.slot.aspectRatio,
+    context: input.context,
+    surroundings: input.surroundings,
+    revision: input.revision,
+  });
+  if (provider === "openai") {
+    const result = await generateOpenAIImage({
+      prompt: finalPrompt,
+      aspect: input.slot.aspectRatio,
+      quality: "medium",
+      operation: "openai.images.landing_page",
+      signal: input.signal,
+    });
+    return {
+      dataUri: `data:${result.mime};base64,${result.buffer.toString("base64")}`,
+      provider,
+      model: result.model,
+      taskId: null,
+      finalPrompt,
+    };
+  }
+  const result = await generateGptImage2({
+    promptText: finalPrompt,
+    ratio: asRatio(input.slot.aspectRatio),
+    quality: "medium",
+    competitorId: input.competitorId,
+    imageId: input.slot.id,
+  });
+  return { dataUri: `data:image/png;base64,${result.buffer.toString("base64")}`, provider, model: "gpt_image_2", taskId: result.taskId, finalPrompt };
+}
+
 function imageRecord(
   slot: UnifiedImageSlot,
   state: GeneratedLandingImage["slotState"],
   publicUrl = "",
   taskId: string | null = null,
+  made: { provider: string; model: string } | null = null,
 ): GeneratedLandingImage {
   const now = new Date().toISOString();
   return {
@@ -44,15 +105,16 @@ function imageRecord(
     createdAt: now,
     updatedAt: now,
     slotState: state,
-    provider: "runway",
-    model: "gpt_image_2",
+    provider: made?.provider || imageProvider() || "none",
+    model: made?.model || (imageProvider() === "openai" ? OPENAI_IMAGE_MODEL : "gpt_image_2"),
   };
 }
 
 const IMAGE_CONCURRENCY = 3;
 
-function isCreditFailure(message: string): boolean {
-  return /not enough credits|not have enough credits|insufficient credits|no remaining credits/i.test(message);
+function isCreditFailure(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /not enough credits|not have enough credits|insufficient credits|no remaining credits/i.test(message) || isOpenAIQuotaError(err);
 }
 
 /** Generate illustrative slots. Factual slots are never invented. Placeholders preserve layout when credits run out. */
@@ -62,8 +124,13 @@ export async function executeImageSlots(input: {
   colors: BrandColors;
   competitorId: string;
   previous?: GeneratedLandingImage[];
+  /** Who the page is for: used to write each image prompt. */
+  context?: ImageContext;
+  signal?: AbortSignal;
   onProgress?: (done: number, total: number, note: string) => void;
 }): Promise<{ html: string; report: UnifiedImageReport }> {
+  const context: ImageContext = { ...(input.context || {}), colors: input.context?.colors || input.colors };
+  const surroundings = readSlotSurroundings(input.html);
   const illustrative = [...input.slots]
     .filter((slot) => slot.kind === "illustrative")
     .sort((a, b) => a.priority - b.priority);
@@ -89,7 +156,7 @@ export async function executeImageSlots(input: {
       completed += 1;
       return;
     }
-    if (creditsExhausted || !hasRunwayKey()) {
+    if (creditsExhausted || !imageProvider() || input.signal?.aborted) {
       const placeholder = placeholderDataUri(slot, input.colors);
       resolved.set(slot.id, placeholder);
       results[index] = imageRecord(slot, "failed", placeholder);
@@ -98,23 +165,19 @@ export async function executeImageSlots(input: {
       return;
     }
     try {
-      const brandHint = `Brand palette primary ${input.colors.primary}, secondary ${input.colors.secondary}, accent ${input.colors.accent}. No text, logos, watermarks, or readable words in the image.`;
-      const result = await generateGptImage2({
-        promptText: `${slot.prompt}
-
-${brandHint}`,
-        ratio: asRatio(slot.aspectRatio),
-        quality: "medium",
+      const made = await renderLandingImage({
+        slot,
+        context,
+        surroundings: surroundings.get(slot.id) || null,
         competitorId: input.competitorId,
-        imageId: slot.id,
+        signal: input.signal,
       });
-      const src = `data:image/png;base64,${result.buffer.toString("base64")}`;
-      resolved.set(slot.id, src);
-      results[index] = imageRecord(slot, "ready", src, result.taskId);
+      resolved.set(slot.id, made.dataUri);
+      results[index] = imageRecord(slot, "ready", made.dataUri, made.taskId, made);
       completed += 1;
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (isCreditFailure(message)) creditsExhausted = true;
+      console.warn(`[images] ${slot.id} failed:`, err instanceof Error ? err.message.slice(0, 200) : err);
+      if (isCreditFailure(err)) creditsExhausted = true;
       const placeholder = placeholderDataUri(slot, input.colors);
       resolved.set(slot.id, placeholder);
       results[index] = imageRecord(slot, "failed", placeholder);
@@ -149,4 +212,48 @@ ${brandHint}`,
       images,
     },
   };
+}
+
+/** A src that is still a stand-in: our placeholder SVG, a 1x1 GIF, or nothing. */
+function isPlaceholderSrc(src: string): boolean {
+  if (!src || /^data:image\/gif/i.test(src)) return true;
+  if (!/^data:image\/svg\+xml;base64,/i.test(src)) return false;
+  try {
+    return Buffer.from(src.slice(src.indexOf(",") + 1), "base64").toString("utf8").includes("data-adr-placeholder");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Image slots the writer added beyond the planned ones, still showing a
+ * placeholder. They get a brief from their alt text so "Generate missing
+ * images" can fill them too.
+ */
+export function unplannedPlaceholderSlots(html: string, known: Set<string>): UnifiedImageSlot[] {
+  const out: UnifiedImageSlot[] = [];
+  for (const match of html.matchAll(/<img\b[^>]*>/gi)) {
+    const tag = match[0];
+    const id = tag.match(/\bdata-adrival-slot="([^"]+)"/i)?.[1];
+    if (!id || known.has(id) || out.some((s) => s.id === id)) continue;
+    const src = tag.match(/\ssrc="([^"]*)"/i)?.[1] || "";
+    if (!isPlaceholderSrc(src)) continue;
+    const alt = (tag.match(/\balt="([^"]*)"/i)?.[1] || "").trim();
+    out.push({
+      id,
+      sectionId: id,
+      purpose: alt || "Supporting image for this section",
+      prompt: alt ? `Photographic scene: ${alt}.` : "A realistic photograph that supports this section of the page.",
+      aspectRatio: "1920:1440",
+      alt,
+      kind: "illustrative",
+      priority: 100 + out.length,
+    });
+  }
+  return out;
+}
+
+/** Records for unplanned slots left as placeholders, so the page lists them as missing. */
+export function placeholderRecords(slots: UnifiedImageSlot[]): GeneratedLandingImage[] {
+  return slots.map((slot) => imageRecord(slot, "failed"));
 }

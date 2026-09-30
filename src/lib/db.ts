@@ -20,7 +20,7 @@ import type {
   UserRole,
   UserStatus,
 } from "./types";
-import { seedConversionRuleSet, conversionRulesNeedSoftening } from "./accounting/conversion";
+import { GPT_IMAGE_RATE, GPT_IMAGE_RATE_KEY, seedConversionRuleSet, conversionRulesNeedSoftening } from "./accounting/conversion";
 import { creditsToSubunits } from "./accounting/units";
 
 /** ADRIVAL_DATA_DIR lets tests point the store at a scratch directory. */
@@ -536,6 +536,17 @@ function migrateDb(parsed: DatabaseShape): DatabaseShape {
       parsed.conversionRuleSets.push(soft);
       parsed.appSettings.activeConversionRuleVersion = nextVersion;
       parsed.appSettings.updatedAt = new Date().toISOString();
+    }
+  }
+  // Images moved from Runway to OpenAI GPT Image: give the active rules a
+  // per-image rate so an image is not billed like a short chat call.
+  {
+    const activeVersion = parsed.appSettings.activeConversionRuleVersion ?? 1;
+    const active =
+      parsed.conversionRuleSets.find((rule) => rule.version === activeVersion) ||
+      parsed.conversionRuleSets[0];
+    if (active?.rates.openai && !active.rates.openai[GPT_IMAGE_RATE_KEY]) {
+      active.rates.openai[GPT_IMAGE_RATE_KEY] = { ...GPT_IMAGE_RATE };
     }
   }
   if (!parsed.creditPeriods) parsed.creditPeriods = [];

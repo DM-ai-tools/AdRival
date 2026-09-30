@@ -126,6 +126,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
   const [savingWebsite, setSavingWebsite] = useState(false);
   const [returnPath, setReturnPath] = useState<string | null>(null);
   const [styleDirection, setStyleDirection] = useState<StyleDirection>("brand");
+  const [fillingImages, setFillingImages] = useState(false);
 
   useEffect(() => {
     setReturnPath(readReturnPath());
@@ -762,14 +763,18 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
                   : "Regenerate page"}
             </button>
           ) : null}
-          {(page?.generatedImages || []).some((image) => image.slotState === "failed") ? (
+          {/* Only draws the missing images into this page; the page itself is not rebuilt. */}
+          {(page?.generatedImages || []).some((image) => image.slotState === "failed") ||
+          (page?.publishBlockers || []).some((note) => /image placeholders/i.test(note)) ? (
             <button
               type="button"
               className="ghost-btn"
               disabled={busy}
+              title="Draw only the images that are still placeholders and put them into this page. The copy and layout stay as they are."
               onClick={() => {
                 void (async () => {
                   setError(null);
+                  setFillingImages(true);
                   setBuilding(true);
                   try {
                     const res = await fetch("/api/competitors/recreate-page", {
@@ -789,11 +794,12 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
                     setError((err as Error).message);
                   } finally {
                     setBuilding(false);
+                    setFillingImages(false);
                   }
                 })();
               }}
             >
-              Generate missing images
+              {fillingImages ? "Generating images…" : "Generate missing images"}
             </button>
           ) : null}
           {canRegenerateDesign && page?.html ? (
@@ -1235,7 +1241,9 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
         >
           <div className="offers-analysis-progress-head">
             <span className="offers-analysis-progress-label">
-              {building
+              {fillingImages
+                ? "Images"
+                : building
                 ? "Design"
                 : generating || page?.status === "pending"
                   ? "Content creation"

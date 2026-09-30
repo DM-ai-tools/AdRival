@@ -1,4 +1,6 @@
 import * as cheerio from "cheerio";
+import { imageProvider, renderLandingImage } from "./unified/images";
+import { readSlotSurroundings, type ImageContext } from "./unified/imagePrompt";
 import type OpenAI from "openai";
 import { z } from "zod";
 import type { BrandColors, GeneratedLandingImage } from "../types";
@@ -840,11 +842,39 @@ export async function regenerateLandingImage(input: {
   competitorId: string;
   feedback?: string | null;
   logoUrl?: string | null;
+  /** The page the image sits in, and who it is for: used to write the prompt. */
+  html?: string | null;
+  context?: ImageContext | null;
 }): Promise<GeneratedLandingImage> {
-  if (!hasRunwayKey()) {
-    throw new Error("RUNWAYML_API_SECRET is not set");
-  }
   const feedback = (input.feedback || "").trim().slice(0, 800);
+  // OpenAI GPT Image 2 when configured: same prompt builder as the page build.
+  if (imageProvider() === "openai") {
+    const made = await renderLandingImage({
+      slot: {
+        id: input.image.id,
+        purpose: input.image.label,
+        prompt: input.image.prompt,
+        aspectRatio: input.image.ratio || "3:2",
+        alt: input.image.label,
+      },
+      context: input.context || {},
+      surroundings: input.html ? readSlotSurroundings(input.html).get(input.image.id) || null : null,
+      revision: feedback || "A fresh alternate take with the same subject and composition goals.",
+      competitorId: input.competitorId,
+    });
+    return {
+      ...input.image,
+      publicUrl: made.dataUri,
+      runwayTaskId: null,
+      provider: made.provider,
+      model: made.model,
+      slotState: "ready",
+      updatedAt: new Date().toISOString(),
+    };
+  }
+  if (!hasRunwayKey()) {
+    throw new Error("No image service is configured. Add an OpenAI API key (or a Runway key) in the environment.");
+  }
   const prompt = feedback
     ? `${input.image.prompt}\n\nRevision notes: ${feedback}`
     : `${input.image.prompt}\n\nCreate a fresh alternate take with the same subject and composition goals.`;

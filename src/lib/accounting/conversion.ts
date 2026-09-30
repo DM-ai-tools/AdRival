@@ -30,6 +30,10 @@ export const SEED_RULE_VERSION = 2;
  * Softened rates so one landing-page redesign does not empty a typical allowance.
  * Historical charges still settle against the rule version stored on each call.
  */
+/** Rate key for OpenAI GPT Image models ("gpt-image-2" matches by prefix). */
+export const GPT_IMAGE_RATE_KEY = "gpt-image";
+export const GPT_IMAGE_RATE = { perImage: C(4), perRequest: C(4) };
+
 export function seedConversionRuleSet(): ConversionRuleSet {
   return {
     version: SEED_RULE_VERSION,
@@ -58,6 +62,8 @@ export function seedConversionRuleSet(): ConversionRuleSet {
           estimatedInputTokens: 4000,
           estimatedOutputTokens: 1500,
         },
+        // Landing-page images (GPT Image 2): per image, like Runway's images.
+        [GPT_IMAGE_RATE_KEY]: { ...GPT_IMAGE_RATE },
       },
       anthropic: {
         // ~4× softer on output vs v1 so a 30–60k HTML page stays within ~30–60 credits

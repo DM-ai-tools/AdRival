@@ -1,3 +1,4 @@
+import { imageContextFromProfile } from "./unified/imagePrompt";
 import type {
   BrandColors,
   BusinessProfile,
@@ -1038,6 +1039,8 @@ export async function regenerateGeneratedImageForRecreation(
     image: existing,
     competitorId,
     feedback: feedback || null,
+    html: page.html,
+    context: imageContextFromProfile(ctx.job.businessProfile || null, { clientName: page.businessName, colors: page.brandColors }),
     logoUrl:
       (ctx.job as { businessProfile?: { brandAssets?: { logoUrl?: string } } })
         .businessProfile?.brandAssets?.logoUrl || null,
