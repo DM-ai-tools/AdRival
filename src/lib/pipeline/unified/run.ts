@@ -1463,6 +1463,7 @@ export async function generateMissingUnifiedImages(competitorId: string): Promis
     colors,
     competitorId,
     previous: [],
+    existingBriefs: (page.generatedImages || []).filter((image) => image.slotState === "ready").map((image) => image.prompt),
     context: imageContextFromProfile(job?.businessProfile || null, { clientName: page.businessName, colors }),
     onProgress: (done, total) => {
       const latest = getCompetitor(competitorId)?.recreatedPage || page;

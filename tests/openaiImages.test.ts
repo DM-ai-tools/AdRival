@@ -56,3 +56,21 @@ test("images are embedded whatever order the tag's attributes are in", () => {
   assert.match(out, /data-adrival-slot="c" src="data:new3"/);
   assert.doesNotMatch(out, /old1|old3/);
 });
+
+test("card images know their own card and their siblings", () => {
+  const card = (i: number, title: string, body: string) =>
+    `<div class="adr-card"><div class="adr-media"><img data-adrival-slot="c${i}" src="x"></div><span class="adr-eyebrow">Label</span><h3>${title}</h3><p>${body}</p></div>`;
+  const html = `<main><section data-section-id="sec-1"><h1>Hero</h1></section><section class="adr-section" data-section-id="sec-10"><div class="adr-container"><h2>Every campaign is run by a specialist</h2><p>Intro.</p><div class="adr-grid adr-grid--3">${card(1, "SEO and organic growth", "Technical audits.")}${card(2, "Google and Meta ads", "Campaign structure.")}${card(3, "Content marketing", "Website copy.")}</div></div></section></main>`;
+  const map = readSlotSurroundings(html);
+  assert.equal(map.get("c2")?.cardHeading, "Google and Meta ads");
+  assert.equal(map.get("c2")?.cardText, "Campaign structure.");
+  assert.equal(map.get("c2")?.heading, "Every campaign is run by a specialist");
+  assert.equal(map.get("c1")?.groupSize, 3);
+  assert.equal(map.get("c1")?.group, map.get("c3")?.group);
+  const prompt = buildImagePrompt({ scene: "A megaphone and a target on a plinth", medium: "3d-render", aspect: "4:3", context: { colors: { primary: "#A4D36B" } }, surroundings: map.get("c2") });
+  assert.match(prompt, /^A 3D render for the website/);
+  assert.match(prompt, /it illustrates google and meta ads: campaign structure/);
+  assert.match(prompt, /Clean modern 3D render/);
+  assert.match(prompt, /row of cards with matching images/);
+  assert.doesNotMatch(prompt, /Setting:/, "no people/place setting line for a 3D render");
+});

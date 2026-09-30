@@ -11,6 +11,8 @@ export type UnifiedImageSlot = {
   alt: string;
   kind: "illustrative" | "factual";
   priority: number;
+  /** Chosen by the page's art direction: photo, still-life, 3d-render or illustration. */
+  medium?: "photo" | "still-life" | "3d-render" | "illustration" | null;
   focal?: string | null;
   spaceForText?: boolean;
 };

@@ -1,11 +1,16 @@
 import * as cheerio from "cheerio";
 
 /**
- * Prompts for landing-page photographs, written the way OpenAI's image guide
- * recommends: say what the image is for, describe the scene concretely, give
- * composition, lighting and style, then list what must not appear. One shared
- * art direction keeps every image on the page looking like one shoot.
+ * Prompts for landing-page images, written the way OpenAI's image guide
+ * recommends: say what the image is for, describe the subject concretely,
+ * give composition, medium and style, then list what must not appear. The
+ * subject and medium of each image come from the page's art direction
+ * (imageBriefs.ts); the style for each medium is shared across the page.
  */
+
+/** photo: people or places; still-life: studio shot of objects; 3d-render; illustration. */
+export const IMAGE_MEDIUMS = ["photo", "still-life", "3d-render", "illustration"] as const;
+export type ImageMedium = (typeof IMAGE_MEDIUMS)[number];
 
 export type ImageContext = {
   clientName?: string | null;
@@ -19,6 +24,12 @@ export type ImageContext = {
 export type SlotSurroundings = {
   heading: string | null;
   text: string | null;
+  /** The card the image sits in, when it is one of several cards. */
+  cardHeading?: string | null;
+  cardText?: string | null;
+  /** Images that sit side by side (one grid of cards) share a group. */
+  group?: string;
+  groupSize?: number;
   isHero: boolean;
   /** The image sits behind text (hero or background band). */
   behindText: boolean;
@@ -46,7 +57,32 @@ export function readSlotSurroundings(html: string): Map<string, SlotSurroundings
     const isHero = section.length > 0 && section.is(firstSection);
     const cls = `${img.attr("class") || ""} ${img.parent().attr("class") || ""}`;
     const behindText = /background|backdrop|cover|bg/i.test(cls) || (isHero && !img.closest(".adr-split, .adr-media, .adr-card").length);
-    out.set(id, { heading: clip(heading, 140) || null, text: clip(text, 260) || null, isHero, behindText });
+    // The card the image belongs to: the nearest wrapper below the section
+    // that has its own heading (a card, list item or column).
+    let card: ReturnType<typeof $> | null = null;
+    for (let node = img.parent(); node.length && !node.is("section, main, body"); node = node.parent()) {
+      if (node.find("h2, h3, h4, h5").length) {
+        card = node;
+        break;
+      }
+    }
+    const inCard = Boolean(card && section.length && !card.is(section) && card.find("img[data-adrival-slot]").length === 1);
+    const cardHeading = inCard ? card!.find("h2, h3, h4, h5").first().text() : null;
+    const cardText = inCard ? card!.find("p").first().text() : null;
+    // Siblings: the other slot images in the same parent grid.
+    const grid = inCard ? card!.parent() : null;
+    const groupSize = grid ? grid.find("img[data-adrival-slot]").length : 1;
+    const sectionId = section.attr("data-section-id") || section.attr("id") || "page";
+    out.set(id, {
+      heading: clip(heading, 140) || null,
+      text: clip(text, 260) || null,
+      cardHeading: clip(cardHeading, 120) || null,
+      cardText: clip(cardText, 260) || null,
+      group: groupSize > 1 ? `${sectionId}-grid` : id,
+      groupSize,
+      isHero,
+      behindText,
+    });
   });
   return out;
 }
@@ -94,19 +130,43 @@ function orientation(aspect: string | null | undefined): string {
   return "portrait";
 }
 
-/** The art direction every image on the page shares. */
-export function artDirection(context: ImageContext): string {
-  const accents = [colourName(context.colors?.primary), colourName(context.colors?.accent)]
-    .filter((c, i, a): c is string => Boolean(c) && a.indexOf(c) === i)
-    .join(" and ");
-  return [
-    "Editorial commercial photography, shot on a full-frame camera with a 35mm or 50mm lens",
-    "soft natural daylight, gentle contrast, true-to-life colours and realistic skin and material textures",
-    accents ? `small, natural touches of ${accents} in props, clothing or the environment (do not tint the whole image)` : null,
-    "clean, uncluttered backgrounds with a modern, premium, trustworthy feel",
-  ]
-    .filter(Boolean)
-    .join("; ");
+/** The style for a medium, shared by every image of that medium on the page. */
+export function artDirection(context: ImageContext, medium: ImageMedium = "photo"): string {
+  const colours = [colourName(context.colors?.primary), colourName(context.colors?.accent)].filter(
+    (c, i, a): c is string => Boolean(c) && a.indexOf(c) === i,
+  );
+  const accents = colours.join(" and ");
+  const main = colours[0] || "neutral";
+  switch (medium) {
+    case "still-life":
+      return [
+        "Studio still-life photography: the objects arranged with intent on a seamless backdrop",
+        `backdrop a soft, desaturated tint of ${main}${colours[1] ? `, with ${colours[1]} as a small accent object or detail` : ""}`,
+        "soft directional key light with gentle shadows, shallow depth of field, crisp material detail",
+        "minimal, premium, modern; plenty of empty space around the subject",
+      ].join("; ");
+    case "3d-render":
+      return [
+        "Clean modern 3D render: soft studio lighting, smooth matte and frosted-glass materials, subtle ambient occlusion",
+        `a colour palette built from ${accents || "calm neutrals"} with soft neutrals, on a plain gradient backdrop in a muted tint of ${main}`,
+        "simple, friendly forms, one clear focal object, generous empty space; premium product-design look, not cartoonish",
+      ].join("; ");
+    case "illustration":
+      return [
+        "Modern flat vector illustration with a few simple shapes and soft grain",
+        `limited palette of ${accents || "two calm colours"} with warm neutrals, on a plain light background`,
+        "clear focal subject, friendly and professional, no outlines-heavy clip-art look",
+      ].join("; ");
+    default:
+      return [
+        "Editorial documentary photography, shot on a full-frame camera with a 35mm or 50mm lens",
+        "soft natural light, gentle contrast, true-to-life colours and realistic skin and material textures",
+        accents ? `small, natural touches of ${accents} in props, clothing or the environment (do not tint the whole image)` : null,
+        "real, candid moments rather than posed smiles; clean, uncluttered backgrounds",
+      ]
+        .filter(Boolean)
+        .join("; ");
+  }
 }
 
 export function buildImagePrompt(input: {
@@ -116,10 +176,15 @@ export function buildImagePrompt(input: {
   aspect?: string | null;
   context: ImageContext;
   surroundings?: SlotSurroundings | null;
+  medium?: ImageMedium | null;
   revision?: string | null;
 }): string {
   const c = input.context;
   const where = input.surroundings;
+  const medium: ImageMedium = input.medium || "photo";
+  const kind =
+    medium === "still-life" ? "A studio still-life photograph" : medium === "3d-render" ? "A 3D render" : medium === "illustration" ? "An illustration" : "A photograph";
+  const peopleMedium = medium === "photo";
   const business = [
     c.industry
       ? /\b(business|agency|company|firm|practice|clinic|studio|store|shop|service|services)$/i.test(c.industry.trim())
@@ -132,23 +197,28 @@ export function buildImagePrompt(input: {
     .filter(Boolean)
     .join(" ");
   const lines = [
-    `A photograph for the website of ${business}.`,
+    `${kind} for the website of ${business}.`,
     input.purpose ? `Where it appears: ${clip(input.purpose, 160)}.` : null,
-    // The section's words are context only: quoted headings get painted onto screens.
-    where?.heading || where?.text
-      ? `Context only (never write these words anywhere in the image): the section is about ${[where?.heading, where?.text].filter(Boolean).join(". ").toLowerCase()}`
+    // The page's words are context only: quoted headings get painted onto screens.
+    where?.cardHeading || where?.heading || where?.text
+      ? `Context only (never write these words anywhere in the image): ${
+          where?.cardHeading ? `it illustrates ${[where.cardHeading, where.cardText].filter(Boolean).join(": ").toLowerCase()}, in a section about ` : "the section is about "
+        }${[where?.heading, where?.cardHeading ? null : where?.text].filter(Boolean).join(". ").toLowerCase()}`
       : null,
-    `Scene: ${clip(input.scene, 900)}`,
-    c.location ? `Setting: ${c.location}, so architecture, light and people fit that place.` : null,
-    c.audience ? `The people shown should feel like the business's customers or team: ${clip(c.audience, 160)}.` : null,
+    `Subject: ${clip(input.scene, 900)}`,
+    peopleMedium && c.location ? `Setting: ${c.location}, so architecture, light and people fit that place.` : null,
+    peopleMedium && c.audience ? `Any people shown should feel like the business's customers or team: ${clip(c.audience, 160)}.` : null,
     `Composition: ${orientation(input.aspect)} frame. ${
       where?.behindText
         ? "The image sits behind a headline, so keep the main subject to one side and leave a calm, low-detail area for text."
         : "One clear subject with a simple background, framed so it still reads when cropped slightly."
     }${where?.isHero ? " This is the first image visitors see: make it confident and inviting." : ""}`,
-    `Style: ${artDirection(c)}.`,
+    `Style: ${artDirection(c, medium)}.`,
     input.revision ? `Changes requested for this version: ${clip(input.revision, 600)}` : null,
     "Screens, documents and whiteboards are blank, softly out of focus or turned away from the camera.",
+    where?.groupSize && where.groupSize > 1
+      ? "It sits in a row of cards with matching images, so keep the subject centred, similar in scale and on the same kind of background."
+      : null,
     "Do not include: any text, letters, numbers, logos, brand names, watermarks, signage with words, screens showing readable content, or charts; no competitor branding; no stock-photo clichés (handshakes, pointing at graphs, headset call-centre smiles, thumbs up); no distorted hands or faces.",
   ];
   return lines.filter(Boolean).join("\n");

@@ -2,6 +2,7 @@ import type { BrandColors, GeneratedLandingImage } from "../../types";
 import { generateGptImage2, hasRunwayKey, type GptImage2Ratio } from "../../runway/client";
 import { OPENAI_IMAGE_MODEL, generateOpenAIImage, hasOpenAIImageKey, isOpenAIQuotaError } from "../../openai/images";
 import { buildImagePrompt, readSlotSurroundings, type ImageContext, type SlotSurroundings } from "./imagePrompt";
+import { planImageBriefs } from "./imageBriefs";
 import {
   applyImageSlotsToHtml,
   placeholderDataUri,
@@ -40,7 +41,7 @@ export function imageProvider(): "openai" | "runway" | null {
 
 /** Draw one image and return it as a data URI to embed in the page. */
 export async function renderLandingImage(input: {
-  slot: Pick<UnifiedImageSlot, "id" | "purpose" | "prompt" | "aspectRatio" | "alt">;
+  slot: Pick<UnifiedImageSlot, "id" | "purpose" | "prompt" | "aspectRatio" | "alt" | "medium">;
   context: ImageContext;
   surroundings?: SlotSurroundings | null;
   revision?: string | null;
@@ -56,6 +57,7 @@ export async function renderLandingImage(input: {
     aspect: input.slot.aspectRatio,
     context: input.context,
     surroundings: input.surroundings,
+    medium: input.slot.medium || null,
     revision: input.revision,
   });
   if (provider === "openai") {
@@ -105,6 +107,7 @@ function imageRecord(
     createdAt: now,
     updatedAt: now,
     slotState: state,
+    medium: slot.medium || null,
     provider: made?.provider || imageProvider() || "none",
     model: made?.model || (imageProvider() === "openai" ? OPENAI_IMAGE_MODEL : "gpt_image_2"),
   };
@@ -126,6 +129,8 @@ export async function executeImageSlots(input: {
   previous?: GeneratedLandingImage[];
   /** Who the page is for: used to write each image prompt. */
   context?: ImageContext;
+  /** Briefs of images already on the page, so new ones do not repeat them. */
+  existingBriefs?: string[];
   signal?: AbortSignal;
   onProgress?: (done: number, total: number, note: string) => void;
 }): Promise<{ html: string; report: UnifiedImageReport }> {
@@ -145,6 +150,29 @@ export async function executeImageSlots(input: {
 
   let done = 0;
   const results = new Array<GeneratedLandingImage | null>(illustrative.length).fill(null);
+  // Art direction: plan every image that still has to be drawn, together, so
+  // each one fits its own card or section and the page never repeats itself.
+  const toDraw = illustrative.filter(
+    (slot) => !input.previous?.some((image) => image.id === slot.id && image.prompt === slot.prompt && image.publicUrl.startsWith("data:image/")),
+  );
+  const briefs =
+    toDraw.length && imageProvider() && !input.signal?.aborted
+      ? await planImageBriefs({
+          slots: toDraw,
+          surroundings,
+          context,
+          existingBriefs: [
+            ...(input.existingBriefs || []),
+            ...(input.previous || []).filter((image) => image.slotState === "ready" || image.slotState === "reused").map((image) => image.prompt),
+          ],
+          signal: input.signal,
+        })
+      : new Map();
+  for (let i = 0; i < illustrative.length; i += 1) {
+    const planned = briefs.get(illustrative[i].id);
+    if (planned) illustrative[i] = { ...illustrative[i], prompt: planned.brief, medium: planned.medium };
+  }
+
   const runOne = async (index: number) => {
     const slot = illustrative[index];
     const cached = input.previous?.find(

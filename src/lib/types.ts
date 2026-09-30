@@ -969,6 +969,8 @@ export interface GeneratedLandingImage {
   slotState?: "planned" | "generating" | "validating" | "ready" | "failed" | "reused";
   provider?: string | null;
   model?: string | null;
+  /** Medium chosen by the art direction (photo, still-life, 3d-render, illustration). */
+  medium?: "photo" | "still-life" | "3d-render" | "illustration" | null;
   reused?: boolean;
   validation?: string | null;
 }

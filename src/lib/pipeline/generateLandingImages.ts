@@ -856,6 +856,7 @@ export async function regenerateLandingImage(input: {
         prompt: input.image.prompt,
         aspectRatio: input.image.ratio || "3:2",
         alt: input.image.label,
+        medium: input.image.medium || null,
       },
       context: input.context || {},
       surroundings: input.html ? readSlotSurroundings(input.html).get(input.image.id) || null : null,
