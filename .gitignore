@@ -47,7 +47,7 @@ yarn-error.log*
 
 # local Cursor / canvas artifacts
 /canvases
-SKILL*
+/SKILL*.md
 FRAMEWORK-COMPARISON-REPORT.md
 
 # OS / IDE
