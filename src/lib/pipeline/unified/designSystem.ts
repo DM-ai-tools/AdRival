@@ -1,5 +1,6 @@
 import type { BrandColors, BrandDesignSystem } from "../../types";
 import type { BlueprintFormStyle, DesignShape } from "./blueprint";
+import type { StyleDirection } from "../skills/playbook";
 
 /**
  * One stylesheet for the whole recreated page: the competitor's measured
@@ -15,6 +16,9 @@ export type DesignSystem = {
   /** Class reference given to the model. */
   vocabulary: string;
   tokens: Record<string, string>;
+  /** Heading and body families, for the DESIGN.md style file. */
+  families: { heading: string; body: string };
+  style: StyleDirection;
 };
 
 const clamp = (value: number | null | undefined, min: number, max: number, fallback: number) => {
@@ -95,12 +99,44 @@ function fluid(px: number, floor: number): string {
   return `clamp(${min}px, ${vw}vw, ${px}px)`;
 }
 
+/** Surface rules for the chosen style direction (Taste Skill), on top of the brand tokens. */
+function styleCss(style: StyleDirection): string {
+  if (style === "minimal") {
+    return `/* style: minimal */
+.adr-card,.adr-form-panel{border:1px solid var(--border)}
+.adr-btn{box-shadow:none}
+.adr-badge{background:transparent;padding-inline:0}
+.adr-icon{background:transparent;border:1px solid var(--border)}`;
+  }
+  if (style === "soft") {
+    return `/* style: high-end soft */
+.adr-card,.adr-form-panel{border:1px solid color-mix(in srgb, var(--text) 6%, transparent)}
+.adr-btn{transition:transform .5s cubic-bezier(.32,.72,0,1),box-shadow .5s cubic-bezier(.32,.72,0,1)}
+.adr-btn:active{transform:scale(.98)}
+.adr-media{border-radius:calc(var(--radius-card) + 4px)}`;
+  }
+  if (style === "brutalist") {
+    return `/* style: bold / brutalist */
+.adr-card,.adr-form-panel,.adr-media{border:2px solid var(--text);box-shadow:none}
+.adr-section--dark .adr-card{border-color:rgba(255,255,255,.7)}
+h1,h2{letter-spacing:-.03em;line-height:1;font-weight:800}
+.adr-btn{border:2px solid currentColor;box-shadow:none}
+.adr-btn--primary{border-color:var(--btn-bg)}
+.adr-section+.adr-section{border-top:2px solid color-mix(in srgb, var(--text) 85%, transparent)}`;
+  }
+  return "";
+}
+
 export function buildDesignSystem(input: {
   shape: DesignShape | null;
   colors: BrandColors;
   brandDesign?: BrandDesignSystem | null;
   formStyle?: BlueprintFormStyle | null;
+  /** Fonts for the client's industry (UI UX Pro Max), used when the brand has none. */
+  industryFonts?: { heading: string; body: string } | null;
+  style?: StyleDirection | null;
 }): DesignSystem {
+  const style: StyleDirection = input.style || "brand";
   const shape = input.shape;
   const colors = input.colors;
   const primary = colors.primary || "#0F7A6C";
@@ -112,12 +148,15 @@ export function buildDesignSystem(input: {
   // Primary buttons: the brand colour when it reads on the page, else the accent.
   const buttonFill = contrast(primary, background) >= 2.2 ? primary : accent;
   const textSafe = contrast(primary, background) >= 4.5 ? primary : mix(primary, "#000000", 0.45);
-  // Highlight colour on dark bands: the brand colour if it reads, else a lighter tint.
+  // Highlight colour on dark bands: the brand colour if it reads, else a lighter
+  // tint. Checked against the lighter dark-band card too, at WCAG AA (4.5:1).
+  const darkCard = mix(dark, "#FFFFFF", 0.18);
   const onDarkAccent = [primary, accent, mix(primary, "#FFFFFF", 0.45), mix(primary, "#FFFFFF", 0.7)].find(
-    (c) => contrast(c, dark) >= 3.2,
+    (c) => contrast(c, dark) >= 4.5 && contrast(c, darkCard) >= 4.5,
   ) || "#FFFFFF";
 
-  // Fonts: the client's own, else the competitor's family so the feel carries over.
+  // Fonts: the client's own, else a pairing chosen for the client's industry,
+  // else the competitor's family so the feel carries over.
   const brandFonts = [
     input.brandDesign?.typography?.fontFamilies?.heading,
     input.brandDesign?.typography?.fontFamilies?.primary,
@@ -125,8 +164,11 @@ export function buildDesignSystem(input: {
   ]
     .map(familyName)
     .filter((f): f is string => Boolean(f));
-  const headingFamily = brandFonts[0] || familyName(shape?.h1?.family || shape?.h2?.family) || "Inter";
-  const bodyFamily = brandFonts[1] || brandFonts[0] || familyName(shape?.body?.family) || headingFamily;
+  const industryHeading = familyName(input.industryFonts?.heading);
+  const industryBody = familyName(input.industryFonts?.body);
+  const headingFamily = brandFonts[0] || industryHeading || familyName(shape?.h1?.family || shape?.h2?.family) || "Inter";
+  const bodyFamily =
+    brandFonts[1] || brandFonts[0] || (brandFonts.length ? null : industryBody) || familyName(shape?.body?.family) || headingFamily;
   const families = [...new Set([headingFamily, bodyFamily])];
 
   const h1 = typeRule(shape?.h1 || null, { size: 56, weight: 800, lh: 1.05 }, 36, 96);
@@ -136,24 +178,30 @@ export function buildDesignSystem(input: {
   // Body text in caps is almost always an eyebrow sample; never uppercase paragraphs.
   body.transform = "none";
 
-  const sectionY = clamp(shape?.sectionPadding, 48, 140, 88);
+  const sectionYBase = clamp(shape?.sectionPadding, 48, 140, 88);
+  // Style directions (Taste Skill): more room for minimal and soft looks.
+  const sectionY = Math.round(sectionYBase * (style === "minimal" ? 1.2 : style === "soft" ? 1.3 : 1));
   const container = clamp(shape?.container, 960, 1320, 1140);
   const btnRadiusRaw = shape?.button?.radius;
-  const btnRadius = btnRadiusRaw != null && btnRadiusRaw >= 40 ? 999 : clamp(btnRadiusRaw, 0, 32, 10);
+  const btnRadiusShape = btnRadiusRaw != null && btnRadiusRaw >= 40 ? 999 : clamp(btnRadiusRaw, 0, 32, 10);
+  const btnRadius = style === "minimal" ? 6 : style === "soft" ? 999 : style === "brutalist" ? 0 : btnRadiusShape;
   const btnPadY = clamp(shape?.button?.paddingY, 10, 22, 14);
   const btnPadX = clamp(shape?.button?.paddingX, 18, 44, 26);
   const btnWeight = clamp(shape?.button?.weight, 500, 800, 600);
   const btnTransform = shape?.button?.transform && shape.button.transform !== "none" ? shape.button.transform : "none";
-  const cardRadius = clamp(shape?.cardRadius, 0, 32, 14);
-  const cardShadow = shape?.cardShadow ?? true;
-  const cardBorder = shape?.cardBorder ?? !cardShadow;
+  const cardRadiusShape = clamp(shape?.cardRadius, 0, 32, 14);
+  const cardRadius =
+    style === "minimal" ? Math.min(cardRadiusShape, 10) : style === "soft" ? Math.max(20, Math.min(28, cardRadiusShape + 8)) : style === "brutalist" ? 0 : cardRadiusShape;
+  const cardShadow = style === "minimal" || style === "brutalist" ? false : style === "soft" ? true : shape?.cardShadow ?? true;
+  const cardBorder = style === "minimal" || style === "brutalist" ? true : style === "soft" ? false : shape?.cardBorder ?? !cardShadow;
   const form = input.formStyle;
-  const inputRadius = form?.inputRadius != null ? (form.inputRadius >= 40 ? 999 : clamp(form.inputRadius, 0, 20, 10)) : Math.min(btnRadius === 999 ? 12 : btnRadius, 14);
+  const inputRadiusShape = form?.inputRadius != null ? (form.inputRadius >= 40 ? 999 : clamp(form.inputRadius, 0, 20, 10)) : Math.min(btnRadius === 999 ? 12 : btnRadius, 14);
+  const inputRadius = style === "minimal" ? 6 : style === "soft" ? 14 : style === "brutalist" ? 0 : inputRadiusShape;
   const inputHeight = clamp(form?.inputHeight, 40, 60, 48);
   const underline = form?.inputBorder === "underline";
   const filled = Boolean(form?.inputFilled);
-  const useGradient = (shape?.gradientBands || 0) > 0;
-  const eyebrowPill = Boolean(shape?.eyebrow?.pill);
+  const useGradient = (shape?.gradientBands || 0) > 0 && style !== "minimal" && style !== "brutalist";
+  const eyebrowPill = Boolean(shape?.eyebrow?.pill) && style !== "brutalist";
 
   const tokens: Record<string, string> = {
     "--primary": primary,
@@ -184,9 +232,36 @@ export function buildDesignSystem(input: {
     "--radius-btn": `${btnRadius}px`,
     "--radius-card": `${cardRadius}px`,
     "--radius-input": `${inputRadius}px`,
-    "--shadow-card": cardShadow ? "0 10px 30px rgba(15, 23, 42, 0.08), 0 2px 6px rgba(15, 23, 42, 0.05)" : "none",
+    // Shadows tinted to the brand hue, never plain black (Taste Skill 4.4).
+    "--shadow-card": !cardShadow
+      ? "none"
+      : style === "soft"
+        ? `0 24px 60px -28px ${mix(primary, "#0F172A", 0.55)}55, 0 2px 8px rgba(15, 23, 42, 0.04)`
+        : `0 10px 30px ${mix(primary, "#0F172A", 0.7)}14, 0 2px 6px rgba(15, 23, 42, 0.05)`,
     "--gap": "24px",
   };
+
+  // Dark and brand-coloured bands get their own readable tokens, so icons,
+  // links, muted text and borders never keep light-background colours there
+  // (the design check's most common finding). Light panels inside those bands
+  // (cards, forms) switch back.
+  const onPrimary = onColor(primary);
+  const bandCss = `/* readable tokens on dark and brand bands */
+.adr-section--dark,.adr-header--dark,.adr-footer--dark{--text-safe:var(--accent-on-dark);--text-muted:${mix("#FFFFFF", dark, 0.1)};--border:rgba(255,255,255,.16)}
+.adr-section--brand,.adr-section--gradient{--text-safe:var(--on-primary);--text-muted:${mix(onPrimary, primary, 0.25)};--border:${mix(onPrimary, primary, 0.7)}}
+.adr-section--dark .adr-icon,.adr-footer--dark .adr-icon{background:rgba(255,255,255,.1);color:var(--text-on-dark)}
+.adr-section--brand :is(.adr-card,.adr-form-panel),.adr-section--gradient :is(.adr-card,.adr-form-panel),.adr-section--dark .adr-form-panel{--text-safe:${textSafe};--text-muted:${mix(text, background, 0.35)};--border:${mix(text, background, 0.86)}}`;
+
+  // Quality floor from Vercel's guidelines and Impeccable: visible keyboard
+  // focus, balanced headings, one-line buttons, 44px targets, reduced motion.
+  const qualityCss = `/* quality floor */
+:where(a,button,input,select,textarea,summary,[tabindex]):focus-visible{outline:3px solid color-mix(in srgb, var(--primary) 65%, transparent);outline-offset:3px}
+h1,h2,h3{text-wrap:balance}
+p,li{text-wrap:pretty}
+.adr-num{font-variant-numeric:tabular-nums}
+.adr-btn,.adr-header-cta{min-height:44px}
+@media (min-width:641px){.adr-btn,.adr-header-cta{white-space:nowrap}}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}`;
 
   const root = Object.entries(tokens)
     .map(([k, v]) => `  ${k}:${v};`)
@@ -246,7 +321,7 @@ ul,ol{margin:0 0 1em;padding-left:1.2em}
 .adr-row{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
 .adr-card{text-align:left;background:var(--bg);color:var(--text);border-radius:var(--radius-card);padding:clamp(20px,2.4vw,32px);box-shadow:var(--shadow-card);${cardBorder ? "border:1px solid var(--border);" : ""}}
 .adr-section--alt .adr-card{background:var(--bg)}
-.adr-section--dark .adr-card{background:color-mix(in srgb, var(--bg-dark) 82%, #fff 18%);color:var(--text-on-dark);box-shadow:none;border:1px solid rgba(255,255,255,.12)}
+.adr-section--dark .adr-card{background:${darkCard};color:var(--text-on-dark);box-shadow:none;border:1px solid rgba(255,255,255,.12)}
 .adr-card h3{margin-bottom:.4em}
 .adr-card p:last-child{margin-bottom:0}
 .adr-icon{width:48px;height:48px;border-radius:12px;display:grid;place-items:center;background:color-mix(in srgb, var(--primary) 14%, transparent);color:var(--text-safe);margin-bottom:16px;font-weight:700}
@@ -336,7 +411,10 @@ img[data-adrival-slot]{display:block;width:100%;height:100%;object-fit:cover}
   .adr-grid--2,.adr-grid--3,.adr-grid--4,.adr-grid--5,.adr-grid--6,.adr-form-grid{grid-template-columns:1fr}
   .adr-container{width:min(100% - 32px, var(--container))}
   .adr-btn{width:100%}
-}`;
+}
+${bandCss}
+${qualityCss}
+${styleCss(style)}`;
 
   const vocabulary = `CLASS SYSTEM (already defined in the page stylesheet — use these; do not restyle them):
 - Section wrapper: <section class="adr-section [adr-section--alt|--wash|--dark|--brand|--gradient|--tight] [adr-center]" data-section-id="…"><div class="adr-container">…</div></section>
@@ -355,5 +433,7 @@ RULES: no <style> blocks for colours, fonts, font sizes, buttons or cards. Only 
     fontLinks: families.map(googleFontLink),
     vocabulary,
     tokens,
+    families: { heading: headingFamily, body: bodyFamily },
+    style,
   };
 }

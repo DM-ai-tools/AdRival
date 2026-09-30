@@ -1057,7 +1057,17 @@ export interface RecreatedLandingPage {
     form: { expected: number; found: number; inPlace: boolean } | null;
     repairedSections: string[];
     capture: { sections: number; forms: number; screenshots: number };
+    /** Design check (Impeccable engine + Vercel guidelines) on the finished page. */
+    designCheck?: {
+      engine: "impeccable" | "unavailable";
+      foundBefore: number;
+      autoFixed: string[];
+      polishedSections: string[];
+      remaining: Array<{ rule: string; name: string; sectionId: string | null; action: "repair" | "report" }>;
+    } | null;
   } | null;
+  /** Style direction chosen for this recreation (see skills/recreate). */
+  styleDirection?: "brand" | "minimal" | "soft" | "brutalist" | null;
   /** Live progress while content/design is running (polled by UI) */
   progress?: {
     phase: string;

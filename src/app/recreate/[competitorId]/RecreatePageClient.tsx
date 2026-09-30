@@ -17,6 +17,16 @@ import { readReturnPath, returnLabel } from "@/lib/returnTo";
 
 type Brand = { businessUrl: string | null; businessName: string | null };
 
+type StyleDirection = "brand" | "minimal" | "soft" | "brutalist";
+
+/** Style directions from Taste Skill (skills/recreate). */
+const STYLE_OPTIONS: Array<{ id: StyleDirection; label: string; hint: string }> = [
+  { id: "brand", label: "Match the brand", hint: "The client's look, the competitor's layout." },
+  { id: "minimal", label: "Minimal", hint: "Flat, airy, hairline borders, colour used sparingly." },
+  { id: "soft", label: "High-end soft", hint: "Large rounded cards, soft shadows, lots of space." },
+  { id: "brutalist", label: "Bold / brutalist", hint: "Square corners, solid rules, heavy headlines." },
+];
+
 const LOOKUP_RECREATE_PREFIX = "lookup-recreate-";
 
 /** Where Back goes when the page was opened without a ?back= (old links, bookmarks). */
@@ -30,6 +40,56 @@ function defaultReturnPath(runId: string | undefined): string {
 
 function hostOf(url: string | null | undefined): string {
   return String(url || "").replace(/^https?:\/\//i, "").replace(/^www\./i, "").replace(/\/$/, "");
+}
+
+function downloadText(text: string, filename: string) {
+  const blob = new Blob([text], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+type DesignCheckResult = NonNullable<NonNullable<RecreatedLandingPage["qualityReport"]>["designCheck"]>;
+
+/** What the design check (Impeccable + Vercel guidelines) found and fixed. */
+function DesignCheckDetails({ check }: { check: DesignCheckResult }) {
+  const open = check.remaining.filter((f) => f.action === "repair");
+  const brand = check.remaining.filter((f) => f.action === "report");
+  const fixedCount = check.autoFixed.length + check.polishedSections.length;
+  const where = (id: string | null) => (id ? `section ${id.replace("sec-", "")}` : "header or footer");
+  return (
+    <details className="recreate-quality">
+      <summary>
+        Design check:{" "}
+        <strong>{open.length ? `${open.length} issue${open.length === 1 ? "" : "s"} to review` : "no open issues"}</strong>
+        {fixedCount ? ` · ${fixedCount} fix${fixedCount === 1 ? "" : "es"} applied` : ""}
+        {check.engine === "unavailable" ? " · basic checks only" : ""}
+      </summary>
+      <ul>
+        {check.autoFixed.map((line) => (
+          <li key={line}>Fixed automatically: {line}.</li>
+        ))}
+        {check.polishedSections.length ? (
+          <li>Polished after the check: section {check.polishedSections.map((id) => id.replace("sec-", "")).join(", ")}.</li>
+        ) : null}
+        {open.map((f, i) => (
+          <li key={`o-${i}`}>
+            To review in {where(f.sectionId)}: {f.name}.
+          </li>
+        ))}
+        {brand.map((f, i) => (
+          <li key={`b-${i}`} className="muted">
+            From the brand or stylesheet (left as is): {f.name}.
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
 }
 
 export function RecreatePageClient({ competitorId }: { competitorId: string }) {
@@ -65,6 +125,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
   const [websiteDraft, setWebsiteDraft] = useState("");
   const [savingWebsite, setSavingWebsite] = useState(false);
   const [returnPath, setReturnPath] = useState<string | null>(null);
+  const [styleDirection, setStyleDirection] = useState<StyleDirection>("brand");
 
   useEffect(() => {
     setReturnPath(readReturnPath());
@@ -87,6 +148,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
       setContentFeedback(nextPage.contentDraft.userFeedback);
     }
     if (nextPage?.userFeedback) setDesignFeedback(nextPage.userFeedback);
+    if (nextPage?.styleDirection) setStyleDirection(nextPage.styleDirection);
     if (nextPage?.error?.startsWith("SOURCE_INCOMPLETE")) {
       setError(`${nextPage.error.replace(/^SOURCE_INCOMPLETE:\s*/, "")} Retry capture from Recreate content. A replacement draft was not generated.`);
     } else if (nextPage?.status === "failed" && nextPage.error) {
@@ -136,6 +198,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
             competitorId,
             action: force ? "regenerate_page" : "generate_page",
             force,
+            styleDirection,
             userFeedback:
               [contentFeedback.trim(), designFeedback.trim()].filter(Boolean).join("\n") ||
               undefined,
@@ -153,7 +216,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
         setGenerating(false);
       }
     },
-    [competitorId, contentFeedback, designFeedback, syncFromPage],
+    [competitorId, contentFeedback, designFeedback, styleDirection, syncFromPage],
   );
 
   const saveWebsite = useCallback(async () => {
@@ -263,6 +326,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
         body: JSON.stringify({
           competitorId,
           action: "regenerate_design",
+          styleDirection,
           // Keep latest content edits without re-running content generation
           blocks: blocks.length ? blocks : undefined,
           userFeedback: designFeedback.trim() || undefined,
@@ -279,7 +343,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     } finally {
       setBuilding(false);
     }
-  }, [blocks, competitorId, designFeedback, syncFromPage]);
+  }, [blocks, competitorId, designFeedback, styleDirection, syncFromPage]);
 
   const requestRegenerateDesign = useCallback(() => {
     if (page?.status === "completed" && page.html) {
@@ -890,6 +954,28 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
             </>
           )}
 
+          <fieldset className="recreate-style" disabled={!canEdit}>
+            <legend className="recreate-feedback-label">Look of the page</legend>
+            <div className="recreate-style-options">
+              {STYLE_OPTIONS.map((option) => (
+                <label key={option.id} className={`recreate-style-option${styleDirection === option.id ? " is-active" : ""}`}>
+                  <input
+                    type="radio"
+                    name="recreate-style"
+                    value={option.id}
+                    checked={styleDirection === option.id}
+                    onChange={() => setStyleDirection(option.id)}
+                  />
+                  <strong>
+                    {option.label}
+                    {option.id === "brand" ? <span className="muted"> (recommended)</span> : null}
+                  </strong>
+                  <span className="muted">{option.hint}</span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+
           <div className="recreate-start-actions">
             <button
               type="button"
@@ -909,6 +995,28 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
 
       {!showStart ? (
       <section className="recreate-feedback panel">
+        <div className="recreate-style-row">
+          <label htmlFor="recreate-style-select" className="recreate-feedback-label">
+            Look of the page
+          </label>
+          <select
+            id="recreate-style-select"
+            value={styleDirection}
+            disabled={busy || !canEdit}
+            onChange={(e) => setStyleDirection(e.target.value as StyleDirection)}
+          >
+            {STYLE_OPTIONS.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          {page?.html && styleDirection !== (page.styleDirection || "brand") ? (
+            <span className="muted">Press “Regenerate page” to rebuild it in this style.</span>
+          ) : (
+            <span className="muted">{STYLE_OPTIONS.find((o) => o.id === styleDirection)?.hint}</span>
+          )}
+        </div>
         <div className="recreate-feedback-grid">
           <div className="recreate-feedback-col">
             <label
@@ -1022,8 +1130,11 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
             Advanced: the brand style file used for this page
           </summary>
           <p className="muted recreate-feedback-hint">
-            Generated from your brand website. Competitor pages supply layout
-            only — colors, fonts, logos, and button styles come from this file.
+            The colours, fonts, spacing and components this page was built with, as a DESIGN.md file a developer or
+            another design tool can reuse. Competitor pages supply the layout only.{" "}
+            <button type="button" className="link-btn" onClick={() => downloadText(page.designMd || "", "DESIGN.md")}>
+              Download DESIGN.md
+            </button>
           </p>
           <pre className="recreate-design-md-body">{page.designMd}</pre>
         </details>
@@ -1103,6 +1214,9 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
             ) : null}
           </ul>
         </details>
+      ) : null}
+      {page?.status === "completed" && page.qualityReport?.designCheck && view === "design" ? (
+        <DesignCheckDetails check={page.qualityReport.designCheck} />
       ) : null}
       {page?.sourceArchive && view === "content" ? (
         <p className="muted recreate-palette-note">

@@ -6,6 +6,7 @@ import { clampTokens, streamUnifiedMessage, textFromMessage, type ContentPart, t
 import { FORM_SLOT_ATTR, LEAD_FORM_SCRIPT, buildLeadFormHtml, type LeadFormCopy } from "./leadForm";
 import type { CompetitorFormField } from "./recreateChrome";
 import { mergeSectionStyles, sanitizeFragment } from "./fragmentCss";
+import { repairGuide } from "../skills/playbook";
 
 /**
  * Blueprint generation: the page is written section by section from the
@@ -66,6 +67,16 @@ export type BlueprintGenerationInput = {
   form: BlueprintForm | null;
   imageBudget: number;
   userFeedback?: string | null;
+  /**
+   * Per-run design context from the skills: the chosen style direction's
+   * rules and the client's industry guide (UI UX Pro Max). The fixed rules
+   * are in the cached system prompt.
+   */
+  designDirection?: {
+    style: string;
+    styleRules: string | null;
+    industry: Record<string, string> | null;
+  } | null;
   signal?: AbortSignal;
   onProgress?: (info: UnifiedProgressInfo) => void;
 };
@@ -303,6 +314,7 @@ export async function generateBlueprintPage(input: BlueprintGenerationInput): Pr
     campaignOffer: input.campaignOffer,
     classSystem: design.vocabulary,
     userFeedback: input.userFeedback || null,
+    designDirection: input.designDirection || null,
   };
 
   // ——— Header + hero + footer ———
@@ -642,6 +654,7 @@ export async function regenerateBlueprintSection(input: BlueprintGenerationInput
       client: clientBrief(input),
       campaignOffer: input.campaignOffer,
       classSystem: input.design.vocabulary,
+      designDirection: input.designDirection || null,
       clientFacts: input.clientFacts.slice(0, 12),
       section: sectionSpec(input.section, slots, input.form),
       outputContract: `{ "sections": [{ "id": "${input.section.id}", "html": "<section …>…</section>", "imageSlots": [] }] }`,
@@ -660,4 +673,51 @@ export async function regenerateBlueprintSection(input: BlueprintGenerationInput
   if (!/<section[\s>]/i.test(html)) return null;
   const cleaned = sanitizeFragment(html, input.section.id);
   return { html: cleaned.html, css: cleaned.css, imageSlots: slotsFrom(row?.imageSlots, slots, input.section.id) };
+}
+
+/**
+ * Fix design-check findings in one section (Impeccable polish): same layout,
+ * same content, only the listed problems changed.
+ */
+export async function polishBlueprintSection(input: {
+  section: BlueprintSection;
+  sectionHtml: string;
+  findings: string[];
+  classSystem: string;
+  designDirection?: BlueprintGenerationInput["designDirection"];
+  signal?: AbortSignal;
+  onProgress?: (info: UnifiedProgressInfo) => void;
+}): Promise<{ html: string; css: string } | null> {
+  const held = holdForm(input.sectionHtml);
+  const parts: ContentPart[] = [];
+  if (input.section.crop) parts.push(imagePart(input.section.crop));
+  parts.push({
+    type: "text",
+    text: JSON.stringify({
+      task: `Polish section ${input.section.id}. A design check found the problems listed below.`,
+      instructions: repairGuide(),
+      findings: input.findings,
+      image: input.section.crop ? "Image 1: the competitor section this layout follows (layout reference only)." : null,
+      classSystem: input.classSystem,
+      designDirection: input.designDirection || null,
+      sectionHtml: held.html,
+      outputContract: `{ "html": "the same <section …>…</section> with the findings fixed" }`,
+    }),
+  });
+  const result = await runJson({
+    content: parts,
+    maxTokens: Math.min(14_000, 3_000 + Math.ceil(held.html.length / 2.5)),
+    label: `Polishing section ${input.section.order + 1}`,
+    pass: "polish",
+    signal: input.signal,
+    onProgress: input.onProgress,
+  });
+  const html = typeof result.json?.html === "string" ? result.json.html : "";
+  if (!/<section[\s>]/i.test(html)) return null;
+  // A polish keeps the structure; reject rewrites that rebuilt the section.
+  const tags = (h: string) => (h.match(/<[a-z][a-z0-9]*\b/gi) || []).length;
+  const before = tags(held.html);
+  if (Math.abs(tags(html) - before) > Math.max(6, before * 0.25)) return null;
+  const cleaned = sanitizeFragment(html, input.section.id);
+  return { html: held.restore(cleaned.html), css: cleaned.css };
 }

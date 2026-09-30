@@ -41,6 +41,9 @@ import {
   type CompetitorBlueprint,
 } from "./blueprint";
 import { buildFromBlueprint } from "./blueprintRun";
+import { matchIndustry } from "../skills/industry";
+import { applyDesignFixes, runDesignCheck } from "../skills/designAudit";
+import type { StyleDirection } from "../skills/playbook";
 import {
   beginUnifiedAbort,
   endUnifiedAbort,
@@ -272,6 +275,15 @@ function persist(
   return next;
 }
 
+/** Review notes for design-check findings a rewrite could still fix. */
+function designCheckNotes(check: { remaining: Array<{ action: string; sectionId: string | null; name: string }> } | null): string[] {
+  if (!check) return [];
+  const open = check.remaining.filter((f) => f.action === "repair");
+  if (!open.length) return [];
+  const names = [...new Set(open.map((f) => f.name.toLowerCase()))].slice(0, 3).join(", ");
+  return [`Design check: ${open.length} issue${open.length === 1 ? "" : "s"} to review (${names}).`];
+}
+
 function basePage(input: {
   competitor: CompetitorRecord;
   job: SearchJob;
@@ -371,10 +383,12 @@ export function stopUnifiedRecreation(
 /** Unified recreate: capture → brief → Anthropic content+HTML → images → validate. */
 export async function runUnifiedRecreation(
   competitorId: string,
-  options: { force?: boolean; userFeedback?: string | null } = {},
+  options: { force?: boolean; userFeedback?: string | null; styleDirection?: StyleDirection | null } = {},
 ): Promise<CompetitorRecord> {
   const competitor = getCompetitor(competitorId);
   if (!competitor) throw new Error("Competitor not found");
+  // A rerun keeps the style chosen last time unless a new one is given.
+  const styleDirection: StyleDirection = options.styleDirection || competitor.recreatedPage?.styleDirection || "brand";
   if (competitor.pageAnalysis?.status !== "completed") {
     throw new Error("Analyze the competitor landing page first (Get offer & page details).");
   }
@@ -786,12 +800,20 @@ export async function runUnifiedRecreation(
         proofLogos,
         previousImages: page.generatedImages || [],
         userFeedback: options.userFeedback || null,
+        style: styleDirection,
+        industry: matchIndustry({
+          industry: profile.industry,
+          subIndustry: profile.subIndustry,
+          offerings: profile.offerings,
+          keyword,
+          description: profile.description,
+        }),
         signal: abortSignal,
         onProgress: (message) => {
           if (abortSignal.aborted) return;
           const phase: UnifiedStageId = /image/i.test(message)
             ? "generating_images"
-            : /compar|refin/i.test(message)
+            : /compar|refin|checking the design|polish/i.test(message)
               ? "checking"
               : "creating_page";
           if (phase === "generating_images") {
@@ -814,6 +836,7 @@ export async function runUnifiedRecreation(
         ...(placeholders ? ["Page ready with image placeholders. Generate missing images when credits allow."] : []),
         ...(report && report.score < 0.8 ? report.summary : []),
         ...(report?.content.copiedSentences.length ? [`Rewrite ${report.content.copiedSentences.length} sentence(s) copied from the competitor.`] : []),
+        ...designCheckNotes(built.designCheck),
       ];
       stages = markStage(stages, "creating_page", "done");
       stages = markStage(stages, "generating_images", "done", `${built.imageReport.completed}/${built.imageReport.planned} images`);
@@ -831,6 +854,8 @@ export async function runUnifiedRecreation(
           publishReady: !placeholders && publishBlockers.length === 0,
           publishBlockers: publishBlockers.slice(0, 12),
           pipelineVersion: UNIFIED_PIPELINE_VERSION,
+          styleDirection,
+          designMd: built.designMd,
           qualityReport: report
             ? {
                 score: report.score,
@@ -843,6 +868,7 @@ export async function runUnifiedRecreation(
                   forms: blueprint.forms.length,
                   screenshots: blueprint.sections.filter((s) => s.crop).length,
                 },
+                designCheck: built.designCheck,
               }
             : null,
           error: null,
@@ -1299,12 +1325,21 @@ export async function runUnifiedRecreation(
     }
 
     salvageHtml = validated.html || html;
+    // Design check on the simpler rebuild too: free fixes, findings reported only.
+    let fallbackCheck: Awaited<ReturnType<typeof runDesignCheck>> | null = null;
+    try {
+      validated = { ...validated, html: applyDesignFixes(validated.html).html };
+      fallbackCheck = await runDesignCheck(validated.html);
+    } catch {
+      fallbackCheck = null;
+    }
     const placeholders = imageReport.placeholders > 0;
     const publishBlockers = [
       ...(captureFallbackNote ? [captureFallbackNote] : []),
       ...generated.response.unresolvedRequirements,
       ...(placeholders ? ["Page ready with image placeholders. Generate missing images when credits allow."] : []),
       ...validated.warnings,
+      ...(fallbackCheck ? designCheckNotes({ remaining: fallbackCheck.findings }) : []),
     ];
     stages = markStage(stages, "checking", "done");
     stages = markStage(stages, "ready", "done");
@@ -1324,6 +1359,7 @@ export async function runUnifiedRecreation(
         publishReady: !placeholders && publishBlockers.length === 0,
         publishBlockers,
         pipelineVersion: UNIFIED_PIPELINE_VERSION,
+        styleDirection,
         error: null,
         userFeedback: options.userFeedback || page.userFeedback || null,
       },

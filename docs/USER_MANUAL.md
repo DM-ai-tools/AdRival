@@ -381,7 +381,14 @@ The page first explains what will be made:
 
 1. If the search was run without your client’s website, enter it here and press **Save website**. It is saved on the search, so you only enter it once.
 2. Optionally, type instructions in **Anything to change?**, such as “lead with the free consultation, softer tone”.
-3. Press **Create my page**. It takes a few minutes. A progress bar shows each step, and **Stop** halts it.
+3. Pick the **Look of the page**:
+   - **Match the brand** (recommended): the client's own look on the competitor's layout.
+   - **Minimal**: flat, airy, thin borders, colour used sparingly.
+   - **High-end soft**: large rounded cards, soft shadows, lots of space.
+   - **Bold / brutalist**: square corners, solid lines, heavy headlines.
+
+   The layout still follows the competitor and the colours stay the client's; the style changes spacing, corners, shadows and type.
+4. Press **Create my page**. It takes a few minutes. A progress bar shows each step, and **Stop** halts it.
 
 If an earlier attempt failed, the same button says **Try again**.
 
@@ -394,8 +401,10 @@ If an earlier attempt failed, the same button says **Try again**.
 
   Both replace the current version, so the app asks you to confirm first.
 - **Before you publish.** The notes above the preview say whether the page is ready to publish, or list what to check first. **Match with the competitor page** shows how closely each section follows the original.
+- **Design check.** Every page is checked against 61 design-quality rules (contrast, text size, labels, generated-looking patterns) and web accessibility guidelines. Small problems are fixed automatically; up to three sections with bigger problems are polished once more, and kept only if they come out cleaner and still match the competitor. **Design check** under the preview lists what was fixed, what is left to review, and what comes from the client's brand (for example a very common font), which is left as it is.
+- **Changing the look.** **Look of the page** above the feedback boxes switches the style; press **Regenerate page** to rebuild in it.
 - **Colours.** The colour row shows the palette taken from your client’s site. **Re-analyze brand colors** reads the site again, and **Apply colors to design** rebuilds the page with the new colours.
-- **Advanced: the brand style file used for this page** lists the colours, fonts and button styles taken from your client’s site.
+- **Advanced: the brand style file used for this page** lists the colours, fonts, spacing and components the page was built with, as a DESIGN.md file. **Download DESIGN.md** saves it for a developer or another design tool.
 
 ### Generated images
 

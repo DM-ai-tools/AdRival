@@ -9,6 +9,9 @@ COPY scripts ./scripts
 # Browsers are installed once in the runner, outside the Railway /app/data volume.
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 RUN npm ci
+# The Impeccable engine is an optional platform package; keep the folder even
+# if it was skipped so the runner COPY below cannot fail the build.
+RUN mkdir -p node_modules/@impeccable
 
 # ---- Build ----
 FROM node:22-bookworm-slim AS builder
@@ -48,6 +51,11 @@ COPY --chown=nextjs:nodejs scripts/start.sh ./start.sh
 # Playwright is externalized. Copy it even if the standalone trace misses a nested file.
 COPY --from=builder /app/node_modules/playwright ./node_modules/playwright
 COPY --from=builder /app/node_modules/playwright-core ./node_modules/playwright-core
+# Design skills for landing-page recreation, and Impeccable's detector engine
+# (a platform binary the design check runs; the standalone trace cannot see it).
+COPY --from=builder --chown=nextjs:nodejs /app/skills ./skills
+COPY --from=builder /app/node_modules/@impeccable ./node_modules/@impeccable
+RUN chmod a+rx node_modules/@impeccable/*/bin/impeccable 2>/dev/null || true
 
 # Chromium lives outside /app/data so a Railway volume cannot hide it.
 RUN node node_modules/playwright/cli.js install --with-deps chromium \

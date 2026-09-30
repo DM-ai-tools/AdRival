@@ -1,4 +1,5 @@
 import { getAnthropicClient, getAnthropicModel } from "../../anthropic/client";
+import { designPlaybook } from "../skills/playbook";
 import {
   assembleUnifiedHtml,
   parseBodyBatch,
@@ -84,11 +85,23 @@ export async function streamUnifiedMessage(input: {
     throw err;
   }
   const client = getAnthropicClient();
+  // The role and the design playbook are the same for every call, so they are
+  // cached: after the first call of a run they are read from the prompt cache.
+  const playbook = designPlaybook();
+  const system = [
+    {
+      type: "text" as const,
+      text: playbook ? `${input.system || SYSTEM}
+
+${playbook}` : input.system || SYSTEM,
+      cache_control: { type: "ephemeral" as const },
+    },
+  ];
   const stream = client.messages.stream(
     {
       model: input.model,
       max_tokens: input.maxTokens,
-      system: input.system || SYSTEM,
+      system,
       messages: [{ role: "user", content: input.content }],
     },
     input.signal ? { signal: input.signal } : undefined,

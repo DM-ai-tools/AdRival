@@ -10,6 +10,7 @@ import { fidelityReport, measureRenderedPage, replaceSection, type FidelityRepor
 import {
   generateBlueprintPage,
   holdForm,
+  polishBlueprintSection,
   regenerateBlueprintSection,
   rewordBlueprintSection,
   swapCtaLabels,
@@ -20,6 +21,10 @@ import { executeImageSlots } from "./images";
 import { LEAD_FORM_ID } from "./leadForm";
 import { buildRecreateChromeLinks, scrubOffTopicChromeHtml, type CompetitorFormSpec } from "./recreateChrome";
 import { ensurePageChrome, injectIdentityLogo, injectProofLogos, validateAndPackageUnifiedPage } from "./validate";
+import { applyDesignFixes, findingsForPrompt, repairableCount, runDesignCheck, type DesignCheck } from "../skills/designAudit";
+import { designSystemToDesignMd } from "../skills/designMd";
+import { industryBrief, type IndustryGuide } from "../skills/industry";
+import { styleGuide, type StyleDirection } from "../skills/playbook";
 
 const NAV_LABEL: Partial<Record<SectionKind, string>> = {
   features: "Services",
@@ -32,6 +37,8 @@ const NAV_LABEL: Partial<Record<SectionKind, string>> = {
 };
 
 const MAX_REPAIRS = 4;
+/** Sections polished after the design check (one Claude call each). */
+const MAX_DESIGN_POLISH = 3;
 
 /** The competitor's CTA wording, wherever it appears (header, campaign, form, buttons). */
 function competitorCtaLabels(
@@ -156,6 +163,18 @@ export type BlueprintBuildResult = {
   unresolved: string[];
   report: FidelityReport | null;
   repairedSections: string[];
+  designCheck: DesignCheckSummary | null;
+  /** The page's style file (awesome-design-md format). */
+  designMd: string;
+};
+
+export type DesignCheckSummary = {
+  engine: DesignCheck["engine"];
+  /** Issues left: "repair" ones a rewrite could fix, "report" ones set by the brand or stylesheet. */
+  remaining: Array<{ rule: string; name: string; sectionId: string | null; action: "repair" | "report" }>;
+  foundBefore: number;
+  autoFixed: string[];
+  polishedSections: string[];
 };
 
 export async function buildFromBlueprint(input: {
@@ -177,16 +196,21 @@ export async function buildFromBlueprint(input: {
   proofLogos: Array<{ src: string; alt: string }>;
   previousImages: GeneratedLandingImage[];
   userFeedback: string | null;
+  style?: StyleDirection | null;
+  industry?: IndustryGuide | null;
   signal?: AbortSignal;
   onProgress: (message: string, info?: UnifiedProgressInfo) => void;
 }): Promise<BlueprintBuildResult> {
   const { blueprint } = input;
   const form = primaryBlueprintForm(blueprint);
+  const style: StyleDirection = input.style || "brand";
   const design = buildDesignSystem({
     shape: blueprint.shape,
     colors: input.colors,
     brandDesign: input.brandDesign,
     formStyle: form?.style || null,
+    industryFonts: input.industry?.fonts || null,
+    style,
   });
   const offer = input.campaignOffer as { headline?: string | null; primaryOffer?: string | null; cta?: string | null } | null;
   const destinations = blueprintDestinations({
@@ -217,6 +241,11 @@ export async function buildFromBlueprint(input: {
     form,
     imageBudget: plannedImages,
     userFeedback: input.userFeedback,
+    designDirection: {
+      style,
+      styleRules: styleGuide(style),
+      industry: industryBrief(input.industry || null),
+    },
     signal: input.signal,
     onProgress: (info) => input.onProgress(info.label, info),
   };
@@ -440,5 +469,101 @@ export async function buildFromBlueprint(input: {
     warnings.push(`The comparison with the competitor could not run: ${(err instanceof Error ? err.message : String(err)).slice(0, 140)}`);
   }
 
-  return { html, imageReport, warnings, unresolved, report, repairedSections };
+  // ——— Design check (Impeccable + Vercel guidelines), then polish ———
+  let designCheck: DesignCheckSummary | null = null;
+  try {
+    input.onProgress("Checking the design…");
+    const fixes = applyDesignFixes(html);
+    html = fixes.html;
+    let check = await runDesignCheck(html);
+    const foundBefore = check.findings.length;
+    const polished: string[] = [];
+    const worst = Object.entries(check.repairable)
+      .sort((a, b) => b[1].length - a[1].length)
+      .slice(0, MAX_DESIGN_POLISH);
+    if (worst.length && !input.signal?.aborted) {
+      input.onProgress(`Polishing ${worst.length} section${worst.length === 1 ? "" : "s"} flagged by the design check…`);
+      const sectionOf = (h: string, id: string) => {
+        const $ = cheerio.load(h);
+        return $.html($(`section[data-section-id="${id}"]`).first()) || "";
+      };
+      const results = await Promise.all(
+        worst.map(async ([id, list]) => {
+          const section = blueprint.sections.find((s) => s.id === id);
+          const current = sectionOf(html, id);
+          if (!section || !current) return null;
+          try {
+            const next = await polishBlueprintSection({
+              section,
+              sectionHtml: current,
+              findings: findingsForPrompt(list),
+              classSystem: design.vocabulary,
+              designDirection: genInput.designDirection,
+              signal: input.signal,
+            });
+            return next ? { id, ...next } : null;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      const rows = results.filter((r): r is NonNullable<typeof r> => Boolean(r));
+      if (rows.length) {
+        const withCss = (h: string, list: typeof rows) => {
+          const css = list.filter((r) => r.css).map((r) => `/* ${r.id} (polished) */\n${r.css}`);
+          return css.length ? h.replace(/<\/style>/i, `${css.join("\n")}\n</style>`) : h;
+        };
+        const place = (h: string, list: typeof rows) => {
+          let next = h;
+          for (const row of list) next = replaceSection(next, row.id, row.html.replace(/<section\b(?![^>]*\bid=)/i, `<section id="${row.id}"`));
+          return applyDesignFixes(logos(withCss(next, list))).html;
+        };
+        const trial = place(html, rows);
+        const after = await runDesignCheck(trial);
+        // Keep a polished section only if it has fewer findings than before.
+        const cleaner = rows.filter((r) => repairableCount(after, r.id) < repairableCount(check, r.id));
+        if (cleaner.length) {
+          const accepted = cleaner.length === rows.length ? trial : place(html, cleaner);
+          // …and only if the page still matches the competitor as well as it did.
+          let keep = true;
+          if (report) {
+            const measured = await fidelityReport({
+              blueprint,
+              measured: await measureRenderedPage(accepted),
+              html: accepted,
+              competitorName: input.competitorName,
+              expectedFormSection: form?.sectionId || null,
+              expectedFormFields,
+            });
+            keep = measured.score >= report.score - 0.02;
+            if (keep) report = measured;
+          }
+          if (keep) {
+            html = accepted;
+            check = await runDesignCheck(html);
+            polished.push(...cleaner.map((r) => r.id));
+          }
+        }
+      }
+    }
+    designCheck = {
+      engine: check.engine,
+      remaining: check.findings.map((f) => ({ rule: f.rule, name: f.name, sectionId: f.sectionId, action: f.action })),
+      foundBefore,
+      autoFixed: fixes.fixed,
+      polishedSections: polished,
+    };
+  } catch (err) {
+    warnings.push(`The design check could not run: ${(err instanceof Error ? err.message : String(err)).slice(0, 140)}`);
+  }
+
+  const designMd = designSystemToDesignMd({
+    design,
+    clientName: input.clientName,
+    clientUrl: input.clientUrl,
+    competitorName: input.competitorName,
+    industry: input.industry?.productType || null,
+  });
+
+  return { html, imageReport, warnings, unresolved, report, repairedSections, designCheck, designMd };
 }

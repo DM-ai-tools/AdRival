@@ -31,6 +31,7 @@ import { draftIsCurrent } from "@/lib/pipeline/content/pageIntent";
 import type { CanonicalContent } from "@/lib/pipeline/content/model";
 import { ContentRevisionError } from "@/lib/pipeline/content/revisions";
 import { sanitizeClientFacingText, maskRecreatedPage, maskPageAnalysis } from "@/lib/clientFacing";
+import { isStyleDirection } from "@/lib/pipeline/skills/playbook";
 
 export const runtime = "nodejs";
 /** Landing HTML streams can take well past 10 minutes. */
@@ -102,6 +103,9 @@ export async function POST(request: Request) {
         : "";
 
     const action = String(body.action || "generate_content").trim();
+    // Look for the page: match the brand (default), minimal, soft or brutalist.
+    const styleDirection = isStyleDirection(body.styleDirection) ? body.styleDirection : undefined;
+    const styleChanged = Boolean(styleDirection && styleDirection !== (existing.recreatedPage?.styleDirection || "brand"));
 
     // save_content only rewrites stored copy, so it needs edit rather than run.
     resolveProjectAccess(
@@ -163,6 +167,7 @@ export async function POST(request: Request) {
       (action === "generate_content" || action === "generate_page") &&
       !body.force &&
       !userFeedback &&
+      !styleChanged &&
       existing.recreatedPage?.pipelineVersion?.startsWith("unified") &&
       existing.recreatedPage.status === "completed" &&
       existing.recreatedPage.html
@@ -333,6 +338,7 @@ export async function POST(request: Request) {
         runUnifiedRecreation(competitorId, {
           force: true,
           userFeedback: userFeedback || undefined,
+          styleDirection,
         }),
       );
       return NextResponse.json({ competitor: maskCompetitor(competitor), cached: false });
@@ -344,9 +350,11 @@ export async function POST(request: Request) {
         force:
           Boolean(body.force) ||
           Boolean(userFeedback) ||
+          styleChanged ||
           action === "regenerate_content" ||
           action === "regenerate_page",
         userFeedback: userFeedback || undefined,
+        styleDirection,
       }),
     );
     return NextResponse.json({ competitor: maskCompetitor(competitor), cached: false });
