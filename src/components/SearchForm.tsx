@@ -409,7 +409,7 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
                 onChange={() => setGuardrailChoice("skip")}
                 disabled={disabled || loading}
               />
-              <span>Skip all guardrails</span>
+              <span>Skip all industry rules</span>
             </label>
           </div>
           {guardrailChoice === "override" && (

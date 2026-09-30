@@ -55,6 +55,21 @@ type ResultsView = "website" | "preview" | "brand" | "offers";
 /** sessionStorage key for the last screen, restored when landing on a bare "/". */
 const LAST_VIEW_KEY = "adrival:lastView";
 
+/** The address parts this page owns; dashboards add their own (DASHBOARD_PARAMS). */
+const PAGE_PARAMS = ["mode", "run", "tab", "lookup", "item"] as const;
+const DASHBOARD_PARAMS = ["osec", "offer", "ldash"] as const;
+
+function pageParams(params: URLSearchParams): URLSearchParams {
+  const out = new URLSearchParams();
+  for (const key of PAGE_PARAMS) {
+    const value = params.get(key);
+    if (value) out.set(key, value);
+  }
+  // Sorted, like the address this page writes, so the two compare equal.
+  out.sort();
+  return out;
+}
+
 export default function HomePage() {
   const [platform, setPlatform] = useState<AdPlatform>("facebook");
   const [mode, setMode] = useState<Mode>("search");
@@ -552,7 +567,7 @@ export default function HomePage() {
       setLookupAds([]);
     }
     pendingHistoryItem.current = params.get("item");
-    lastPushed.current = params.toString();
+    lastPushed.current = pageParams(params).toString();
     // If some of the address could not be applied (e.g. a tab with no run),
     // stop waiting for the state to match it.
     window.setTimeout(() => {
@@ -591,6 +606,7 @@ export default function HomePage() {
       params.set("item", pendingHistoryItem.current);
       if (pendingHistoryTab.current) params.set("tab", pendingHistoryTab.current);
     }
+    params.sort();
     const next = params.toString();
     // While a restored address is still being applied, the state lags behind
     // it; don't write the old state over the address.
@@ -621,7 +637,18 @@ export default function HomePage() {
       prev.get("run") === params.get("run") &&
       prev.get("lookup") === params.get("lookup");
     if (sameScreen) {
-      window.history.replaceState(null, "", `?${next}`);
+      // A dashboard's own place (?osec=, ?offer=) stays while the tab does.
+      let url = next;
+      if (prev.get("tab") === params.get("tab")) {
+        const current = new URLSearchParams(window.location.search);
+        const kept = new URLSearchParams(next);
+        for (const key of DASHBOARD_PARAMS) {
+          const value = current.get(key);
+          if (value) kept.set(key, value);
+        }
+        url = kept.toString();
+      }
+      window.history.replaceState(null, "", `?${url}`);
     } else {
       window.history.pushState(null, "", `?${next}`);
     }

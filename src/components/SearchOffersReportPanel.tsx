@@ -11,6 +11,7 @@ import type {
 } from "@/lib/types";
 import { visibleOfferLadders } from "./OfferLadderFlow";
 import { OfferWorkspace } from "./OfferWorkspace";
+import { offerKey, parseOfferKey, readUrlParam, writeUrlParams } from "@/lib/urlState";
 import { OfferInsights } from "./OfferInsights";
 import {
   offerFitsSearchedService,
@@ -498,6 +499,9 @@ const SECTION_EXPORT_LABEL: Record<"insights" | "ads" | "pages" | "creatives" | 
   ladders: "offer ladders",
 };
 
+const DASH_SECTIONS = ["insights", "ads", "pages", "creatives", "ladders"] as const;
+type DashSection = (typeof DASH_SECTIONS)[number];
+
 export function SearchOffersDashboard({
   job,
 }: {
@@ -506,9 +510,7 @@ export function SearchOffersDashboard({
   const report = job.offersReport as LookupOffersReport | null | undefined;
   const [ads, setAds] = useState<SearchCompetitorAdRecord[]>([]);
   const [adsLoaded, setAdsLoaded] = useState(false);
-  const [section, setSection] = useState<
-    "insights" | "ads" | "pages" | "creatives" | "ladders"
-  >("insights");
+  const [section, setSection] = useState<DashSection>("insights");
   /** Offer to open on the ladders tab when arriving from Insights. */
   const [ladderFocus, setLadderFocus] = useState<{ id: string; competitor: string } | null>(null);
   const [selectedOffer, setSelectedOffer] = useState<string | null>(null);
@@ -521,6 +523,27 @@ export function SearchOffersDashboard({
     Record<string, boolean>
   >({});
   const [showAllPageAds, setShowAllPageAds] = useState(false);
+
+  // The open tab and offer live in the address (?osec=ladders&offer=…), so a
+  // refresh or Back from an offer page reopens the same place.
+  const [restored, setRestored] = useState(false);
+  useEffect(() => {
+    const saved = readUrlParam("osec");
+    if (saved && (DASH_SECTIONS as readonly string[]).includes(saved)) {
+      setSection(saved as DashSection);
+      const offer = parseOfferKey(readUrlParam("offer"));
+      if (saved === "ladders" && offer) setLadderFocus(offer);
+    }
+    setRestored(true);
+  }, []);
+  useEffect(() => {
+    // Not before the saved place has been read, or it would be overwritten.
+    if (!restored) return;
+    writeUrlParams({
+      osec: section === "insights" ? null : section,
+      ...(section === "ladders" ? {} : { offer: null }),
+    });
+  }, [section, restored]);
 
   const needsRawAds =
     section === "insights" || section === "ads" || section === "ladders" || section === "pages";
@@ -1269,7 +1292,7 @@ export function SearchOffersDashboard({
               {creatives.length > filteredCreatives.length
                 ? ` of ${creatives.length}`
                 : ""}{" "}
-              unique creatives with TOFU / MOFU / BOFU tags.
+              unique creatives, each tagged with the buyer stage it speaks to.
             </p>
             {filteredCreatives.length === 0 ? (
               <p className="empty-hint">No creatives match this filter.</p>
@@ -1339,6 +1362,9 @@ export function SearchOffersDashboard({
           ads={visibleAds}
           adsLoading={needsRawAds && !adsLoaded}
           initialSelection={ladderFocus}
+          onSelect={(sel) => {
+            if (restored) writeUrlParams({ offer: sel ? offerKey(sel) : null });
+          }}
         />
       ) : null}
     </section>

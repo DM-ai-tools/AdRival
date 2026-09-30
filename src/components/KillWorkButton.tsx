@@ -61,7 +61,8 @@ export function KillWorkButton({
     <span className="kill-work">
       <button
         type="button"
-        className={`danger-btn kill-work-btn ${active ? "kill-work-live" : ""}`}
+        // Quiet until something is running; then it is the way to stop it.
+        className={`kill-work-btn ${active ? "danger-btn kill-work-live" : "ghost-btn"}`}
         onClick={() => void stopAll()}
         disabled={busy}
         title="Stop every search, lookup, brand review and offers report you have running"

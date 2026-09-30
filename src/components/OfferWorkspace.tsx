@@ -61,7 +61,10 @@ export function OfferWorkspace({
   adsLoading,
   getAds,
   initialSelection,
+  onSelect,
 }: {
+  /** Told whenever the shown offer changes (the dashboard keeps it in the address). */
+  onSelect?: (selection: { id: string; competitor: string } | null) => void;
   /** Offer to show first, e.g. when arriving from Insights. */
   initialSelection?: { id: string; competitor: string } | null;
   /** Search run id; enables "Open full offer page". */
@@ -107,6 +110,11 @@ export function OfferWorkspace({
   }, [sequence, selected]);
 
   useEffect(() => setShowAllAds(false), [selected?.id, selected?.competitor]);
+
+  useEffect(() => {
+    onSelect?.(selected);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- report changes of the offer only
+  }, [selected?.id, selected?.competitor]);
 
   // Arriving with an offer picked (from Insights): bring its tile into view.
   useEffect(() => {

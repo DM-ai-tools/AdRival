@@ -465,9 +465,10 @@ export function BrandReviewPanel({
         <div className="history-actions brand-review-actions">
           <button
             type="button"
-            className="chip-btn"
+            className="search-btn"
             disabled={controlsLocked}
             onClick={() => void runBatch(false)}
+            title="Review the competitors that have not been reviewed yet"
           >
             {batchBusy ? "Running…" : "Run brand review"}
           </button>
@@ -476,8 +477,9 @@ export function BrandReviewPanel({
             className="chip-btn"
             disabled={controlsLocked}
             onClick={() => setConfirmRedoAll(true)}
+            title="Review every competitor again from scratch"
           >
-            Redo all
+            Review all again
           </button>
           <button
             type="button"
@@ -485,7 +487,7 @@ export function BrandReviewPanel({
             disabled={controlsLocked}
             onClick={() => void runScores()}
           >
-            {scoreBusy ? "Scoring…" : "Redo brand scores"}
+            {scoreBusy ? "Scoring…" : "Recalculate scores"}
           </button>
           {reviewing && (
             <button
@@ -499,6 +501,12 @@ export function BrandReviewPanel({
           )}
         </div>
       )}
+
+      <p className="muted brand-score-scale">
+        <strong>Brand score, 0–100:</strong> how big each competitor&apos;s brand is online. Followers across social
+        networks count for up to 55 points, LinkedIn employees 25 and estimated revenue 20. 80+ is a major brand, 60+
+        large, 40+ established, 20+ growing.
+      </p>
 
       {displayProgress && (
         <div
@@ -630,7 +638,7 @@ export function BrandReviewPanel({
                         disabled={controlsLocked}
                         onClick={() => void redoOne(c.id)}
                       >
-                        {busy ? "…" : "Redo"}
+                        {busy ? "…" : "Review again"}
                       </button>
                     </td>
                   )}
@@ -643,9 +651,9 @@ export function BrandReviewPanel({
 
       <ConfirmDialog
         open={confirmRedoAll}
-        title="Redo brand review for all?"
+        title="Review every competitor again?"
         description="This re-scrapes each competitor website and refreshes Facebook, Instagram, X, YouTube, and LinkedIn metrics. Existing brand metrics will be replaced."
-        confirmLabel="Redo all"
+        confirmLabel="Review all again"
         cancelLabel="Cancel"
         tone="danger"
         busy={false}

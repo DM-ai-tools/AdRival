@@ -1,7 +1,8 @@
 "use client";
 
 import { statusLabel } from "@/lib/progressLabels";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { offerKey, parseOfferKey, readUrlParam, writeUrlParams } from "@/lib/urlState";
 import type {
   FunnelStage,
   LookupCoreOfferLadder,
@@ -14,12 +15,8 @@ import type {
 import { splitLaddersByOffer } from "./OfferLadderFlow";
 import { OfferWorkspace } from "./OfferWorkspace";
 
-type DashSection =
-  | "overview"
-  | "creatives"
-  | "pages"
-  | "services"
-  | "ladder";
+const DASH_SECTIONS = ["overview", "creatives", "pages", "services", "ladder"] as const;
+type DashSection = (typeof DASH_SECTIONS)[number];
 
 const CREATIVE_DISPLAY_CAP = 24;
 
@@ -264,6 +261,24 @@ export function LookupOffersDashboard({
   const [section, setSection] = useState<DashSection>("overview");
   const [selectedPageKey, setSelectedPageKey] = useState<string | null>(null);
   const [selectedService, setSelectedService] = useState<string | null>(null);
+  // Open tab and offer kept in the address, like the search dashboard.
+  const [restored, setRestored] = useState(false);
+  const [initialOffer, setInitialOffer] = useState<{ id: string; competitor: string } | null>(null);
+  useEffect(() => {
+    const saved = readUrlParam("osec");
+    if (saved && (DASH_SECTIONS as readonly string[]).includes(saved)) {
+      setSection(saved as DashSection);
+      if (saved === "ladder") setInitialOffer(parseOfferKey(readUrlParam("offer")));
+    }
+    setRestored(true);
+  }, []);
+  useEffect(() => {
+    if (!restored) return;
+    writeUrlParams({
+      osec: section === "overview" ? null : section,
+      ...(section === "ladder" ? {} : { offer: null }),
+    });
+  }, [section, restored]);
 
   const brand = job.selectedPage?.name || job.queryName;
   const platform = job.platform || "facebook";
@@ -950,6 +965,11 @@ export function LookupOffersDashboard({
               <EmptyRefreshHint label="No offer ladder found." />
             ) : (
               <OfferWorkspace
+                key={initialOffer ? offerKey(initialOffer) : "ladder"}
+                initialSelection={initialOffer}
+                onSelect={(sel) => {
+                  if (restored) writeUrlParams({ offer: sel ? offerKey(sel) : null });
+                }}
                 offers={coreLadders.map((l) => {
                   // Older reports store flat steps without these fields.
                   const ladder = l as LookupCoreOfferLadder;

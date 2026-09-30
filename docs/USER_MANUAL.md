@@ -119,7 +119,13 @@ Above the form, pick a platform. The choice applies to both search and lookup.
 
 The short line under the picker tells you which library that platform uses.
 
-The header also has a **Stop** control when work is running. Use it to halt the current search or lookup. A stop keeps whatever was already found. It does not erase history.
+**Stop all my work** in the header is grey while nothing is running and turns red while something is. It stops every search, lookup, brand review and offers report you have running. Whatever was already found is kept.
+
+### Finding your way
+
+- **The step bar.** On a keyword search, a bar at the top shows the five steps: **Set up search → Find competitors → Review competitors → Offers dashboard → Recreate a page**. Finished steps have a tick and the current one is teal. The line under the bar says what to do next and has a **Next** button. Click a finished step to go back to it.
+- **The address remembers where you are.** The page address holds the run, the results tab, the offers dashboard tab and the selected offer. A refresh, a bookmark or a link sent to a colleague opens the same place.
+- **Breadcrumbs and Back.** The recreate page and the full offer page open in the same browser tab. They show where you are, for example *History › Competitors › Shout Digital › Recreate for my brand*. The breadcrumb and the Back button take you to the exact run and tab you came from, History included.
 
 ---
 
@@ -127,10 +133,10 @@ The header also has a **Stop** control when work is running. Use it to halt the 
 
 Stay on **Keyword search**. Confirm the client space and the platform first.
 
-### Step 1 — Analyze the client’s website
+### Step 1 — Analyse the client’s website
 
-1. Paste the business website URL.
-2. Click **Analyze URL**.
+1. Paste the website into **Your client’s website (recommended)**.
+2. Click **Analyse website**.
 
 The app reads the site and fills a profile card:
 
@@ -139,9 +145,9 @@ The app reads the site and fills a profile card:
 - Services or products, shown as category tags
 - Whether customers visit them, they go to the customer, or it is mixed
 - Locations, when the site lists them
-- Brand colors, when they can be read from the site
+- Brand colours, when they can be read from the site
 
-This profile is what later powers **Recreate for my brand**. If you skip the URL, you can still type keywords yourself, but you cannot build a branded landing page later.
+**Recreate for my brand** also uses this website for your client’s name, logo and colours. You can search without it. You will then be asked for the website the first time you recreate a page.
 
 ### Step 2 — Pick a category
 
@@ -149,24 +155,24 @@ Click one category tag (a service or product). The keyword box fills with phrase
 
 You can clear the box and rewrite every line. The search uses **what is in the box**, not the original suggestion.
 
-### Step 3 — Set competitor guardrails
+### Step 3 — Industry rules
 
-These rules run before the keyword research, so software tools, courses, podcasts, and white-label platforms are less likely to be treated as real competitors.
+These rules are applied before the keyword research. They make it less likely that software tools, courses, podcasts and white-label platforms are treated as real competitors.
 
 | Choice | When to use it |
 | --- | --- |
-| Enforce industry SOP | Normal choice. Follow the rules for this industry. |
-| Override — seek specific types | You want a type the rules would usually drop. Type those types in the box, for example “white-label agencies”. Add a note if you need to say why. |
-| Skip all guardrails | Keep almost everything. Use this only when the rules are hiding the advertisers you actually want. |
+| Apply industry rules (recommended) | The normal choice. Follows the rules for this industry. |
+| Override — seek specific types | You want a type of business the rules would usually drop. Type those types in the box, for example “white-label agencies”. Add a note if you need to say why. |
+| Skip all industry rules | Keeps almost everything. Use this only when the rules are hiding the advertisers you actually want. |
 
-### Step 4 — Choose how location is used
+### Step 4 — Where competitors should be based
 
-| Mode | What it does |
+| Choice | What it does |
 | --- | --- |
-| Company locations | Prefer the cities on the client’s site, but still show other relevant advertisers if needed. If a keyword already names a suburb, that place is preferred and mismatches are flagged rather than thrown away. |
-| Broader / manual geo | You rely on the market you pick next, not the site’s city list. |
+| Company locations (city/suburb) | Prefers the cities on the client’s site, but still shows other relevant advertisers if needed. If a keyword already names a suburb, that place is preferred. Advertisers from elsewhere are flagged rather than dropped. |
+| Country-wide | Ignores the site’s city list and uses the whole country you pick next. |
 
-Then pick the **Ad Library market** for that platform (country or region). This is the library’s own market, not a substitute for the city in the keyword.
+Then pick the **Country to search ads in**. This is the market the ad library searches. It does not replace a city named in a keyword.
 
 ### Step 5 — Check the keywords
 
@@ -177,341 +183,266 @@ dental implants Ballarat
 invisalign near me
 ```
 
-Clear keywords if you want a blank box. Then start.
-
 ### Step 6 — Start the search
 
-The button says something like **Find Facebook competitors**. It stays disabled until there is a keyword and a client space.
+The button says something like **Find Facebook competitors**. If it is greyed out, the line under it says why: no client space is selected, or there are no keywords.
 
-While it runs you see a progress panel: stage, ads scanned, pages scanned, accepted competitors, and a message. You can stop it from the header or the progress panel.
-
-When it finishes, the results area opens with three views.
+While it runs, a progress panel shows the stage, ads scanned, pages scanned, accepted competitors and a message. The search keeps running if you leave the page, and you can reopen it from History. If no competitors are found, the panel suggests how to widen the search.
 
 ---
 
-## 6. Search results: the three views
+## 6. Search results: the four tabs
 
-The results head shows the keyword, the platform, and the competitor count. **Download Excel** saves a spreadsheet of this run.
+The results header shows the platform the run used and the number of competitors. **Download Excel** saves a spreadsheet of the competitors in this run.
 
-### Preview
+### Your website
 
-A table of accepted competitors. Typical columns include the page or advertiser name, ad volume, and a creative preview. Brand numbers (followers, employees, and so on) are **not** in this table. They live under Brand review.
+The profile of your client’s site from Step 1, with the keywords and locations the search used.
+
+### Competitors
+
+A table of accepted competitors: the advertiser, how many ads they run, and a preview of an ad. Brand numbers are under Brand review, not here.
 
 On a row you can:
 
-1. **Analyze landing page** — open the destination URL from the ads and read the offer on that page. The button is only available when the row has a usable URL.
-2. **Recreate for my brand** — open the content and design builder. This needs a completed landing-page analysis on that competitor, and a business website on the search.
-
-If analyze fails, the error sits on that row. Fix the URL or retry. Do not start recreate until analysis has finished.
+1. **Get offer & page details** reads the page the competitor’s ads send people to (see section 9). It is only available when the row has a usable web address.
+2. **Recreate for my brand** appears once the page details are ready and opens the recreate page. Nothing is charged until you press **Create my page** there.
 
 ### Brand review
 
-Brand metrics appear after the search, often in a batch. You see followers or subscribers, company size, and related public profile numbers for the platforms that advertiser uses (Facebook, Instagram, X, YouTube, LinkedIn).
+Followers, subscribers, company size and similar public numbers for each competitor, across Facebook, Instagram, X, YouTube and LinkedIn.
 
-If review is still running, the tab says so. You can start or retry a review from this panel. Wait until the count of reviewed rows stops moving before you treat the numbers as final.
+- **Run brand review** reviews the competitors that have not been reviewed yet.
+- **Review all again** reviews every competitor from scratch. **Review again** on a row reviews one competitor.
+- **Recalculate scores** works out the scores again from the numbers already collected.
 
-### Offers
+The **brand score (0–100)** says how big the brand is online:
 
-This is the offers dashboard for a keyword search. It is covered in the next section. It is a separate step. Finishing the search does not build the dashboard by itself.
+- Followers across social networks: up to 55 points
+- LinkedIn employees: up to 25 points
+- Estimated revenue: up to 20 points
+
+80+ is a major brand, 60+ large, 40+ established and 20+ growing. A competitor with no public numbers scores low.
+
+### Offers dashboard
+
+What these advertisers are selling. Finishing the search does not build it; you build it as a separate step, described in the next section.
 
 ---
 
 ## 7. Offers dashboard (keyword search)
 
-This dashboard answers: what are these advertisers actually selling, which ads push which offer, and how does a cheap entry offer lead to the main offer?
+This dashboard answers three questions:
 
-### Generate it
+- Which offers are winning?
+- What does each competitor sell, from cheapest to most expensive?
+- Which ads push which offer?
 
-1. Open the **Offers** view on a finished search.
-2. Read the teaser. It tells you whether the dashboard is missing, running, finished, or failed.
-3. If you are asked to pick competitors, tick the ones you want. **Select all** and **Clear** are there. A run often offers this so you do not analyze dozens of advertisers you do not care about.
-4. Click **Generate offers dashboard**, or **Generate for selected**.
+### Build it
 
-The default analysis looks at competitors with a meaningful number of active ads (about 10 or more) and builds a deduplicated picture.
+1. Open the **Offers dashboard** tab on a finished search.
+2. Tick the competitors to include. Those with about 10 or more active ads are ticked for you. **Select all** and **Clear** are there too.
+3. Click **Build offers dashboard**.
 
-You can **Stop** while it runs. Stopping keeps what was already written.
+You can press **Stop** while it runs. Once it is finished:
 
-### Re-analyze
+- **Re-analyze offers** rebuilds the dashboard from the ads already stored for this run.
+- **Re-analyze selected** rebuilds it for the competitors you ticked only.
 
-When a dashboard is already complete:
+Neither one starts a new ad library search.
 
-- **Re-analyze offers** rebuilds creatives, services, funnel stages, and ladders.
-- It reuses ads already stored for this run. It does not start a brand-new library scrape.
-- **Re-analyze selected** limits that rebuild to the competitors you ticked.
+### Buyer stage badges
 
-### The summary chips
+Every ad and offer is tagged with the buying stage it speaks to:
 
-Across the top you see how many ads sit in each funnel stage. The stages are written as badges, not long names:
+- **Awareness** introduces the problem or the brand to people who don’t know it yet.
+- **Consideration** helps people compare options.
+- **Ready to buy** asks for the booking, the sale or the form.
+- **Stage unclear** means the wording didn’t make the stage clear.
 
-- **TOFU** — top of funnel. These ads introduce the problem or the brand. They are the first ads someone might see.
-- **MOFU** — middle of funnel. These ads help someone compare and consider.
-- **BOFU** — bottom of funnel. These ads ask for the sale, the booking, or the form fill.
-- **unknown** — the stage could not be decided from the copy.
+The chips across the top count the ads at each stage. Click one to filter the creatives.
 
-Click a chip to filter. That filter opens the **Creatives & offers** tab. **Clear funnel filter** shows every stage again.
+### Tab: Insights (opens first)
 
-The title line also counts competitors, ads, creatives, and ladders.
+The quickest overview of the market.
+
+- **Market snapshot:** competitors analysed, ads read, distinct offers (split into entry, core and premium prices) and the most used call to action.
+- **Top offers by virality:** the five strongest offers, each with a score out of 100. The score comes from three things: how many ads push the offer, how long those ads have been kept running (advertisers keep paying for what works), and how many competitors run the same offer. Each card shows:
+  - the price and the reasons for the score
+  - who runs the offer and their business website
+  - the landing page, call to action and buyer stage
+  - that competitor’s full offer ladder, with this offer highlighted
+  - a quote from the landing page
+  - the strongest ad, with a link to the Ad Library
+- **See this offer in the ladders** opens the Offer ladders tab with that offer selected.
+- **Every offer, ranked** shows the full list as a table. Click a row to open that offer.
+
+### Tab: By landing page
+
+Every page the ads send people to, with the ads that point there and the offer on the page. The page you select turns teal.
 
 ### Tab: Ads by competitor
 
-Ads grouped under each advertiser. Expand a name to read the ad copy that was stored for this run. Use this when you want the raw ads, not the summary.
-
-If this tab is empty, generate or re-analyze. Cached ads appear only after that step.
+Ads grouped under each advertiser. Expand a name to read the stored ad copy.
 
 ### Tab: Creatives & offers
 
-Each creative is a distinct hook, not one card per duplicate ad. You see:
-
-- The hook (the opening promise)
-- The offer attached to that hook
-- The funnel stage
-- How many ads use that creative
-
-Click a creative to read the fuller copy. Use the funnel chips above if you only want one stage.
-
-### Tab: By service
-
-Services the ads are selling, listed as buttons. Click one.
-
-Inside a service you see which competitors push it, the offers used, and the ads tied to those offers. This is the best view when the client sells three services and you only care about one.
+Each creative is a distinct hook, not one card per duplicate ad. A card shows the hook, the offer attached to it, the buyer stage and how many ads use it.
 
 ### Tab: Offer ladders
 
-A ladder is one core offer, then the smaller offers that lead into it. Example shape:
+One strip per competitor with every offer they run, cheapest first (entry → core → premium).
 
-1. A free consult or a low-priced starter (the front step)
-2. The main service (the core offer)
-3. A higher package, if the ads mention one
+- Click an offer to select it. The tile turns teal, and the panel on the right shows its details. The teal bar at the top of the panel shows it belongs to the selected tile.
+- **Previous** and **Next** move through the offers.
+- **Open full offer page** opens the offer on its own page, with a breadcrumb back to the dashboard.
 
-Each ladder card has:
+### Downloading the dashboard
 
-- The core offer name
-- The competitor
-- The steps, with the ads that support each step
-- A jump list at the top so you can scroll to one core offer without hunting
-
-Open a ladder when you want to copy the **structure** of the offer, not just one headline. Landing-page analysis makes these ladders more accurate, because the page often states the real price and package that the ad only hints at.
-
-From a ladder you can jump to the landing-page detail for that offer when a destination was analyzed.
+- **Download … (Excel)** saves the tab you are on.
+- **Download full report (Excel)** saves everything: all ads by competitor, creatives, unique offers, offer ladders and landing pages.
 
 ---
 
 ## 8. Competitor lookup, step by step
 
-Use this when you already know the competitor’s name. You are not fishing with keywords.
+Use this when you already know the competitor’s name.
 
 1. Select the client space and platform.
 2. Open **Competitor lookup**.
-3. Type the competitor name.
-4. Optional: paste their website. This helps matching and later landing-page work.
-5. Start the lookup.
+3. Type the competitor’s name. You can also paste their website to help find the right match.
+4. Start the lookup.
 
-The app searches the ad library for that name, then tries to pick the right page. If several names are close, you will see **other name matches considered**. You can fetch ads for one of those candidates instead of the first guess.
+If several names are close, you will see **other name matches considered**. You can fetch ads for one of those instead of the first guess.
 
 ### What you see
 
-- The matched page name and a short reason it was chosen
-- Their ads: title, copy, and destination when the library provides one
-- A place to **Save brand** — your client’s website, not the competitor’s. Recreate needs this URL on the lookup.
+- The matched page name and why it was chosen
+- Their ads: title, copy, and the page each ad links to, when the library provides it
+- **Your brand website**: your client’s website, not the competitor’s. Save it once and Recreate will use it.
 
 ### On each ad
 
-1. **Analyze landing page** if the ad has a usable destination URL.
-2. After analysis is complete, **Recreate for my brand**. If your brand website is missing, save it first. The button tells you when that is the blocker.
+1. Press **Get offer & page details** if the ad links to a usable page.
+2. Then press **Recreate for my brand**. It becomes the main button once the page details are ready.
+3. **Show all ad data** shows everything the library returned for the ad.
 
-### Lookup offers intelligence
+### Lookup offers dashboard
 
-Lookup has its own offers panel, separate from the keyword-search dashboard. Generate it from the teaser at the top of the lookup results. You can stop it or open it once it is ready.
+Build it with **Build offers dashboard** at the top of the lookup results.
 
-The lookup dashboard is one long page, not four tabs. Walk it from top to bottom:
-
-| Section | What you are reading |
-| --- | --- |
-| Top offers from ad creatives | The offers repeated in the ad copy, with how often they appear |
-| Top offers from landing pages | The offers actually written on the destination pages. Empty until you analyze pages |
-| Funnel distribution | How many ads sit at each stage of the funnel |
-| Offer value ladder | Core landing-page offers with the ad-copy steps mapped under them. If this is empty, analyze landing pages, then Refresh |
-| Unique creatives | Distinct hooks, not duplicate ads |
-| Destinations | The landing-page URLs. Open one to read the page offer and the ads that point at it |
-| Services | One button per service. Open it to see related ads and offers |
-| Offer value ladders | One card per core offer, with the steps underneath |
-
-**Refresh** rebuilds the report from ads and pages already stored. It does not invent a page you have not analyzed.
+- Its tabs are **Overview**, **Creatives**, **By landing page**, **Services** and **Offer ladders**.
+- It has the same Excel downloads as the search dashboard.
+- The page address keeps the open tab and the selected offer, as on the search dashboard.
+- **Refresh** rebuilds the report from the ads and pages already stored.
 
 ---
 
-## 9. Landing page analysis
+## 9. Offer & page details (landing page analysis)
 
-A landing page is the site the ad sends someone to. The ad copy is the promise. The page is the actual offer, price, and form.
+A landing page is the page an ad sends people to. The ad makes a promise; the page shows the actual offer, price and form.
 
-### From a search result
+Click **Get offer & page details** on a competitor row (search) or an ad card (lookup) and wait until it finishes. If the site cannot be opened, the error shows on that row only. Try again, or pick another ad that links to a real sales page.
 
-1. Stay on **Preview**.
-2. On the competitor row, click **Analyze landing page**.
-3. Wait until the status on that row is complete.
+A finished analysis shows, in this order:
 
-### From a lookup ad
+1. A summary of the page
+2. The offer: headline, main offer, pricing, call to action, urgency, value points and guarantees
+3. Other ads that link to the same page
+4. The page’s sections, in order
+5. Who the page is written for
+6. Trust signals, such as reviews and logos
+7. The parts that push people to act
+8. Notes
+9. When it was analysed
 
-1. On the ad card, click **Analyze landing page**.
-2. Wait until the card says the analysis is complete.
+Empty fields are hidden.
 
-### What you see while it runs
-
-The panel says **Analyzing landing page…** until it finishes. If the site cannot be opened, you get **Offer & page details** plus the error. Other ads are not affected. Retry that page, or pick another ad that lands on a real sales page.
-
-### What a finished analysis contains
-
-The heading is **Offer & page details**. **Open page** opens the URL that was read. Read the blocks in this order:
-
-1. **Summary** — a short read of the page, when one was written.
-2. **Offer**
-   - Headline
-   - Primary offer (the thing they are actually selling)
-   - Pricing
-   - CTA (the button or next step, such as Book a call)
-   - Urgency (a deadline or scarce-spots line, if the page uses one)
-   - Value props (why they say they are different)
-   - Guarantees
-3. **Ads on this landing page** — other ads from this advertiser that point at the same page. Each line can show the hook, a link to the Ad Library, the offer, the CTA, a copy snippet, and whether the ad is active and how long it has run. This is how you see one page being sold by many ads.
-4. **Page architecture** — the page type, then a numbered list of sections. Each section has a name, a purpose, a short summary, and the key elements on it (forms, proof, buttons). This is the skeleton you will copy in Recreate, not the competitor’s brand.
-5. **Audience** — who the page is written for.
-6. **Trust signals** — reviews, logos, guarantees, and similar proof.
-7. **Conversion elements** — the parts that push someone to act.
-8. **Notes** — extra technical notes, when there are any.
-9. The date and time it was analyzed.
-
-Empty fields are hidden. If a page has no sections, you will see “No sections extracted.” Analyze another destination if this one is a thin page.
-
-Analyze the pages you care about **before** you treat offer ladders as complete, and **before** you recreate a page. Recreate refuses to start without a finished analysis and your brand website.
+Analyse the pages you care about before you treat the offer ladders as complete, and before you recreate a page.
 
 ---
 
 ## 10. Recreate for my brand
 
-This builds a landing page **for your client**, using a competitor as the pattern. It does not copy their brand. It uses your client’s name, site, and colors, and the competitor’s offer structure as the inspiration.
+This builds a landing page **for your client**, using a competitor’s page as the pattern. It copies the competitor’s layout and offer structure. Everything branded comes from your client: name, website, logo and colours. It does not copy the competitor’s brand.
 
-You reach it from:
+You can open it from a competitor row or a lookup ad once **Get offer & page details** has finished. It opens in the same browser tab, and the breadcrumb at the top takes you back.
 
-- A competitor row on a keyword search, after landing-page analysis, or
-- A lookup ad, after landing-page analysis and a saved brand website
+### Before anything is made
 
-The page title is **Recreate for my brand**. Under it: which competitor inspired it, the keyword if there was one, and your client’s site.
+The page first explains what will be made:
 
-There are two phases, shown at the top:
+- the competitor’s page layout
+- new copy for your client, in their colours and fonts
+- up to 6 images
+- a finished page you can preview and download as HTML
 
-1. **Content** — the words
-2. **Design fit** — the layout, colors, and images
+**Nothing is charged until you press Create my page.**
 
-Do content first. Design uses the content you approved.
+1. If the search was run without your client’s website, enter it here and press **Save website**. It is saved on the search, so you only enter it once.
+2. Optionally, type instructions in **Anything to change?**, such as “lead with the free consultation, softer tone”.
+3. Press **Create my page**. It takes a few minutes. A progress bar shows each step, and **Stop** halts it.
 
-### Phase 1 — Write the content
+If an earlier attempt failed, the same button says **Try again**.
 
-If content is not there yet, click **Regenerate content**. The button says **Writing content…** while it runs. A progress bar and a message show the current step.
+### When the page is ready
 
-When content is ready, **Review content** opens.
+- **Download HTML** (the main button) saves the page. **Copy HTML** copies it.
+- **Changing the page.** Type your requests in **Feedback for content** and **Feedback for design**, then choose:
+  - **Request design changes** (or **Apply design feedback**) rebuilds the layout and keeps the current words.
+  - **Regenerate page** writes the whole page again.
 
-You can edit in the form itself:
-
-- Page title
-- Meta description
-- Each section’s heading and body
-- FAQ questions and answers, where the page has them
-
-Click **Save edits** to keep typing changes without rebuilding the design. Save does not spend a full rewrite. It stores what you typed.
-
-### Suggest changes to the content
-
-Use the left box, **Feedback for content**.
-
-Write plain instructions, for example:
-
-> Softer tone, lead with first-home buyers, CTA = Book a free call.
-
-Then click **Regenerate content with feedback**. The button only uses that wording when the box is not empty. The limit is 4,000 characters. A counter appears as you type.
-
-Regenerate **replaces** the draft. If you had unsaved edits you wanted to keep, click **Save edits** first, or paste those edits into the feedback so they come back.
-
-Feedback for content is not applied to the design until you rebuild the design.
-
-### Phase 2 — Build the design
-
-When the words are right:
-
-1. Optional: type **Feedback for design**. Example: “Make hero CTA stronger, FAQ answers shorter, emphasize Melbourne suburbs in headings.”
-2. Click **Approve & build design**.
-
-The app fits your approved words into a layout, using your brand colors and type. The button changes to **Building design + images…** while it works. Switch stays on the design view when it finishes.
-
-**Feedback for design** does not rewrite the strategy of the offer. It refits the layout around the content you already approved. Use the content box if the words are wrong. Use the design box if the layout, emphasis, or headings are wrong.
-
-If a design already exists, the same action is **Rebuild design** or **Rebuild design with feedback**. Rebuilding asks you to confirm, because it replaces the current page and its generated photos.
-
-### Review the design
-
-- **View design** shows the page in a preview frame.
-- **Edit content** goes back to the word form. View design returns you to the preview.
-- **Copy HTML** copies the full page so you can paste it into another tool.
-- **Download HTML** saves the file.
-
-The palette row shows Primary, Secondary, Accent, and Text colors from the client site.
-
-- **Re-analyze brand colors** reads the business website again. The note will say to regenerate the design before the preview uses the new colors.
-- **Apply colors to design** appears after a successful color refresh, if a design already exists. It rebuilds the design with the new palette. Confirm when asked, because it replaces the current page and photos.
-
-**Brand design.md** (open the details block under the palette) is the brand file for this run. Competitor pages supply layout only. Colors, fonts, logos, and button styles come from this file, not from the competitor.
+  Both replace the current version, so the app asks you to confirm first.
+- **Before you publish.** The notes above the preview say whether the page is ready to publish, or list what to check first. **Match with the competitor page** shows how closely each section follows the original.
+- **Colours.** The colour row shows the palette taken from your client’s site. **Re-analyze brand colors** reads the site again, and **Apply colors to design** rebuilds the page with the new colours.
+- **Advanced: the brand style file used for this page** lists the colours, fonts and button styles taken from your client’s site.
 
 ### Generated images
 
-Under the preview, **Generated images** lists the photos placed in the design. Each card shows the slot name, the kind of photo, and the shape (ratio).
+Under the preview, each image card shows where the image goes and its shape.
 
-For one photo:
-
-1. Optional: type regen notes, for example “brighter room, fewer people”.
-2. Click regenerate on that card.
-3. The preview updates when the new photo is ready.
-
-**Download** saves one image. **Download all** saves the set.
-
-Regenerating one image does not rebuild the whole page. Regenerating the design does replace the image set, which is why that action asks you to confirm.
+- To remake one image, type notes (for example “brighter room, fewer people”) and regenerate it. The rest of the page stays as it is.
+- **Download** saves one image; **Download all** saves them all.
+- **Generate missing images** appears if some images could not be made.
 
 ### A sensible order
 
-1. Analyze the client URL on the search, or save the brand website on the lookup.
-2. Analyze the competitor landing page.
-3. Open **Recreate for my brand**.
-4. Generate content.
-5. Edit the words. Save edits.
-6. If the words are still wrong, write content feedback and regenerate content.
-7. Approve and build the design.
-8. Preview. If the layout is wrong, write design feedback and rebuild.
-9. Fix individual photos with regen notes.
-10. Download the HTML.
+1. Analyse the client’s website on the search, or save the brand website on the lookup.
+2. Get the offer & page details for the competitor page you want to copy.
+3. Open **Recreate for my brand** and read what will be made.
+4. Add any instructions, then press **Create my page**.
+5. Preview the page. If needed, give content or design feedback and rebuild.
+6. Fix individual images with notes.
+7. Download the HTML.
 
 ---
 
 ## 11. History
 
 1. Open the **History** tab.
-2. By default you see runs in the client space selected at the top.
-3. Click **Every client** to see all of your spaces, then **This client only** to go back.
-4. Filter with **All**, **Searches**, or **Lookups**.
-5. Click a run to open the report on the right. Scroll follows the report.
+2. You see the runs in the client space selected at the top. **Every client** shows all your spaces; **This client only** goes back.
+3. Filter with **All**, **Searches** or **Lookups**.
+4. Click a run to open its report. A search opens on its Competitors tab, with the same step bar and tabs as a live search.
 
-Your spaces and spaces shared with you are separate headings. Shared rows show the other person’s name and whether you can only view or also run.
+The page address keeps the tab you are on. Back from a recreated page or an offer page returns to the same run and tab in History.
 
-**Refresh** reloads the list. Deleting a run removes that history item. **Clear all** deletes your own search and lookup history. It does not delete projects that were only shared with you, and it does not delete another person’s space.
+Your own spaces and spaces shared with you appear under separate headings. Shared rows show the owner’s name and whether you can only view or can also run tasks.
 
-Opening an old run does not charge you. Starting a new search, lookup, offer analysis, brand review, landing-page analysis, or recreate does.
+- **Refresh** reloads the list.
+- Deleting a run removes it from History.
+- **Clear all** deletes your own search and lookup history. It does not delete projects that were only shared with you, or another person’s space.
+
+Opening an old run costs nothing. Starting any of these costs credits: a new search, lookup, offers dashboard, brand review, page analysis or recreated page.
 
 ---
 
 ## 12. Export
 
-On a search result, **Download Excel** saves a spreadsheet of the competitors from that run.
+- On a search result, **Download Excel** saves the competitors from that run.
+- On a lookup result, **Download Excel** saves that competitor’s ads.
+- The offers dashboards have their own Excel downloads (see section 7).
 
-On a lookup result, **Download Excel** saves the ads for that competitor.
-
-Exports are a copy of what is already stored for that run. They do not start a new library search. The button stays disabled until there is something to download.
+An export is a copy of what is already stored. It does not start a new ad library search.
 
 ---
 

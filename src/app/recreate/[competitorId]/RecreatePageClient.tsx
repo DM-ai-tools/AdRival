@@ -664,7 +664,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
               </button>
               <button
                 type="button"
-                className="ghost-btn"
+                className="search-btn"
                 disabled={busy || !page?.html}
                 onClick={downloadHtml}
               >
@@ -735,7 +735,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
           {canRegenerateDesign && page?.html ? (
             <button
               type="button"
-              className="search-btn"
+              className="ghost-btn"
               disabled={busy}
               onClick={() => requestRegenerateDesign()}
             >
@@ -1019,7 +1019,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
           }
         >
           <summary className="recreate-design-md-summary">
-            Brand design.md (SSOT for this run)
+            Advanced: the brand style file used for this page
           </summary>
           <p className="muted recreate-feedback-hint">
             Generated from your brand website. Competitor pages supply layout
@@ -1048,11 +1048,11 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
             <p>
               {isUnified
                 ? "Ready — preview, Copy HTML, and Download HTML use the same packaged artifact."
-                : `Publish-ready — Download HTML strips the draft banner. CID coverage ${
+                : `Ready to publish — Download HTML removes the draft banner.${
                     page.contentDraft?.cidCoverage != null
-                      ? `${Math.round(page.contentDraft.cidCoverage * 100)}%`
-                      : "n/a"
-                  }.`}
+                      ? ` ${Math.round(page.contentDraft.cidCoverage * 100)}% of the page's text slots were filled.`
+                      : ""
+                  }`}
             </p>
           ) : isUnified && (page.publishBlockers || []).length > 1 ? (
             <>
@@ -1068,10 +1068,10 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
               {isUnified ? "Review notes: " : "Publish checklist: "}
               {(page.publishBlockers || ["Review recommended"]).join(" · ")}
               {!isUnified && page.contentDraft?.cidCoverage != null
-                ? ` · CID ${Math.round(page.contentDraft.cidCoverage * 100)}%`
+                ? ` · ${Math.round(page.contentDraft.cidCoverage * 100)}% of text slots filled`
                 : ""}
               {!isUnified && page.contentDraft?.unmatchedCidCount
-                ? ` · ${page.contentDraft.unmatchedCidCount} unmatched slots kept`
+                ? ` · ${page.contentDraft.unmatchedCidCount} slots kept from the original`
                 : ""}
             </p>
           )}

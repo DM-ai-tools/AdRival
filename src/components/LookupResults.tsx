@@ -16,6 +16,7 @@ import {
 } from "@/components/LookupOffersReportPanel";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { currentReturnPath, withReturn } from "@/lib/returnTo";
+import { readUrlParam, writeUrlParams } from "@/lib/urlState";
 
 interface LookupResultsProps {
   job: LookupJob;
@@ -347,7 +348,8 @@ function AdCard({
       <div className="lookup-ad-actions">
         <button
           type="button"
-          className="search-btn lookup-analyze-btn"
+          // The main action until the page is analysed; then Recreate is.
+          className={`${analysis?.status === "completed" ? "ghost-btn" : "search-btn"} lookup-analyze-btn`}
           disabled={!canAnalyze || analyzing || bridging}
           title={
             canAnalyze
@@ -385,10 +387,10 @@ function AdCard({
         ) : null}
         <button
           type="button"
-          className="ghost-btn raw-toggle"
+          className="link-btn raw-toggle"
           onClick={() => setOpenRaw((v) => !v)}
         >
-          {openRaw ? "Hide raw JSON" : "Show full ad JSON"}
+          {openRaw ? "Hide all ad data" : "Show all ad data"}
         </button>
       </div>
 
@@ -481,6 +483,17 @@ export function LookupResults({
   const [reportError, setReportError] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
   const [showOffersDash, setShowOffersDash] = useState(false);
+  // Whether the offers dashboard is open is kept in the address (?ldash=1),
+  // so a refresh or Back from a recreated page returns to it.
+  const [dashRestored, setDashRestored] = useState(false);
+  useEffect(() => {
+    if (readUrlParam("ldash") === "1") setShowOffersDash(true);
+    setDashRestored(true);
+  }, []);
+  useEffect(() => {
+    if (!dashRestored) return;
+    writeUrlParams(showOffersDash ? { ldash: "1" } : { ldash: null, osec: null, offer: null });
+  }, [showOffersDash, dashRestored]);
   const [brandUrlDraft, setBrandUrlDraft] = useState(
     job.businessUrl || job.businessProfile?.url || "",
   );
