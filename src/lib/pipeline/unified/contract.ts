@@ -73,18 +73,81 @@ const PLACEHOLDER_SVG = (label: string, w = 1200, h = 800) => {
   return `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
 };
 
+/** Marks our placeholder SVGs so a later pass can recolour them for their band. */
+const PLACEHOLDER_MARK = "adr-placeholder";
+
 export function placeholderDataUri(
   slot: Pick<UnifiedImageSlot, "id" | "purpose" | "width" | "height">,
   colors?: { primary?: string | null; secondary?: string | null; accent?: string | null } | null,
+  tone: "light" | "dark" = "light",
 ): string {
   const w = slot.width || 1200;
   const h = slot.height || 800;
   if (!colors?.primary) return PLACEHOLDER_SVG(slot.purpose || slot.id, w, h);
-  // Brand-coloured panel: keeps the layout finished while the image is pending.
-  const a = colors.primary;
-  const b = colors.accent || colors.secondary || colors.primary;
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${a}"/><stop offset="1" stop-color="${b}"/></linearGradient><radialGradient id="r" cx=".3" cy=".3" r=".7"><stop offset="0" stop-color="#fff" stop-opacity=".28"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient></defs><rect width="100%" height="100%" fill="url(#g)"/><rect width="100%" height="100%" fill="url(#r)"/></svg>`;
+  // A soft brand tint with a small picture mark: the layout looks finished and
+  // clearly shows where an image goes, without a loud block of brand colour.
+  // On dark bands the tint goes towards black instead of white.
+  const rgbOf = (hex: string | null | undefined): [number, number, number] | null => {
+    const raw = String(hex || "").replace("#", "");
+    const full = raw.length === 3 ? raw.split("").map((c) => c + c).join("") : raw;
+    if (!/^[0-9a-f]{6}$/i.test(full)) return null;
+    const n = Number.parseInt(full, 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  // Dark tint: towards the brand's own dark colour when it has one, so the
+  // placeholder sits in the page's palette instead of looking muddy.
+  const darkBase = rgbOf(colors.secondary);
+  const toward: [number, number, number] =
+    tone === "dark"
+      ? darkBase && 0.2126 * darkBase[0] + 0.7152 * darkBase[1] + 0.0722 * darkBase[2] < 60
+        ? darkBase
+        : [11, 18, 32]
+      : [255, 255, 255];
+  const tint = (hex: string, amount: number) => {
+    const rgb = rgbOf(hex);
+    if (!rgb) return tone === "dark" ? "#1C2430" : "#EEF2F6";
+    return `#${rgb.map((v, i) => Math.round(v + (toward[i] - v) * amount).toString(16).padStart(2, "0")).join("")}`;
+  };
+  const a = tint(colors.primary, tone === "dark" ? 0.78 : 0.82);
+  const b = tint(colors.accent || colors.secondary || colors.primary, tone === "dark" ? 0.86 : 0.9);
+  const mark = tint(colors.primary, tone === "dark" ? 0.3 : 0.35);
+  const s = Math.round(Math.min(w, h) * 0.12);
+  const cx = w / 2;
+  const cy = h / 2;
+  const stroke = Math.max(2, Math.round(s / 14));
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" data-${PLACEHOLDER_MARK}="${tone}"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${a}"/><stop offset="1" stop-color="${b}"/></linearGradient></defs><rect width="100%" height="100%" fill="url(#g)"/><g fill="none" stroke="${mark}" stroke-width="${stroke}" stroke-linejoin="round"><rect x="${cx - s}" y="${cy - s * 0.75}" width="${s * 2}" height="${s * 1.5}" rx="${s * 0.16}"/><path d="M${cx - s * 0.8} ${cy + s * 0.5} L${cx - s * 0.25} ${cy - s * 0.1} L${cx + s * 0.15} ${cy + s * 0.3} L${cx + s * 0.45} ${cy} L${cx + s * 0.8} ${cy + s * 0.5}"/><circle cx="${cx + s * 0.45}" cy="${cy - s * 0.35}" r="${s * 0.14}"/></g></svg>`;
   return `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
+}
+
+/**
+ * Placeholders sitting on dark bands (dark, brand or gradient sections, dark
+ * cards) are redrawn in a dark tint, so a pending image does not show as a
+ * bright pale box on a dark page.
+ */
+export function retonePlaceholders(
+  html: string,
+  colors: { primary?: string | null; secondary?: string | null; accent?: string | null } | null,
+): string {
+  if (!colors?.primary) return html;
+  return html.replace(/<img\b[^>]*>/gi, (tag, offset: number) => {
+    const src = tag.match(/\bsrc="(data:image\/svg\+xml;base64,[^"]+)"/i)?.[1];
+    if (!src) return tag;
+    let svg = "";
+    try {
+      svg = Buffer.from(src.slice(src.indexOf(",") + 1), "base64").toString("utf8");
+    } catch {
+      return tag;
+    }
+    if (!svg.includes(`data-${PLACEHOLDER_MARK}="light"`)) return tag;
+    // The nearest section opened before this image decides the band.
+    const before = html.slice(Math.max(0, offset - 60_000), offset);
+    const opens = [...before.matchAll(/<(section|header|footer)\b[^>]*class="([^"]*)"/gi)];
+    const band = opens.length ? opens[opens.length - 1][2] : "";
+    if (!/adr-(section|header|footer)--(dark|brand|gradient)/.test(band)) return tag;
+    const w = Number(svg.match(/\bwidth="(\d+)"/)?.[1]) || 1200;
+    const h = Number(svg.match(/\bheight="(\d+)"/)?.[1]) || 800;
+    return tag.replace(src, placeholderDataUri({ id: "", purpose: "", width: w, height: h }, colors, "dark"));
+  });
 }
 
 function extractHtmlDocument(raw: string): string | null {

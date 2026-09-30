@@ -126,6 +126,18 @@ export function applyDesignFixes(html: string): { html: string; fixed: string[] 
     }
   });
 
+  // Images with no source show a broken icon and their alt text: remove them,
+  // and the empty frame they sat in. Planned image slots are filled elsewhere.
+  $("img").each((_, e) => {
+    const img = $(e);
+    const src = (img.attr("src") || "").trim();
+    if (img.attr("data-adrival-slot") || (src && !/^(#|about:blank|undefined|null)$/i.test(src))) return;
+    const frame = img.parent(".adr-media");
+    if (frame.length && frame.children().length === 1 && !frame.text().trim()) frame.remove();
+    else img.remove();
+    bump("Removed images that had no source");
+  });
+
   // Images: alt present, below-the-fold images lazy (Vercel images).
   const firstSection = $("main section").first();
   $("img").each((_, e) => {

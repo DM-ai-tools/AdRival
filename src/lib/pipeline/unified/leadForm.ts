@@ -54,21 +54,43 @@ function wide(field: CompetitorFormField): boolean {
   return field.type === "textarea" || field.type === "radio" || field.type === "checkbox";
 }
 
+/**
+ * A placeholder shows an example, never a copy of the label (Vercel forms):
+ * "Company Website* (e.g. example.com)" becomes "e.g. example.com", and
+ * "Email*" under an "Email" label is dropped.
+ */
+export function placeholderHint(field: Pick<CompetitorFormField, "label" | "placeholder">): string | null {
+  const raw = (field.placeholder || "").replace(/\*/g, "").replace(/\s+/g, " ").trim();
+  if (!raw) return null;
+  const example = raw.match(/\((e\.g\.|eg|for example|like)\s*([^)]+)\)/i);
+  if (example) return `e.g. ${example[2].trim()}`;
+  const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const label = norm(field.label || "");
+  const text = norm(raw);
+  // The same words as the label (or a shorter/longer form of it) add nothing.
+  if (!text) return null;
+  if (label && (text === label || label.includes(text) || text.includes(label))) return null;
+  return raw;
+}
+
 function fieldHtml(field: CompetitorFormField, index: number, formId: string): string {
   const name = slug(field.name || field.label, `field_${index + 1}`);
   const id = `${formId}-${name}`;
   const req = field.required ? " required" : "";
   const star = field.required ? `<span class="adr-req" aria-hidden="true">*</span>` : "";
   const label = esc(field.label || "Your answer");
+  // Label text and its required mark stay on one line above the control.
+  const caption = `<span class="adr-field-label">${label}${star}</span>`;
   const cls = `adr-field${wide(field) ? " adr-field--wide" : ""}`;
-  const placeholder = field.placeholder ? ` placeholder="${esc(field.placeholder)}"` : "";
+  const hint = placeholderHint(field);
+  const placeholder = hint ? ` placeholder="${esc(hint)}"` : "";
   if (field.type === "textarea") {
-    return `<label class="${cls}" for="${id}">${label}${star}<textarea id="${id}" name="${name}" rows="4"${req}${placeholder}></textarea></label>`;
+    return `<label class="${cls}" for="${id}">${caption}<textarea id="${id}" name="${name}" rows="4"${req}${placeholder}></textarea></label>`;
   }
   if (field.type === "select") {
     const options = field.options?.length ? field.options : [];
     const first = `<option value="" disabled selected>${esc(field.placeholder || "Select…")}</option>`;
-    return `<label class="${cls}" for="${id}">${label}${star}<select id="${id}" name="${name}"${req}>${first}${options
+    return `<label class="${cls}" for="${id}">${caption}<select id="${id}" name="${name}"${req}>${first}${options
       .map((o) => `<option>${esc(o)}</option>`)
       .join("")}</select></label>`;
   }
@@ -82,7 +104,7 @@ function fieldHtml(field: CompetitorFormField, index: number, formId: string): s
     return `<label class="adr-check adr-field--wide"><input type="checkbox" name="${name}"${req}> <span>${label}</span></label>`;
   }
   const type = ["email", "tel", "url", "number"].includes(field.type) ? field.type : "text";
-  return `<label class="${cls}" for="${id}">${label}${star}<input id="${id}" name="${name}" type="${type}" autocomplete="${autocompleteFor(field)}"${req}${placeholder}></label>`;
+  return `<label class="${cls}" for="${id}">${caption}<input id="${id}" name="${name}" type="${type}" autocomplete="${autocompleteFor(field)}"${req}${placeholder}></label>`;
 }
 
 function gridOf(fields: CompetitorFormField[], formId: string, twoColumn: boolean, offset = 0): string {

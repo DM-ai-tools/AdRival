@@ -33,7 +33,31 @@ function visible(el){
   return !inHiddenLayer(el);
 }
 function px(v){ var n = parseFloat(v); return isFinite(n) ? Math.round(n * 10) / 10 : null; }
-function parseRgb(c){ var m = String(c || '').match(/rgba?\(([^)]+)\)/); if (!m) return null; var p = m[1].split(',').map(function(x){ return parseFloat(x); }); return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 }; }
+var __rgbCache = {}; var __ctx = null;
+// Any CSS colour the browser understands (rgb, hex, oklch, lab, color-mix…)
+// as rgba numbers: paint it on a 1x1 canvas and read the pixel back.
+function parseRgb(c){
+  var key = String(c || '').trim(); if (!key || key === 'transparent' || key === 'none') return null;
+  if (key in __rgbCache) return __rgbCache[key];
+  var out = null;
+  var m = key.match(/^rgba?\(([^)]+)\)$/);
+  if (m && key.indexOf('/') < 0) { var p = m[1].split(',').map(function(x){ return parseFloat(x); }); if (p.length >= 3 && p.every(function(v){ return isFinite(v); })) out = { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 }; }
+  if (!out) {
+    try {
+      if (!__ctx) { var cv = document.createElement('canvas'); cv.width = 1; cv.height = 1; __ctx = cv.getContext('2d', { willReadFrequently: true }); }
+      __ctx.clearRect(0, 0, 1, 1); __ctx.fillStyle = 'rgba(0,0,0,0)'; __ctx.fillStyle = key; __ctx.fillRect(0, 0, 1, 1);
+      var d = __ctx.getImageData(0, 0, 1, 1).data;
+      out = d[3] === 0 ? { r: 0, g: 0, b: 0, a: 0 } : { r: d[0], g: d[1], b: d[2], a: d[3] / 255 };
+    } catch (e) { out = null; }
+  }
+  __rgbCache[key] = out; return out;
+}
+/** Colours inside a gradient, as rgb()/rgba() too. */
+function normImage(img){ return String(img || '').replace(/(oklch|oklab|lch|lab|hsla?|hwb|color)\([^()]*\)/gi, function(c){ return norm(c); }); }
+/** The first painted colour behind an element (itself, then its parents). */
+function backdropOf(el){ for (var n = el; n; n = n.parentElement) { var bg = getComputedStyle(n).backgroundColor; if (painted(bg)) return norm(bg); } return 'rgb(255, 255, 255)'; }
+/** The colour as rgb()/rgba(), so the pipeline never sees oklch() or lab(). */
+function norm(c){ var p = parseRgb(c); if (!p) return c; return p.a >= 0.999 ? 'rgb(' + p.r + ', ' + p.g + ', ' + p.b + ')' : 'rgba(' + p.r + ', ' + p.g + ', ' + p.b + ', ' + Math.round(p.a * 100) / 100 + ')'; }
 function lum(c){ var p = parseRgb(c); if (!p) return null; function t(v){ v = v / 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); } return 0.2126 * t(p.r) + 0.7152 * t(p.g) + 0.0722 * t(p.b); }
 function painted(c){ var p = parseRgb(c); return !!p && p.a > 0.05; }
 `;
@@ -206,7 +230,7 @@ function layoutOf(sec){
   var cardStyle = null;
   if (best.el && best.cards) {
     var c = best.el.children[0]; var s = cs(c);
-    cardStyle = { radius: px(s.borderTopLeftRadius), shadow: s.boxShadow && s.boxShadow !== 'none', border: parseFloat(s.borderTopWidth) > 0, background: painted(s.backgroundColor) ? s.backgroundColor : null };
+    cardStyle = { radius: px(s.borderTopLeftRadius), shadow: s.boxShadow && s.boxShadow !== 'none', border: parseFloat(s.borderTopWidth) > 0, background: painted(s.backgroundColor) ? norm(s.backgroundColor) : null };
   }
   return { columns: Math.min(best.columns, 6), cards: best.cards, card: cardStyle };
 }
@@ -232,13 +256,20 @@ function backgroundOf(sec){
   for (var i = 0; i < nodes.length; i++) {
     var n = nodes[i]; var b = box(n); if (b.width < sb.width * 0.85 || b.height < sb.height * 0.6) continue;
     var s = cs(n);
-    if (s.backgroundImage && /gradient/.test(s.backgroundImage)) return { kind: 'gradient', color: s.backgroundColor, image: s.backgroundImage.slice(0, 300) };
-    if (s.backgroundImage && /url\(/.test(s.backgroundImage)) return { kind: 'image', color: s.backgroundColor, image: null };
-    if (painted(s.backgroundColor)) { var L = lum(s.backgroundColor); return { kind: L !== null && L < 0.18 ? 'dark' : 'color', color: s.backgroundColor, image: null }; }
+    if (s.backgroundImage && /gradient/.test(s.backgroundImage)) return { kind: 'gradient', color: norm(s.backgroundColor), image: normImage(s.backgroundImage).slice(0, 300), base: backdropOf(n) };
+    if (s.backgroundImage && /url\(/.test(s.backgroundImage)) return { kind: 'image', color: norm(s.backgroundColor), image: null };
+    if (painted(s.backgroundColor)) { var L = lum(s.backgroundColor); return { kind: L !== null && L < 0.18 ? 'dark' : 'color', color: norm(s.backgroundColor), image: null }; }
   }
-  var body = cs(document.body).backgroundColor;
-  var L2 = lum(body);
-  return { kind: L2 !== null && L2 < 0.18 ? 'dark' : 'page', color: body, image: null };
+  // A transparent section shows whatever is behind it: the nearest painted
+  // wrapper, the body or the root (many dark pages paint a wrapper, not body).
+  for (var p = sec.parentElement; p; p = p.parentElement) {
+    var ps = cs(p);
+    if (painted(ps.backgroundColor)) {
+      var L2 = lum(ps.backgroundColor);
+      return { kind: L2 !== null && L2 < 0.18 ? 'dark' : 'page', color: norm(ps.backgroundColor), image: null };
+    }
+  }
+  return { kind: 'page', color: norm(cs(document.body).backgroundColor), image: null };
 }
 function alignOf(sec){ var h = sec.querySelector('h1,h2,h3'); return h ? cs(h).textAlign : cs(sec).textAlign; }
 function paddingOf(sec){
@@ -319,7 +350,7 @@ var shape = {
   cardBorder: sections.some(function(s){ return s.layout.card && s.layout.card.border; }),
   darkBands: sections.filter(function(s){ return s.background.kind === 'dark'; }).length,
   gradientBands: sections.filter(function(s){ return s.background.kind === 'gradient'; }).length,
-  pageBackground: cs(document.body).backgroundColor
+  pageBackground: norm(cs(document.body).backgroundColor)
 };
 var eyebrows = Array.prototype.slice.call(document.querySelectorAll('span,p,div')).filter(function(e){ if (!visible(e)) return false; var t = leafText(e); if (!t || t.length > 40 || t.length < 3) return false; var s = cs(e); return (s.textTransform === 'uppercase' || parseFloat(s.letterSpacing) > 1) && parseFloat(s.fontSize) <= 16; }).slice(0, 10);
 if (eyebrows.length >= 2) { var es = cs(eyebrows[0]); shape.eyebrow = { size: px(es.fontSize), weight: parseInt(es.fontWeight, 10), letterSpacing: px(es.letterSpacing), pill: painted(es.backgroundColor) && parseFloat(es.borderTopLeftRadius) > 8 }; }
@@ -332,13 +363,13 @@ if (header) {
   var cta = null; var ha = header.querySelectorAll('a,button');
   for (var h = 0; h < ha.length; h++) { var s = cs(ha[h]); if (visible(ha[h]) && painted(s.backgroundColor) && parseFloat(s.paddingLeft) >= 8) { cta = clean(ha[h].innerText).slice(0, 40); break; } }
   var logo = header.querySelector('img, svg'); var lb = logo ? box(logo) : null;
-  headerInfo = { bounds: hb, nav: linkLabels(header, 10).filter(function(t){ return t !== cta; }), cta: cta, dark: (lum(hs.backgroundColor) || 1) < 0.18, sticky: /sticky|fixed/.test(hs.position), logoPosition: lb ? (lb.x < W * 0.3 ? 'left' : lb.x > W * 0.6 ? 'right' : 'center') : 'unknown', topBar: false };
+  headerInfo = { bounds: hb, nav: linkLabels(header, 10).filter(function(t){ return t !== cta; }), cta: cta, dark: (lum(backdropOf(header)) ?? 1) < 0.18, sticky: /sticky|fixed/.test(hs.position), logoPosition: lb ? (lb.x < W * 0.3 ? 'left' : lb.x > W * 0.6 ? 'right' : 'center') : 'unknown', topBar: false };
 }
 var footerInfo = null;
 if (footer) {
   var fb = box(footer); var fs2 = cs(footer);
   var cols = 0; var inner = footer; for (var d = 0; d < 6; d++) { var vk = Array.prototype.slice.call(inner.children).filter(function(c){ return visible(c) && box(c).height > 30; }); var rows2 = rowsOf(vk); var mx = rows2.length ? Math.max.apply(null, rows2.map(function(r){ return r.n; })) : 0; if (mx >= 2) { cols = mx; break; } if (vk.length === 1) inner = vk[0]; else break; }
-  footerInfo = { bounds: fb, columns: cols, dark: (lum(fs2.backgroundColor) || 1) < 0.18, links: linkLabels(footer, 24) };
+  footerInfo = { bounds: fb, columns: cols, dark: (lum(backdropOf(footer)) ?? 1) < 0.18, links: linkLabels(footer, 24) };
 }
 
 return {

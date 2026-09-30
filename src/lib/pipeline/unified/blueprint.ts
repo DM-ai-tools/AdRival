@@ -1,5 +1,5 @@
 import sharp from "sharp";
-import type { Browser, Page } from "playwright";
+import type { Browser, Frame, Page } from "playwright";
 import { assertPublicHttpUrl } from "../content/safeUrl";
 import type { InventoryComponent, InventorySection, PageInventory } from "../content/inventory";
 import type { CompetitorFormField, CompetitorFormSpec } from "./recreateChrome";
@@ -34,7 +34,8 @@ export type BlueprintSection = {
     position: "left" | "right" | "above" | "below" | "background" | "none";
     largest: { width: number; height: number } | null;
   };
-  background: { kind: "page" | "color" | "dark" | "gradient" | "wash" | "image"; color: string | null; image: string | null };
+  /** base: for gradients, the colour showing through transparent stops. */
+  background: { kind: "page" | "color" | "dark" | "gradient" | "wash" | "image"; color: string | null; image: string | null; base?: string | null };
   align: string;
   paddingTop: number | null;
   containerWidth: number | null;
@@ -327,11 +328,13 @@ export function classifySection(section: Pick<BlueprintSection, "order" | "headi
   const roles = section.blocks.map((b) => b.role);
   if (section.order === 0) return "hero";
   if (formInside) return "form";
-  if (section.faq || /frequently asked|faqs?\b|common questions/.test(text)) return "faq";
+  if (section.faq || /frequently asked|faqs?\b|common questions|got questions|answers you need/.test(text)) return "faq";
   if (section.media.logos >= 4 && section.wordCount < 60) return "logos";
   if (roles.filter((r) => r === "stat").length >= 3) return "stats";
-  if (/pricing|packages?|plans?\b|per month|\/mo\b/.test(text)) return "pricing";
-  if (/testimonial|review|what (our )?clients|say about|case stud|results|success stor/.test(text) || roles.filter((r) => r === "quote").length >= 2) {
+  // Real price signals only: "Get my growth plan" on a button is not a pricing table.
+  // One dollar figure is a result ("$2M in sales"); a price list shows several.
+  if (/\bpricing\b|\bper (month|year|week)\b|\/(mo|month|yr)\b/.test(text) || (text.match(/[$€£]\s?\d/g) || []).length >= 2) return "pricing";
+  if (/testimonial|reviews?\b|what (our )?(clients|customers) (say|think)|say about|case stud|success stor|take theirs|★/.test(text) || roles.filter((r) => r === "quote").length >= 2) {
     return "testimonials";
   }
   if (/how (it|we) work|process|steps?\b|\b(1|01)\b.*\b(2|02)\b/.test(text)) return "steps";
@@ -344,9 +347,11 @@ export function classifySection(section: Pick<BlueprintSection, "order" | "headi
 // ——— backgrounds ———
 
 /** Average lightness of a CSS gradient's colour stops, blended over white (0 dark – 1 light). */
-export function gradientLightness(image: string | null | undefined): number | null {
+export function gradientLightness(image: string | null | undefined, base?: string | null): number | null {
   const stops = String(image || "").match(/rgba?\([^)]+\)|#[0-9a-f]{3,8}\b/gi) || [];
   if (!stops.length) return null;
+  const bm = String(base || "").match(/rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)/i);
+  const backdrop: [number, number, number] = bm ? [Number(bm[1]), Number(bm[2]), Number(bm[3])] : [255, 255, 255];
   const lum = (r: number, g: number, b: number) => {
     const t = (v: number) => {
       const x = v / 255;
@@ -368,8 +373,9 @@ export function gradientLightness(image: string | null | undefined): number | nu
       [r, g, b] = p;
       a = p.length > 3 ? p[3] : 1;
     }
-    // Over a white page.
-    return lum(r * a + 255 * (1 - a), g * a + 255 * (1 - a), b * a + 255 * (1 - a));
+    // Over what shows through: the section's backdrop, else a white page.
+    const [br, bg, bb] = backdrop;
+    return lum(r * a + br * (1 - a), g * a + bg * (1 - a), b * a + bb * (1 - a));
   });
   return values.reduce((x, y) => x + y, 0) / values.length;
 }
@@ -396,6 +402,35 @@ async function cropJpeg(full: Buffer, meta: { width: number; height: number }, b
 }
 
 // ——— capture ———
+
+/**
+ * Each capture step gets its own time limit, so one stuck step (a frame that
+ * never finishes loading, a page that keeps growing) cannot hang the capture.
+ * Steps that time out are skipped; BLUEPRINT_DEBUG=1 logs every step's time.
+ */
+async function step<T>(name: string, work: Promise<T>, ms: number, fallback: T, warnings?: string[]): Promise<T> {
+  const started = Date.now();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), ms);
+  });
+  try {
+    const result = await Promise.race([work, timeout]);
+    if (result === "timeout") {
+      console.warn(`[blueprint] ${name} timed out after ${ms}ms`);
+      warnings?.push(`${name} took too long and was skipped.`);
+      work.catch(() => undefined);
+      return fallback;
+    }
+    if (process.env.BLUEPRINT_DEBUG) console.info(`[blueprint] ${name} ${Date.now() - started}ms`);
+    return result as T;
+  } catch (err) {
+    console.warn(`[blueprint] ${name} failed`, err instanceof Error ? err.message.slice(0, 160) : err);
+    return fallback;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 async function settle(page: Page): Promise<void> {
   await page.addStyleTag({ content: REVEAL_CSS }).catch(() => undefined);
@@ -428,65 +463,98 @@ async function hideOverlays(page: Page): Promise<void> {
     .catch(() => undefined);
 }
 
-async function formsInFrames(page: Page, warnings: string[]): Promise<Array<{ raw: RawForm; frameUrl: string | null; frameBounds: RawForm["bounds"] | null }>> {
-  const out: Array<{ raw: RawForm; frameUrl: string | null; frameBounds: RawForm["bounds"] | null }> = [];
-  for (const frame of page.frames()) {
-    const isMain = frame === page.mainFrame();
-    let frameBounds: RawForm["bounds"] | null = null;
-    if (!isMain) {
-      try {
-        const handle = await frame.frameElement();
-        const bb = await handle.boundingBox();
-        if (!bb || bb.width < 120 || bb.height < 80) continue;
-        const scrollY = await page.evaluate(() => window.scrollY);
-        frameBounds = { x: Math.round(bb.x), y: Math.round(bb.y + scrollY), width: Math.round(bb.width), height: Math.round(bb.height) };
-      } catch {
-        continue;
-      }
-    }
-    try {
-      const forms = (await frame.evaluate(FORM_PROBE_SCRIPT)) as RawForm[];
-      for (const raw of forms) out.push({ raw, frameUrl: isMain ? null : frame.url(), frameBounds });
-      if (!isMain && !forms.length && /calendly|typeform|leadconnector|msgsndr|hubspot|jotform/i.test(frame.url())) {
-        out.push({
-          raw: {
-            index: 0,
-            hidden: false,
-            bounds: frameBounds!,
-            provider: hostLabel(frame.url()),
-            heading: null,
-            intro: null,
-            submitLabel: null,
-            nextLabel: null,
-            steps: [],
-            consent: false,
-            fields: [],
-            style: null,
-          },
-          frameUrl: frame.url(),
-          frameBounds,
-        });
-      }
-    } catch (err) {
-      if (!isMain) warnings.push(`Embedded form in ${hostLabel(frame.url()) || "a frame"} could not be read.`);
-      else warnings.push(`Forms could not be read: ${(err instanceof Error ? err.message : String(err)).slice(0, 120)}`);
-    }
+const NOT_A_FORM_FRAME =
+  /google\.[a-z.]+\/maps|maps\.google|youtube(-nocookie)?\.com|youtu\.be|player\.vimeo|vimeo\.com\/video|wistia|vidyard|loom\.com\/embed|recaptcha|googletagmanager|doubleclick|facebook\.com\/(plugins|tr)|instagram\.com\/embed|twitter\.com|x\.com\/embed|tiktok\.com\/embed|spotify|soundcloud/i;
+
+/** A map or video frame, or a blank helper frame inside one (form embeds like HubSpot use blank frames too). */
+function insideNonFormFrame(frame: Frame, main: Frame): boolean {
+  for (let f: Frame | null = frame; f && f !== main; f = f.parentFrame()) {
+    if (NOT_A_FORM_FRAME.test(f.url())) return true;
   }
-  return out;
+  return false;
+}
+
+async function formsInFrames(page: Page, warnings: string[]): Promise<Array<{ raw: RawForm; frameUrl: string | null; frameBounds: RawForm["bounds"] | null }>> {
+  type Entry = { raw: RawForm; frameUrl: string | null; frameBounds: RawForm["bounds"] | null };
+  const main = page.mainFrame();
+  // Frames are read at the same time: a dead frame then costs its own limit
+  // once, instead of every dead frame adding its limit to the capture.
+  const perFrame = await Promise.all(
+    page.frames().map(async (frame): Promise<Entry[]> => {
+      const isMain = frame === main;
+      // Maps and videos never hold a lead form, and Google Maps embeds never answer.
+      if (!isMain && insideNonFormFrame(frame, main)) return [];
+      let frameBounds: RawForm["bounds"] | null = null;
+      if (!isMain) {
+        try {
+          const handle = await step("Frame lookup", frame.frameElement(), 4_000, null);
+          if (!handle) return [];
+          const bb = await step("Frame position", handle.boundingBox(), 4_000, null);
+          if (!bb || bb.width < 120 || bb.height < 80) return [];
+          const scrollY = await page.evaluate(() => window.scrollY);
+          frameBounds = { x: Math.round(bb.x), y: Math.round(bb.y + scrollY), width: Math.round(bb.width), height: Math.round(bb.height) };
+        } catch {
+          return [];
+        }
+      }
+      const url = frame.url();
+      const blank = !url || /^about:/i.test(url);
+      // A blank frame that holds a form (HubSpot draws into one) answers at
+      // once; a blank frame that never loaded would wait forever.
+      const limit = isMain ? 20_000 : blank ? 3_000 : 8_000;
+      try {
+        const forms = await step(
+          isMain ? "Reading the page's forms" : `Reading an embedded form (${hostLabel(url) || "frame"})`,
+          frame.evaluate(FORM_PROBE_SCRIPT) as Promise<RawForm[]>,
+          limit,
+          [] as RawForm[],
+          blank ? undefined : warnings,
+        );
+        const entries: Entry[] = forms.map((raw) => ({ raw, frameUrl: isMain ? null : url, frameBounds }));
+        if (!isMain && !forms.length && /calendly|typeform|leadconnector|msgsndr|hubspot|jotform/i.test(url)) {
+          entries.push({
+            raw: {
+              index: 0,
+              hidden: false,
+              bounds: frameBounds!,
+              provider: hostLabel(url),
+              heading: null,
+              intro: null,
+              submitLabel: null,
+              nextLabel: null,
+              steps: [],
+              consent: false,
+              fields: [],
+              style: null,
+            },
+            frameUrl: url,
+            frameBounds,
+          });
+        }
+        return entries;
+      } catch (err) {
+        if (!isMain) warnings.push(`Embedded form in ${hostLabel(url) || "a frame"} could not be read.`);
+        else warnings.push(`Forms could not be read: ${(err instanceof Error ? err.message : String(err)).slice(0, 120)}`);
+        return [];
+      }
+    }),
+  );
+  return perFrame.flat();
 }
 
 /** Capture a blueprint from a page that is already open (tests use setContent). */
 export async function captureBlueprintFromPage(page: Page, sourceUrl: string): Promise<CompetitorBlueprint> {
   const warnings: string[] = [];
-  await settle(page);
-  const rawForms = await formsInFrames(page, warnings);
-  await hideOverlays(page);
-  const probe = (await page.evaluate(BLUEPRINT_PROBE_SCRIPT)) as RawProbe;
+  await step("Scrolling the page", settle(page), 45_000, undefined, warnings);
+  const rawForms = await step("Reading forms", formsInFrames(page, warnings), 60_000, [], warnings);
+  await step("Hiding pop-ups", hideOverlays(page), 15_000, undefined);
+  const probe = (await step("Measuring sections", page.evaluate(BLUEPRINT_PROBE_SCRIPT) as Promise<RawProbe>, 60_000, null as RawProbe | null, warnings));
+  if (!probe) throw new Error("The competitor page's sections could not be measured.");
 
   let full: Buffer | null = null;
   let meta: { width: number; height: number } | null = null;
   try {
-    full = await page.screenshot({ fullPage: true, type: "png" });
+    full = await page.screenshot({ fullPage: true, type: "png", timeout: 60_000 });
     const m = await sharp(full).metadata();
     meta = { width: m.width || VIEWPORT.width, height: m.height || 0 };
   } catch (err) {
@@ -499,11 +567,19 @@ export async function captureBlueprintFromPage(page: Page, sourceUrl: string): P
   for (const [index, raw] of probe.sections.entries()) {
     // Dot and grid textures (1–3px stops) are decoration on a light page, not a band.
     const pattern = raw.background.kind === "gradient" && /\b[0-3](\.\d+)?px\b/.test(raw.background.image || "");
-    const light = raw.background.kind === "gradient" ? (pattern ? 1 : gradientLightness(raw.background.image)) : null;
+    const light = raw.background.kind === "gradient" ? (pattern ? 1 : gradientLightness(raw.background.image, raw.background.base)) : null;
+    // A glow that barely changes the backdrop is the backdrop: a dark page
+    // with a faint purple glow is a dark band, not a strong gradient band.
+    const baseLight = raw.background.base ? gradientLightness(raw.background.base) : null;
+    const glowOnDark = light !== null && baseLight !== null && baseLight < 0.18 && Math.abs(light - baseLight) < 0.06;
     sections.push({
       ...raw,
       // A faint glow on a light page is a wash, not a colour band.
-      background: light !== null && light > 0.72 ? { ...raw.background, kind: "wash" } : raw.background,
+      background: glowOnDark
+        ? { ...raw.background, kind: "dark", color: raw.background.base || raw.background.color }
+        : light !== null && light > 0.72
+          ? { ...raw.background, kind: "wash" }
+          : raw.background,
       id: `sec-${index + 1}`,
       kind: "content",
       formId: null,

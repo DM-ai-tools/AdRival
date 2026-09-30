@@ -440,7 +440,14 @@ export async function runUnifiedRecreation(
       try {
         page = persist(competitorId, page, stages, "analyzing_competitor", "Capturing the competitor page section by section…");
         // Long pages take about a minute alone and longer while the brand research runs alongside.
-        blueprint = await captureCompetitorBlueprint(sourceUrl, { timeoutMs: 180_000 });
+        try {
+          blueprint = await captureCompetitorBlueprint(sourceUrl, { timeoutMs: 180_000 });
+        } catch (first) {
+          // One more try before the simpler rebuild: a slow first load often succeeds the second time.
+          console.warn("[unified] blueprint capture failed once, retrying", first instanceof Error ? first.message : first);
+          page = persist(competitorId, page, stages, "analyzing_competitor", "Capturing the competitor page again…");
+          blueprint = await captureCompetitorBlueprint(sourceUrl, { timeoutMs: 180_000 });
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         captureFallbackNote = `The detailed competitor capture was unavailable (${sanitizeClientFacingText(message).slice(0, 120)}), so this page used the simpler rebuild. Rebuild the page to try the detailed capture again.`;

@@ -137,3 +137,47 @@ test("the DESIGN.md style file follows the awesome-design-md layout", () => {
   assert.ok(md.includes(ds.tokens["--primary"]));
   assert.match(md, /Style direction: Minimal/);
 });
+
+test("images without a source are removed, with their empty frame", () => {
+  const html = `<html><body><main><section data-section-id="sec-1"><div class="adr-card"><div class="adr-media"><img src="" alt="Office"></div><h3>Melbourne</h3></div><img src="team.jpg" alt="Team"></section></main></body></html>`;
+  const { html: out, fixed } = applyDesignFixes(html);
+  assert.doesNotMatch(out, /alt="Office"/);
+  assert.doesNotMatch(out, /adr-media/);
+  assert.match(out, /src="team.jpg"/);
+  assert.ok(fixed.some((f) => /no source/.test(f)));
+});
+
+test("form placeholders give an example instead of repeating the label", async () => {
+  const { placeholderHint } = await import("../src/lib/pipeline/unified/leadForm");
+  assert.equal(placeholderHint({ label: "Company", placeholder: "Company Name*" }), null);
+  assert.equal(placeholderHint({ label: "Full name", placeholder: "Name*" }), null);
+  assert.equal(placeholderHint({ label: "Website", placeholder: "Company Website* (e.g. example.com)" }), "e.g. example.com");
+  assert.equal(placeholderHint({ label: "Budget", placeholder: "$5,000 - $10,000" }), "$5,000 - $10,000");
+});
+
+test("headlines shrink when the competitor's size was set for a condensed font", () => {
+  const shape = { h1: { size: 96, weight: 400, lineHeight: 1, letterSpacing: 0, transform: "uppercase", family: "Anton" } } as never;
+  const wide = buildDesignSystem({ shape, colors, brandDesign: { fonts: ["Kanit"] } as never });
+  const same = buildDesignSystem({ shape, colors, brandDesign: { fonts: ["Bebas Neue"] } as never });
+  assert.match(wide.tokens["--h1"], /65px\)$/);
+  assert.match(same.tokens["--h1"], /96px\)$/);
+});
+
+test("a faint glow over a dark page reads as the dark page", async () => {
+  const { gradientLightness } = await import("../src/lib/pipeline/unified/blueprint");
+  const glow = "radial-gradient(60% 50% at 70% 20%, rgba(139, 92, 246, 0.18), rgba(0, 0, 0, 0) 70%)";
+  const overDark = gradientLightness(glow, "rgb(9, 9, 18)")!;
+  const overWhite = gradientLightness(glow)!;
+  assert.ok(overDark < 0.05, `${overDark}`);
+  assert.ok(overWhite > 0.72, `${overWhite}`);
+});
+
+test("placeholders on dark bands are redrawn dark; light sections keep light ones", async () => {
+  const { placeholderDataUri, retonePlaceholders } = await import("../src/lib/pipeline/unified/contract");
+  const c = { primary: "#A4D36B", secondary: "#072032", accent: "#A4D36B" };
+  const light = placeholderDataUri({ id: "a", purpose: "", width: 800, height: 600 }, c);
+  const html = `<section class="adr-section adr-section--dark" data-section-id="sec-1"><img data-adrival-slot="a" src="${light}"></section><section class="adr-section" data-section-id="sec-2"><img data-adrival-slot="b" src="${light}"></section>`;
+  const out = retonePlaceholders(html, c);
+  const tones = [...out.matchAll(/src="data:image\/svg\+xml;base64,([^"]+)"/g)].map((m) => Buffer.from(m[1], "base64").toString().match(/data-adr-placeholder="(\w+)"/)?.[1]);
+  assert.deepEqual(tones, ["dark", "light"]);
+});

@@ -99,6 +99,9 @@ function fluid(px: number, floor: number): string {
   return `clamp(${min}px, ${vw}vw, ${px}px)`;
 }
 
+const CONDENSED =
+  /condensed|compressed|narrow|\banton\b|bebas|oswald|league gothic|fjalla|\bteko\b|big shoulders|pathway gothic|six caps|antonio|staatliches|sofia sans (extra )?condensed/i;
+
 /** Surface rules for the chosen style direction (Taste Skill), on top of the brand tokens. */
 function styleCss(style: StyleDirection): string {
   if (style === "minimal") {
@@ -173,6 +176,13 @@ export function buildDesignSystem(input: {
 
   const h1 = typeRule(shape?.h1 || null, { size: 56, weight: 800, lh: 1.05 }, 36, 96);
   const h2 = typeRule(shape?.h2 || null, { size: 40, weight: 700, lh: 1.12 }, 26, 64);
+  // The competitor's sizes are for its own font. A condensed display face
+  // (Anton, Bebas, Oswald…) fits far more letters per line than a normal one,
+  // so the same size in the client's font would double the headline's lines.
+  if (CONDENSED.test(shape?.h1?.family || shape?.h2?.family || "") && !CONDENSED.test(headingFamily)) {
+    h1.size = Math.max(36, Math.round(h1.size * 0.68));
+    h2.size = Math.max(26, Math.round(h2.size * 0.75));
+  }
   const h3 = typeRule(shape?.h3 || null, { size: 22, weight: 700, lh: 1.3 }, 17, 32);
   const body = typeRule(shape?.body || null, { size: 17, weight: 400, lh: 1.6 }, 15, 20);
   // Body text in caps is almost always an eyebrow sample; never uppercase paragraphs.
@@ -254,7 +264,14 @@ export function buildDesignSystem(input: {
 
   // Quality floor from Vercel's guidelines and Impeccable: visible keyboard
   // focus, balanced headings, one-line buttons, 44px targets, reduced motion.
-  const qualityCss = `/* quality floor */
+  const qualityCss = `/* layout rhythm */
+.adr-card .adr-form-panel,.adr-form-panel .adr-form-panel{background:transparent;box-shadow:none;border:0;padding:0;margin-top:20px}
+.adr-section--dark .adr-card .adr-form-panel{color:inherit;--text-safe:var(--accent-on-dark);--text-muted:${mix("#FFFFFF", dark, 0.1)};--border:rgba(255,255,255,.16)}
+.adr-field-label{display:block}
+.adr-grid+*,.adr-split+*,.adr-faq+*,.adr-logos+*{margin-top:clamp(24px,3vw,40px)}
+.adr-center :is(.adr-container,.adr-narrow,.adr-stack,.adr-section-head)>.adr-btn{display:flex;width:fit-content;margin-inline:auto}
+div.adr-center{display:flex;flex-wrap:wrap;gap:12px;justify-content:center}
+/* quality floor */
 :where(a,button,input,select,textarea,summary,[tabindex]):focus-visible{outline:3px solid color-mix(in srgb, var(--primary) 65%, transparent);outline-offset:3px}
 h1,h2,h3{text-wrap:balance}
 p,li{text-wrap:pretty}

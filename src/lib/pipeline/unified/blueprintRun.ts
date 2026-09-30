@@ -4,7 +4,7 @@ import type { BrandSiteAssets } from "../brandAssets";
 import type { ClientEvidenceRecord } from "../content/model";
 import { embedRemoteImagesInHtml } from "../design/packageHtml";
 import { primaryBlueprintForm, type CompetitorBlueprint, type SectionKind } from "./blueprint";
-import { placeholderDataUri, type UnifiedImageReport } from "./contract";
+import { placeholderDataUri, retonePlaceholders, type UnifiedImageReport } from "./contract";
 import { buildDesignSystem } from "./designSystem";
 import { fidelityReport, measureRenderedPage, replaceSection, type FidelityReport } from "./fidelity";
 import {
@@ -473,6 +473,7 @@ export async function buildFromBlueprint(input: {
   let designCheck: DesignCheckSummary | null = null;
   try {
     input.onProgress("Checking the design…");
+    html = retonePlaceholders(html, input.colors);
     const fixes = applyDesignFixes(html);
     html = fixes.html;
     let check = await runDesignCheck(html);
@@ -556,6 +557,9 @@ export async function buildFromBlueprint(input: {
   } catch (err) {
     warnings.push(`The design check could not run: ${(err instanceof Error ? err.message : String(err)).slice(0, 140)}`);
   }
+
+  // Sections rebuilt during the checks may carry new light placeholders.
+  html = retonePlaceholders(html, input.colors);
 
   const designMd = designSystemToDesignMd({
     design,

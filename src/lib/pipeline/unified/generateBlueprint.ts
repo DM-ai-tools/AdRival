@@ -369,7 +369,7 @@ export async function generateBlueprintPage(input: BlueprintGenerationInput): Pr
 
   const heroPromise = runJson({
     content: heroParts,
-    maxTokens: 12_000,
+    maxTokens: 16_000,
     label: "Header, hero and footer",
     pass: "hero",
     signal: input.signal,
@@ -430,7 +430,23 @@ export async function generateBlueprintPage(input: BlueprintGenerationInput): Pr
     return { batch, result };
   });
 
-  const [heroResult, batchResults] = await Promise.all([heroPromise, batchPromise]);
+  const [firstHero, batchResults] = await Promise.all([heroPromise, batchPromise]);
+  let heroResult = firstHero;
+  // The header, hero and footer come back in one answer; if it was cut off or
+  // unreadable, ask once more with more room before giving up on the page.
+  if (typeof heroResult.json?.heroHtml !== "string" || !/<section[\s>]/i.test(String(heroResult.json.heroHtml))) {
+    console.warn(
+      `[blueprint] hero answer unusable (stop=${heroResult.stopReason}, chars=${heroResult.raw.length}, json=${Boolean(heroResult.json)}); retrying`,
+    );
+    heroResult = await runJson({
+      content: heroParts,
+      maxTokens: 20_000,
+      label: "Header, hero and footer (retry)",
+      pass: "hero",
+      signal: input.signal,
+      onProgress: input.onProgress,
+    });
+  }
   rawLength += heroResult.raw.length + batchResults.reduce((n, r) => n + r.result.raw.length, 0);
 
   const heroJson = heroResult.json;
