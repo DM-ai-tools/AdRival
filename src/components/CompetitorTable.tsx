@@ -12,6 +12,7 @@ import {
   normalizeWebsiteUrl,
 } from "@/lib/pipeline/linkGuards";
 import { PageAnalysisPanel } from "@/components/PageAnalysisPanel";
+import { ReturnLink } from "@/components/ReturnLink";
 
 function countryLabel(c?: string | null) {
   if (!c) return "—";
@@ -608,19 +609,17 @@ export function CompetitorTable({
                         </button>
                       )}
                       {analysis?.status === "completed" && (
-                        <a
+                        <ReturnLink
                           className="search-btn lp-analyze-btn lp-recreate-link"
                           href={`/recreate/${encodeURIComponent(c.id)}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          title="Open a new page that recreates this landing page for your business URL brand"
+                          title="Recreate this landing page for your client's brand. Nothing is charged until you press Create."
                         >
                           {c.recreatedPage?.status === "completed"
                             ? "View recreated page"
                             : c.recreatedPage?.status === "content_ready"
                               ? "Review content draft"
                               : "Recreate for my brand"}
-                        </a>
+                        </ReturnLink>
                       )}
                     </div>
                   </td>

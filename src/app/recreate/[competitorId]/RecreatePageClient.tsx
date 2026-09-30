@@ -13,6 +13,24 @@ import { stripDraftBanner } from "@/lib/pipeline/stripDraftBanner";
 import { synthesizeDocumentFromBlocks } from "@/lib/pipeline/synthesizeDocumentFromBlocks";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ContentReviewWorkspace } from "./ContentReviewWorkspace";
+import { readReturnPath, returnLabel } from "@/lib/returnTo";
+
+type Brand = { businessUrl: string | null; businessName: string | null };
+
+const LOOKUP_RECREATE_PREFIX = "lookup-recreate-";
+
+/** Where Back goes when the page was opened without a ?back= (old links, bookmarks). */
+function defaultReturnPath(runId: string | undefined): string {
+  if (!runId) return "/";
+  if (runId.startsWith(LOOKUP_RECREATE_PREFIX)) {
+    return `/?mode=lookup&lookup=${encodeURIComponent(runId.slice(LOOKUP_RECREATE_PREFIX.length))}`;
+  }
+  return `/?mode=search&run=${encodeURIComponent(runId)}&tab=preview`;
+}
+
+function hostOf(url: string | null | undefined): string {
+  return String(url || "").replace(/^https?:\/\//i, "").replace(/^www\./i, "").replace(/\/$/, "");
+}
 
 export function RecreatePageClient({ competitorId }: { competitorId: string }) {
   const [competitor, setCompetitor] = useState<CompetitorRecord | null>(null);
@@ -42,6 +60,15 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
   const [canEdit, setCanEdit] = useState(true);
   const [confirmRedesignOpen, setConfirmRedesignOpen] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [brand, setBrand] = useState<Brand | null>(null);
+  const [analysisReady, setAnalysisReady] = useState(false);
+  const [websiteDraft, setWebsiteDraft] = useState("");
+  const [savingWebsite, setSavingWebsite] = useState(false);
+  const [returnPath, setReturnPath] = useState<string | null>(null);
+
+  useEffect(() => {
+    setReturnPath(readReturnPath());
+  }, []);
 
   const syncFromPage = useCallback((nextPage: RecreatedLandingPage | null) => {
     setPage(nextPage);
@@ -86,6 +113,8 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     if (!res.ok) throw new Error(data.error || "Failed to load");
     setCompetitor(data.competitor as CompetitorRecord);
     setCanEdit(data.access?.canEdit !== false);
+    setBrand((data.brand as Brand | undefined) ?? null);
+    setAnalysisReady(data.pageAnalysis?.status === "completed");
     syncFromPage((data.recreatedPage as RecreatedLandingPage | null) ?? null);
     return data as {
       competitor: CompetitorRecord;
@@ -126,6 +155,25 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     },
     [competitorId, contentFeedback, designFeedback, syncFromPage],
   );
+
+  const saveWebsite = useCallback(async () => {
+    setError(null);
+    setSavingWebsite(true);
+    try {
+      const res = await fetch("/api/competitors/recreate-page", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ competitorId, action: "set_business_url", businessUrl: websiteDraft }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "The website could not be saved. Try again.");
+      setBrand((data.brand as Brand | undefined) ?? null);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSavingWebsite(false);
+    }
+  }, [competitorId, websiteDraft]);
 
   const stopRecreation = useCallback(async () => {
     setStopping(true);
@@ -361,7 +409,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
               "Analyze this competitor’s landing page first (Get offer & page details), then come back here.",
             );
           } else if (!inFlight) {
-            await generateContent(false);
+            // Generation is paid: wait for the user to press Create.
           } else {
             setGenerating(true);
             setView("design");
@@ -550,19 +598,39 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
       page?.contentDraft?.status === "ready" ||
       page?.contentDraft?.status === "approved");
 
+  const backHref = returnPath || defaultReturnPath(competitor?.runId);
+  const fromLookup = Boolean(competitor?.runId?.startsWith(LOOKUP_RECREATE_PREFIX));
+  // Nothing made yet: explain what happens and wait for the user, because
+  // creating the page is paid.
+  const showStart =
+    !loading &&
+    !generating &&
+    !building &&
+    analysisReady &&
+    !page?.html &&
+    page?.status !== "pending" &&
+    page?.status !== "design_pending";
+  const needsWebsite = !brand?.businessUrl;
+
   return (
     <main className="recreate-page">
       <header className="recreate-topbar">
         <div className="recreate-brand">
-          <Link
-            href={
-              competitor?.runId && !competitor.runId.startsWith("lookup-")
-                ? `/?mode=search&run=${encodeURIComponent(competitor.runId)}&tab=preview`
-                : "/"
-            }
-            className="recreate-back"
-          >
-            ← Back to results
+          <nav className="crumbs" aria-label="You are here">
+            <Link href={backHref}>{returnLabel(backHref)}</Link>
+            <span aria-hidden="true">›</span>
+            <Link href={backHref}>{fromLookup ? "Ads" : "Competitors"}</Link>
+            {competitor ? (
+              <>
+                <span aria-hidden="true">›</span>
+                <span>{competitor.pageName}</span>
+              </>
+            ) : null}
+            <span aria-hidden="true">›</span>
+            <span aria-current="page">Recreate for my brand</span>
+          </nav>
+          <Link href={backHref} className="recreate-back">
+            ← Back to {fromLookup ? "the lookup" : "competitors"}
           </Link>
           <div>
             <h1>Recreate for my brand</h1>
@@ -616,18 +684,20 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
               {view === "design" ? "Edit content" : "View design"}
             </button>
           ) : null}
-          <button
-            type="button"
-            className="ghost-btn"
-            disabled={busy}
-            onClick={() => void generateContent(true)}
-          >
-            {generating
-              ? "Creating page…"
-              : contentFeedback.trim() || designFeedback.trim()
-                ? "Regenerate page with feedback"
-                : "Regenerate page"}
-          </button>
+          {page?.html ? (
+            <button
+              type="button"
+              className="ghost-btn"
+              disabled={busy}
+              onClick={() => void generateContent(true)}
+            >
+              {generating
+                ? "Creating page…"
+                : contentFeedback.trim() || designFeedback.trim()
+                  ? "Regenerate page with feedback"
+                  : "Regenerate page"}
+            </button>
+          ) : null}
           {(page?.generatedImages || []).some((image) => image.slotState === "failed") ? (
             <button
               type="button"
@@ -662,7 +732,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
               Generate missing images
             </button>
           ) : null}
-          {canRegenerateDesign ? (
+          {canRegenerateDesign && page?.html ? (
             <button
               type="button"
               className="search-btn"
@@ -735,6 +805,109 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
         </p>
       ) : null}
 
+      {showStart ? (
+        <section className="recreate-start panel" aria-labelledby="recreate-start-title">
+          <h2 id="recreate-start-title">
+            {page?.status === "failed" ? "The last attempt didn't finish" : "Create your version of this page"}
+          </h2>
+          <ol className="recreate-start-steps">
+            <li>
+              <strong>Layout</strong> copied from {competitor?.pageName || "the competitor"}&apos;s page
+              {competitor?.pageAnalysis?.analyzedUrl ? (
+                <>
+                  {" "}
+                  (
+                  <a href={competitor.pageAnalysis.analyzedUrl} target="_blank" rel="noreferrer">
+                    {hostOf(competitor.pageAnalysis.analyzedUrl)}
+                  </a>
+                  )
+                </>
+              ) : null}
+            </li>
+            <li>
+              <strong>New copy</strong> written for{" "}
+              {brand?.businessUrl ? (
+                <a href={brand.businessUrl} target="_blank" rel="noreferrer">
+                  {brand.businessName || hostOf(brand.businessUrl)}
+                </a>
+              ) : (
+                "your client"
+              )}
+              , in their brand colours and fonts
+            </li>
+            <li>
+              <strong>Up to 6 images</strong> made to match
+            </li>
+            <li>
+              <strong>A finished page</strong> you can preview, then download as HTML
+            </li>
+          </ol>
+
+          {needsWebsite ? (
+            <div className="recreate-start-website">
+              <label htmlFor="recreate-website">
+                Your client&apos;s website <span className="muted">(needed for their brand, colours and logo)</span>
+              </label>
+              <div className="recreate-start-row">
+                <input
+                  id="recreate-website"
+                  type="url"
+                  inputMode="url"
+                  placeholder="yourbusiness.com"
+                  value={websiteDraft}
+                  disabled={!canEdit || savingWebsite}
+                  onChange={(e) => setWebsiteDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && websiteDraft.trim()) void saveWebsite();
+                  }}
+                />
+                <button
+                  type="button"
+                  className="search-btn"
+                  disabled={!canEdit || savingWebsite || !websiteDraft.trim()}
+                  onClick={() => void saveWebsite()}
+                >
+                  {savingWebsite ? "Saving…" : "Save website"}
+                </button>
+              </div>
+              <p className="muted">This search was run without a website. It is saved on the search for next time.</p>
+            </div>
+          ) : (
+            <>
+              <label htmlFor="recreate-start-notes" className="recreate-feedback-label">
+                Anything to change? <span className="muted">(optional)</span>
+              </label>
+              <textarea
+                id="recreate-start-notes"
+                className="recreate-feedback-input"
+                rows={2}
+                maxLength={4000}
+                disabled={!canEdit}
+                placeholder="e.g. Lead with the free consultation, mention Melbourne, softer tone…"
+                value={contentFeedback}
+                onChange={(e) => setContentFeedback(e.target.value)}
+              />
+            </>
+          )}
+
+          <div className="recreate-start-actions">
+            <button
+              type="button"
+              className="search-btn"
+              disabled={!canEdit || needsWebsite || busy}
+              onClick={() => void generateContent(page?.status === "failed")}
+            >
+              {page?.status === "failed" ? "Try again" : "Create my page"}
+            </button>
+            <p className="muted">
+              Takes a few minutes and uses credits. Nothing is charged until you press this button.
+            </p>
+          </div>
+          {!canEdit ? <p className="muted">You can view this page but not create it. Ask an editor of this client space.</p> : null}
+        </section>
+      ) : null}
+
+      {!showStart ? (
       <section className="recreate-feedback panel">
         <div className="recreate-feedback-grid">
           <div className="recreate-feedback-col">
@@ -787,8 +960,9 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
           </div>
         </div>
       </section>
+      ) : null}
 
-      {(colors || page?.businessUrl) && (
+      {(colors || page?.businessUrl) && !showStart && (
         <div className="recreate-palette-row">
           {colors ? (
             <div className="recreate-palette" aria-label="Brand colors">
@@ -991,7 +1165,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
       {error && (
         <div className="recreate-status panel" role="alert">
           <p className="error-text">{error}</p>
-          {canEdit && !busy && page?.status === "failed" ? (
+          {canEdit && !busy && page?.status === "failed" && !showStart ? (
             <button
               type="button"
               className="ghost-btn"
@@ -1000,12 +1174,11 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
               Try again
             </button>
           ) : null}
-          {/business website URL|Analyze this competitor|landing page analysis|Analyze the competitor/i.test(
-            error,
-          ) ? (
+          {/Analyze this competitor|landing page analysis|Analyze the competitor/i.test(error) ? (
             <p className="muted">
-              Needs: business website URL on the search run + completed landing
-              page analysis on this competitor.
+              Go back to the competitor list, press “Get offer &amp; page details” on this competitor, then
+              come back here.{" "}
+              <Link href={backHref}>Back to {fromLookup ? "the lookup" : "competitors"}</Link>
             </p>
           ) : null}
         </div>

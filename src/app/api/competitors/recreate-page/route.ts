@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getCompetitor, updateCompetitor } from "@/lib/db";
+import { getCompetitor, getJob, getLookupJob, updateCompetitor, updateJob, updateLookupJob } from "@/lib/db";
 import { repairPackEvidence } from "@/lib/pipeline/content/evidenceIds";
 import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
 import { runBillable } from "@/lib/accounting/run";
@@ -35,6 +35,31 @@ import { sanitizeClientFacingText, maskRecreatedPage, maskPageAnalysis } from "@
 export const runtime = "nodejs";
 /** Landing HTML streams can take well past 10 minutes. */
 export const maxDuration = 1800;
+
+const LOOKUP_RECREATE_PREFIX = "lookup-recreate-";
+
+/** "acme.com.au/" → "https://acme.com.au", or null when it is not a website. */
+function normalizeWebsite(raw: unknown): string | null {
+  const text = String(raw ?? "").trim();
+  if (!text) return null;
+  try {
+    const u = new URL(/^https?:\/\//i.test(text) ? text : `https://${text}`);
+    if (!/^https?:$/.test(u.protocol) || !u.hostname.includes(".")) return null;
+    return `${u.protocol}//${u.host}${u.pathname.replace(/\/$/, "")}`;
+  } catch {
+    return null;
+  }
+}
+
+/** The client's website and name for a competitor's run, if the run has one. */
+function brandFor(runId: string): { businessUrl: string | null; businessName: string | null } {
+  const job = getJob(runId);
+  const url = (job?.businessUrl || job?.businessProfile?.url || "").trim();
+  return {
+    businessUrl: url ? normalizeWebsite(url) : null,
+    businessName: job?.businessProfile?.businessName || null,
+  };
+}
 
 function maskCompetitor<T extends {
   recreatedPage?: unknown;
@@ -85,6 +110,28 @@ export async function POST(request: Request) {
       user,
       recreationActionPermission(action),
     );
+
+    // A search run without the client's website: save it so recreation can
+    // use the client's brand instead of sending the user back to search again.
+    if (action === "set_business_url") {
+      const website = normalizeWebsite(body.businessUrl);
+      if (!website) {
+        return NextResponse.json({ error: "Enter a website address, like yourbusiness.com" }, { status: 400 });
+      }
+      const job = getJob(existing.runId);
+      if (!job) return NextResponse.json({ error: "Search job not found for this competitor" }, { status: 404 });
+      updateJob(job.id, {
+        businessUrl: website,
+        ...(job.businessProfile && !job.businessProfile.url
+          ? { businessProfile: { ...job.businessProfile, url: website } }
+          : {}),
+      });
+      if (job.id.startsWith(LOOKUP_RECREATE_PREFIX)) {
+        const lookupId = job.id.slice(LOOKUP_RECREATE_PREFIX.length);
+        if (getLookupJob(lookupId)) updateLookupJob(lookupId, { businessUrl: website });
+      }
+      return NextResponse.json({ competitor: maskCompetitor(existing), brand: brandFor(existing.runId) });
+    }
 
     if (action === "stop") {
       const competitor = stopUnifiedRecreation(competitorId);
@@ -366,6 +413,7 @@ export async function GET(request: Request) {
       recreatedPage: maskRecreatedPage(competitor.recreatedPage ?? null),
       pageAnalysis: maskPageAnalysis(competitor.pageAnalysis ?? null),
       access: { role: access.role, canEdit: access.role !== "viewer" },
+      brand: brandFor(competitor.runId),
     });
   } catch (err) {
     return errorResponse(err);

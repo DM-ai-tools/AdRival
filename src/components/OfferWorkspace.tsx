@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { ReturnLink } from "./ReturnLink";
 import { useEffect, useMemo, useState } from "react";
 import type {
   LookupCoreOfferLadder,
@@ -316,12 +316,12 @@ export function OfferWorkspace({
             ) : null}
             {jobId ? (
               <p>
-                <Link
+                <ReturnLink
                   className="ghost-btn"
                   href={`/search-offers/${encodeURIComponent(jobId)}/${encodeURIComponent(offer.id)}`}
                 >
                   Open full offer page
-                </Link>
+                </ReturnLink>
               </p>
             ) : null}
           </aside>

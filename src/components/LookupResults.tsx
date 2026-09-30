@@ -15,6 +15,7 @@ import {
   LookupOffersTeaser,
 } from "@/components/LookupOffersReportPanel";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { currentReturnPath, withReturn } from "@/lib/returnTo";
 
 interface LookupResultsProps {
   job: LookupJob;
@@ -180,7 +181,7 @@ function AdCard({
     setError(null);
     if (!hasBrandUrl) {
       setError(
-        "Add your brand website above (Your brand website) before Content / Design.",
+        "Add your brand website above (Your brand website) before recreating this page.",
       );
       return;
     }
@@ -213,7 +214,7 @@ function AdCard({
       }
 
       if (data.recreatePath) {
-        router.push(String(data.recreatePath));
+        router.push(withReturn(String(data.recreatePath), currentReturnPath()));
       }
     } catch (err) {
       setError((err as Error).message);
@@ -447,7 +448,7 @@ function AdCard({
           setConfirmOpen(false);
           if (confirmExisting?.competitorId) {
             router.push(
-              `/recreate/${encodeURIComponent(confirmExisting.competitorId)}`,
+              withReturn(`/recreate/${encodeURIComponent(confirmExisting.competitorId)}`, currentReturnPath()),
             );
           }
         }}

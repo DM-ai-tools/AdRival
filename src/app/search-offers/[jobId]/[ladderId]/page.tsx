@@ -17,6 +17,7 @@ import {
   visibleOfferLadders,
 } from "@/components/OfferLadderFlow";
 import { searchedServiceFocus } from "@/lib/pipeline/offerServiceFocus";
+import { readReturnPath, returnLabel, withReturn } from "@/lib/returnTo";
 
 function shortUrl(url: string): string {
   return url.replace(/^https?:\/\//i, "").replace(/\/$/, "");
@@ -29,6 +30,14 @@ export default function SearchOfferLadderPage() {
   const [job, setJob] = useState<SearchJob | null>(null);
   const [ads, setAds] = useState<SearchCompetitorAdRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [returnPath, setReturnPath] = useState<string | null>(null);
+  useEffect(() => {
+    setReturnPath(readReturnPath());
+  }, []);
+  const backHref = returnPath || `/?mode=search&run=${encodeURIComponent(jobId)}&tab=offers`;
+  // Moving between offers keeps the way back.
+  const offerHref = (id: string) =>
+    withReturn(`/search-offers/${encodeURIComponent(jobId)}/${encodeURIComponent(id)}`, returnPath);
 
   useEffect(() => {
     let cancelled = false;
@@ -86,13 +95,17 @@ export default function SearchOfferLadderPage() {
   return (
     <main className="page product-shell">
       <section className="panel">
+        <nav className="crumbs" aria-label="You are here">
+          <Link href={backHref}>{returnLabel(backHref)}</Link>
+          <span aria-hidden="true">›</span>
+          <Link href={backHref}>Offers dashboard</Link>
+          <span aria-hidden="true">›</span>
+          <span aria-current="page">{ladder ? ladder.coreOffer.slice(0, 60) : "Offer"}</span>
+        </nav>
         <div className="results-head">
-          <h1>Offer ladder details</h1>
-          <Link
-            className="ghost-btn"
-            href={`/?mode=search&run=${encodeURIComponent(jobId)}&tab=offers`}
-          >
-            ← Back to offers
+          <h1>Offer details</h1>
+          <Link className="ghost-btn" href={backHref}>
+            ← Back to offers dashboard
           </Link>
         </div>
         {error ? <p className="error-text">{error}</p> : null}
@@ -107,7 +120,7 @@ export default function SearchOfferLadderPage() {
                 {prev ? (
                   <Link
                     className="ghost-btn"
-                    href={`/search-offers/${encodeURIComponent(jobId)}/${encodeURIComponent(prev.id)}`}
+                    href={offerHref(prev.id)}
                   >
                     ← {prev.coreOffer.slice(0, 40)}
                   </Link>
@@ -120,7 +133,7 @@ export default function SearchOfferLadderPage() {
                 {next ? (
                   <Link
                     className="ghost-btn"
-                    href={`/search-offers/${encodeURIComponent(jobId)}/${encodeURIComponent(next.id)}`}
+                    href={offerHref(next.id)}
                   >
                     {next.coreOffer.slice(0, 40)} →
                   </Link>

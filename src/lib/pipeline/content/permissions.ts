@@ -6,6 +6,7 @@ const EDIT_ACTIONS = new Set([
   "confirm_fact",
   "undo_content",
   "update_intent",
+  "set_business_url",
 ]);
 
 /** Opening and manual edits are free. Model research, drafting, and design builds are runs. */

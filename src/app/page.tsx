@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { SearchForm } from "@/components/SearchForm";
 import { ProgressPanel } from "@/components/ProgressPanel";
+import { JourneySteps } from "@/components/JourneySteps";
 import { CompetitorTable } from "@/components/CompetitorTable";
 import { BrandReviewPanel } from "@/components/BrandReviewPanel";
 import { ExportButton } from "@/components/ExportButton";
@@ -110,6 +111,8 @@ export default function HomePage() {
   const [pageError, setPageError] = useState<string | null>(null);
   const [runAgainBusy, setRunAgainBusy] = useState(false);
   const historyReportRef = useRef<HTMLDivElement | null>(null);
+  const searchFormRef = useRef<HTMLElement | null>(null);
+  const searchResultsRef = useRef<HTMLElement | null>(null);
   const lastSearchStage = useRef<string | null>(null);
   const liveSearchId = useRef<string | null>(null);
   const liveLookupId = useRef<string | null>(null);
@@ -233,14 +236,14 @@ export default function HomePage() {
   }, []);
 
   const loadHistoryItem = useCallback(
-    async (run: UnifiedHistoryItem) => {
+    async (run: UnifiedHistoryItem, tab?: ResultsView | null) => {
       setSelectedHistory(run);
       setHistoryJob(null);
       setHistoryCompetitors([]);
       setHistoryLookupJob(null);
       setHistoryLookupAds([]);
       // Open on the competitor list, like a live run.
-      setHistoryResultsView("preview");
+      setHistoryResultsView(tab || "preview");
       setHistoryOffersError(null);
       setHistoryCredits(null);
       setGeneratingHistoryOffers(false);
@@ -519,6 +522,7 @@ export default function HomePage() {
   // this browser tab, so links back to "/" (from credits, admin, a recreated
   // page) land where the user left off.
   const pendingHistoryItem = useRef<string | null>(null);
+  const pendingHistoryTab = useRef<ResultsView | null>(null);
   const applyingUrl = useRef(true);
   const lastPushed = useRef<string>("");
 
@@ -537,9 +541,9 @@ export default function HomePage() {
       setCompetitors([]);
     }
     const tab = params.get("tab");
-    if (tab === "website" || tab === "preview" || tab === "brand" || tab === "offers") {
-      setResultsView(tab);
-    }
+    const validTab = tab === "website" || tab === "preview" || tab === "brand" || tab === "offers" ? tab : null;
+    if (validTab && nextMode === "history") pendingHistoryTab.current = validTab;
+    else if (validTab) setResultsView(validTab);
     const lookup = params.get("lookup");
     if (lookup && lookup !== liveLookupId.current) {
       liveLookupId.current = lookup;
@@ -582,8 +586,10 @@ export default function HomePage() {
     if (mode === "lookup" && lookupId) params.set("lookup", lookupId);
     if (mode === "history" && selectedHistory) {
       params.set("item", `${selectedHistory.kind}:${selectedHistory.id}`);
+      if (selectedHistory.kind === "search") params.set("tab", historyResultsView);
     } else if (mode === "history" && pendingHistoryItem.current) {
       params.set("item", pendingHistoryItem.current);
+      if (pendingHistoryTab.current) params.set("tab", pendingHistoryTab.current);
     }
     const next = params.toString();
     // While a restored address is still being applied, the state lags behind
@@ -620,7 +626,7 @@ export default function HomePage() {
       window.history.pushState(null, "", `?${next}`);
     }
     lastPushed.current = next;
-  }, [mode, jobId, lookupId, resultsView, selectedHistory]);
+  }, [mode, jobId, lookupId, resultsView, selectedHistory, historyResultsView]);
 
   // Reopen the history item named in the address once the list has loaded.
   useEffect(() => {
@@ -628,8 +634,12 @@ export default function HomePage() {
     if (!wanted || mode !== "history" || !historyRuns.length) return;
     const found = historyRuns.find((r) => `${r.kind}:${r.id}` === wanted);
     pendingHistoryItem.current = null;
+    const tab = pendingHistoryTab.current;
+    pendingHistoryTab.current = null;
     if (found && (selectedHistory?.id !== found.id || selectedHistory.kind !== found.kind)) {
-      void loadHistoryItem(found);
+      void loadHistoryItem(found, tab);
+    } else if (found && tab) {
+      setHistoryResultsView(tab);
     }
   }, [mode, historyRuns, selectedHistory, loadHistoryItem]);
 
@@ -769,7 +779,17 @@ export default function HomePage() {
 
       {mode === "search" && (
         <>
-          <section className="panel glow-panel">
+          <JourneySteps
+            job={job}
+            competitors={competitors}
+            view={resultsView}
+            onView={(v) => {
+              setResultsView(v);
+              window.setTimeout(() => searchResultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 30);
+            }}
+            onSetup={() => searchFormRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}
+          />
+          <section className="panel glow-panel" ref={searchFormRef}>
             <SearchForm
               platform={platform}
               disabled={searchRunning}
@@ -800,9 +820,6 @@ export default function HomePage() {
                   : undefined
               }
               stopJobId={jobId}
-              onOpenOffers={() => setResultsView("offers")}
-              onOpenCompetitors={() => setResultsView("preview")}
-              offersReady={job.offersReport?.status === "completed"}
               createdAt={job.createdAt}
               updatedAt={job.updatedAt}
               onRunAgain={() => void runSearchAgain(job)}
@@ -814,7 +831,7 @@ export default function HomePage() {
             <RunCreditLine credits={searchCredits} />
           ) : null}
 
-          <section className="results">
+          <section className="results" ref={searchResultsRef}>
             <div className="results-head">
               <h2>
                 Results{" "}
@@ -1091,6 +1108,12 @@ export default function HomePage() {
               />
             ) : historyJob ? (
               <>
+                <JourneySteps
+                  job={historyJob}
+                  competitors={historyCompetitors}
+                  view={historyResultsView}
+                  onView={setHistoryResultsView}
+                />
                 <ProgressPanel
                   keyword={historyJob.keyword}
                   status={historyJob.status}
@@ -1101,9 +1124,6 @@ export default function HomePage() {
                   onStop={refreshAfterStop}
                   onRunAgain={() => void runSearchAgain(historyJob)}
                   runAgainBusy={runAgainBusy}
-                  onOpenOffers={() => setHistoryResultsView("offers")}
-                  onOpenCompetitors={() => setHistoryResultsView("preview")}
-                  offersReady={historyJob.offersReport?.status === "completed"}
                 />
                 <div className="results-head">
                   <h2>
