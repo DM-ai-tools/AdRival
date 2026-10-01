@@ -1,13 +1,56 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { BrandReview, CompetitorRecord, JobProgress } from "@/lib/types";
+import type { BrandReview, CompetitorRecord, JobProgress, SocialPlatform } from "@/lib/types";
 import { ConfirmDialog } from "./ConfirmDialog";
 
 function fmtMetric(present: boolean, n?: number | null): string {
   if (!present) return "Not present";
   if (n == null) return "Unavailable";
   return n.toLocaleString();
+}
+
+/** The public profile behind a cell, so a number can be checked in one click. */
+function profileUrl(b: BrandReview, platform: SocialPlatform): string | null {
+  switch (platform) {
+    case "facebook":
+      return b.facebookUrl || null;
+    case "instagram":
+      return b.instagramHandle ? `https://www.instagram.com/${b.instagramHandle}` : null;
+    case "twitter":
+      return b.twitterHandle ? `https://x.com/${b.twitterHandle}` : null;
+    case "youtube":
+      return b.youtubeUrl || (b.youtubeHandle ? `https://www.youtube.com/@${b.youtubeHandle}` : null);
+    case "linkedin":
+      return b.linkedinUrl || null;
+  }
+}
+
+/** One platform cell: the count linked to the profile, or why there is none. */
+function MetricCell({ b, platform, present, n }: { b: BrandReview; platform: SocialPlatform; present: boolean; n?: number | null }) {
+  if (!present && b.uncheckedPlatforms?.includes(platform)) {
+    const why = b.lookupIssues?.length ? ` (${b.lookupIssues.join(", ")})` : "";
+    return (
+      <td>
+        <span className="muted" title={`This platform could not be searched${why}. Review again to retry.`}>
+          Not checked
+        </span>
+      </td>
+    );
+  }
+  const url = present ? profileUrl(b, platform) : null;
+  const text = fmtMetric(present, n);
+  return (
+    <td>
+      {url ? (
+        <a href={url} target="_blank" rel="noreferrer" title="Open the profile">
+          {text}
+        </a>
+      ) : (
+        text
+      )}
+    </td>
+  );
 }
 
 function hasFacebook(b: BrandReview) {
@@ -615,12 +658,12 @@ export function BrandReviewPanel({
                       "Not present"
                     )}
                   </td>
-                  <td>{fmtMetric(hasFacebook(b), b.facebookFollowers)}</td>
-                  <td>{fmtMetric(hasInstagram(b), b.instagramFollowers)}</td>
-                  <td>{fmtMetric(hasTwitter(b), b.twitterFollowers)}</td>
-                  <td>{fmtMetric(hasYouTube(b), b.youtubeSubscribers)}</td>
-                  <td>{fmtMetric(hasLinkedIn(b), b.linkedinEmployees)}</td>
-                  <td>{fmtMetric(hasLinkedIn(b), b.linkedinFollowers)}</td>
+                  <MetricCell b={b} platform="facebook" present={hasFacebook(b)} n={b.facebookFollowers} />
+                  <MetricCell b={b} platform="instagram" present={hasInstagram(b)} n={b.instagramFollowers} />
+                  <MetricCell b={b} platform="twitter" present={hasTwitter(b)} n={b.twitterFollowers} />
+                  <MetricCell b={b} platform="youtube" present={hasYouTube(b)} n={b.youtubeSubscribers} />
+                  <MetricCell b={b} platform="linkedin" present={hasLinkedIn(b)} n={b.linkedinEmployees} />
+                  <MetricCell b={b} platform="linkedin" present={hasLinkedIn(b)} n={b.linkedinFollowers} />
                   <td>
                     {b.companyRevenue ? (
                       <span title={b.companyRevenueSource || undefined}>

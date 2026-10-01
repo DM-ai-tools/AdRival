@@ -284,7 +284,17 @@ export interface BrandReview {
   /** One- or two-sentence explanation of brandScore. */
   brandScoreSummary?: string | null;
   brandScoreAt?: string | null;
+  /**
+   * Platforms the review could not check because the website could not be
+   * read and every search failed. Shown as "Not checked" (not "Not present")
+   * and retried on the next brand review.
+   */
+  uncheckedPlatforms?: SocialPlatform[] | null;
+  /** Why lookups failed, e.g. "Firecrawl is out of credits". */
+  lookupIssues?: string[] | null;
 }
+
+export type SocialPlatform = "facebook" | "instagram" | "twitter" | "youtube" | "linkedin";
 
 export interface CompetitorRecord {
   id: string;
