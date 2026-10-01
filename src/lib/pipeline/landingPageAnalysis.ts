@@ -1278,7 +1278,8 @@ export async function analyzeCompetitorLandingPage(
     }
 
     let sameLandingPageAds = null;
-    try {
+    // A page opened from the offers dashboard already lists its ads there.
+    if (!competitor.recreateOnly) try {
       const job = getJob(competitor.runId);
       const cachedAds = getSearchCompetitorAdsByCompetitor(
         competitor.runId,
@@ -1326,8 +1327,9 @@ export async function analyzeCompetitorLandingPage(
     const updated = updateCompetitor(competitorId, { pageAnalysis: analysis });
     if (!updated) throw new Error("Failed to save page analysis");
 
-    // Deep location runs here (not during keyword search accept)
-    try {
+    // Deep location runs here (not during keyword search accept); a page held
+    // only for recreation is not a competitor, so it has no location to find.
+    if (!competitor.recreateOnly) try {
       const job = getJob(competitor.runId);
       await enrichCompetitorDeepLocation({
         competitorId,

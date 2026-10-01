@@ -1008,7 +1008,7 @@ export function listHistoryRuns(limit = 100): HistoryRunSummary[] {
   const db = ensureDb();
   return db.jobs.slice(0, limit).map((job) => {
     const fromIds = job.competitorIds?.length ?? 0;
-    const fromFilter = db.competitors.filter((c) => c.runId === job.id).length;
+    const fromFilter = db.competitors.filter((c) => c.runId === job.id && !c.recreateOnly).length;
     return {
       ...job,
       competitorCount: Math.max(fromIds, fromFilter),
@@ -1027,6 +1027,12 @@ export function saveCompetitor(competitor: CompetitorRecord): boolean {
     // Don't orphan competitors onto a deleted / missing run
     if (!db.jobs.some((j) => j.id === competitor.runId)) return false;
     db.competitors.unshift(competitor);
+    // A page held for recreation is not a found competitor: it joins neither
+    // the dedup list nor the search's roster.
+    if (competitor.recreateOnly) {
+      writeDb(db);
+      return true;
+    }
     if (!db.seenPageIds.includes(competitor.pageId)) {
       db.seenPageIds.push(competitor.pageId);
     }
@@ -1040,8 +1046,14 @@ export function saveCompetitor(competitor: CompetitorRecord): boolean {
   });
 }
 
+/** The competitors a search found (pages held only for recreation are left out). */
 export function getCompetitorsByRun(runId: string): CompetitorRecord[] {
-  return ensureDb().competitors.filter((c) => c.runId === runId);
+  return ensureDb().competitors.filter((c) => c.runId === runId && !c.recreateOnly);
+}
+
+/** Landing pages from a search's offers dashboard held for recreation. */
+export function getRecreateOnlyPagesByRun(runId: string): CompetitorRecord[] {
+  return ensureDb().competitors.filter((c) => c.runId === runId && Boolean(c.recreateOnly));
 }
 
 export function getCompetitor(id: string): CompetitorRecord | null {

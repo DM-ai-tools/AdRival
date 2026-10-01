@@ -341,6 +341,17 @@ export interface CompetitorRecord {
   /** Recreated landing page HTML for the user's brand (separate viewer page) */
   recreatedPage?: RecreatedLandingPage | null;
   createdAt: string;
+  /**
+   * Set when this record was made from the offers dashboard to recreate one
+   * landing page. It is not a competitor the search found, so competitor
+   * lists, counts and exports leave it out.
+   */
+  recreateOnly?: {
+    sourceUrl: string;
+    matchKey: string;
+    /** The competitor whose ads point at this page, when known. */
+    fromCompetitorId: string | null;
+  } | null;
 }
 
 export type JobStatus = "running" | "completed" | "failed" | "partial";

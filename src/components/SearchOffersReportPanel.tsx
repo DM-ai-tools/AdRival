@@ -2,8 +2,10 @@
 
 import { offersPhaseLabel, statusLabel } from "@/lib/progressLabels";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import type {
   FunnelStage,
+  LandingPageOfferAnalysis,
   LookupOffersReport,
   LookupUniqueLandingPage,
   SearchCompetitorAdRecord,
@@ -13,6 +15,9 @@ import { visibleOfferLadders } from "./OfferLadderFlow";
 import { OfferWorkspace } from "./OfferWorkspace";
 import { offerKey, parseOfferKey, readUrlParam, writeUrlParams } from "@/lib/urlState";
 import { OfferInsights } from "./OfferInsights";
+import { PageAnalysisPanel } from "./PageAnalysisPanel";
+import { ReturnLink } from "./ReturnLink";
+import { currentReturnPath, withReturn } from "@/lib/returnTo";
 import {
   offerFitsSearchedService,
   searchedServiceFocus,
@@ -500,6 +505,15 @@ const SECTION_EXPORT_LABEL: Record<"insights" | "ads" | "pages" | "creatives" | 
 };
 
 const DASH_SECTIONS = ["insights", "ads", "pages", "creatives", "ladders"] as const;
+
+/** A dashboard landing page's analysis and recreation, from /api/search/landing-recreate. */
+type LandingPageRecord = {
+  competitorId: string;
+  pageName: string;
+  analysis: LandingPageOfferAnalysis | null;
+  recreatedStatus: string | null;
+  recreatePath: string;
+};
 type DashSection = (typeof DASH_SECTIONS)[number];
 
 export function SearchOffersDashboard({
@@ -523,6 +537,13 @@ export function SearchOffersDashboard({
     Record<string, boolean>
   >({});
   const [showAllPageAds, setShowAllPageAds] = useState(false);
+  const router = useRouter();
+  // Landing pages that have been analysed or recreated, by match key.
+  const [lpRecords, setLpRecords] = useState<Record<string, LandingPageRecord>>({});
+  const [canRunLp, setCanRunLp] = useState(true);
+  const [lpBusy, setLpBusy] = useState<{ key: string; then: "details" | "recreate" } | null>(null);
+  const [lpError, setLpError] = useState<{ key: string; message: string } | null>(null);
+  const [lpDetailsOpen, setLpDetailsOpen] = useState(true);
 
   // The open tab and offer live in the address (?osec=ladders&offer=…), so a
   // refresh or Back from an offer page reopens the same place.
@@ -547,6 +568,50 @@ export function SearchOffersDashboard({
 
   const needsRawAds =
     section === "insights" || section === "ads" || section === "ladders" || section === "pages";
+
+  useEffect(() => {
+    if (section !== "pages" || !job.id) return;
+    let cancelled = false;
+    void fetch(`/api/search/landing-recreate?jobId=${encodeURIComponent(job.id)}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled || !data?.pages) return;
+        setLpRecords(data.pages as Record<string, LandingPageRecord>);
+        setCanRunLp(data.canRun !== false);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [section, job.id]);
+
+  /**
+   * Analyse a landing page (offer + page architecture) so it can be
+   * recreated, then show the details or open the Recreate page.
+   */
+  async function prepareLandingPage(page: LookupUniqueLandingPage, then: "details" | "recreate", force = false) {
+    setLpBusy({ key: page.matchKey, then });
+    setLpError(null);
+    try {
+      const res = await fetch("/api/search/landing-recreate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jobId: job.id, url: page.url, force }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.page) throw new Error(data.error || "The landing page could not be analysed. Try again.");
+      const record = data.page as LandingPageRecord;
+      setLpRecords((prev) => ({ ...prev, [page.matchKey]: record }));
+      setLpDetailsOpen(true);
+      if (then === "recreate" && record.analysis?.status === "completed") {
+        router.push(withReturn(record.recreatePath, currentReturnPath()));
+      }
+    } catch (err) {
+      setLpError({ key: page.matchKey, message: (err as Error).message });
+    } finally {
+      setLpBusy(null);
+    }
+  }
 
   useEffect(() => {
     if (!job.id || report?.status !== "completed" || !needsRawAds) return;
@@ -1014,6 +1079,81 @@ export function SearchOffersDashboard({
                       : "s"}{" "}
                     use this destination
                   </p>
+
+                  {(() => {
+                    const record = lpRecords[selectedPage.matchKey] || null;
+                    const analysed = record?.analysis?.status === "completed";
+                    const busy = lpBusy?.key === selectedPage.matchKey ? lpBusy.then : null;
+                    const recreateLabel =
+                      record?.recreatedStatus === "completed"
+                        ? "View recreated page"
+                        : record?.recreatedStatus === "content_ready"
+                          ? "Review content draft"
+                          : "Recreate for my brand";
+                    return (
+                      <div className="offers-lp-recreate">
+                        <div className="offers-lp-actions">
+                          {analysed && record && (canRunLp || record.recreatedStatus) ? (
+                            <ReturnLink
+                              className="search-btn lp-analyze-btn lp-recreate-link"
+                              href={record.recreatePath}
+                              title="Recreate this landing page for your client's brand. Nothing is charged until you press Create."
+                            >
+                              {recreateLabel}
+                            </ReturnLink>
+                          ) : null}
+                          {!analysed && canRunLp ? (
+                            <button
+                              type="button"
+                              className="search-btn lp-analyze-btn"
+                              disabled={Boolean(lpBusy)}
+                              title="Analyses the page (offer and page architecture), then opens Recreate. Nothing else is charged until you press Create."
+                              onClick={() => void prepareLandingPage(selectedPage, "recreate")}
+                            >
+                              {busy === "recreate" ? "Analysing the page…" : "Recreate for my brand"}
+                            </button>
+                          ) : null}
+                          {analysed ? (
+                            <button
+                              type="button"
+                              className="ghost-btn lp-analyze-btn"
+                              onClick={() => setLpDetailsOpen((open) => !open)}
+                            >
+                              {lpDetailsOpen ? "Hide details" : "Offer & page details"}
+                            </button>
+                          ) : canRunLp ? (
+                            <button
+                              type="button"
+                              className="ghost-btn lp-analyze-btn"
+                              disabled={Boolean(lpBusy)}
+                              title="Fetch the landing page and extract its offer and page architecture"
+                              onClick={() => void prepareLandingPage(selectedPage, "details")}
+                            >
+                              {busy === "details" ? "Analysing…" : "Get offer & page details"}
+                            </button>
+                          ) : null}
+                          {analysed && canRunLp ? (
+                            <button
+                              type="button"
+                              className="ghost-btn lp-analyze-btn"
+                              disabled={Boolean(lpBusy)}
+                              onClick={() => void prepareLandingPage(selectedPage, "details", true)}
+                            >
+                              {busy ? "Refreshing…" : "Refresh"}
+                            </button>
+                          ) : null}
+                        </div>
+                        {lpError?.key === selectedPage.matchKey ? (
+                          <p className="error-text" role="alert">
+                            {lpError.message}
+                          </p>
+                        ) : null}
+                        {record?.analysis && (lpDetailsOpen || record.analysis.status !== "completed") ? (
+                          <PageAnalysisPanel analysis={record.analysis} hideAds />
+                        ) : null}
+                      </div>
+                    );
+                  })()}
 
                   {selectedPage.status === "completed" ? (
                     <div className="offers-tree-node">

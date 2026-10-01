@@ -28,7 +28,7 @@ export async function GET(request: Request) {
     const visible = visibleProjectKeys(user);
     return NextResponse.json({
       competitors: listAllCompetitors(2000)
-        .filter((c) => visible.has(`search:${c.runId}`))
+        .filter((c) => visible.has(`search:${c.runId}`) && !c.recreateOnly)
         .map(competitorForList),
     });
   } catch (err) {

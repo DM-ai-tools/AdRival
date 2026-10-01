@@ -15,8 +15,11 @@ function Field({ label, value }: { label: string; value?: ReactNode }) {
 
 export function PageAnalysisPanel({
   analysis,
+  hideAds = false,
 }: {
   analysis: LandingPageOfferAnalysis;
+  /** Leave out "Ads on this landing page" where the ads are already listed (offers dashboard). */
+  hideAds?: boolean;
 }) {
   if (analysis.status === "pending") {
     return (
@@ -39,7 +42,7 @@ export function PageAnalysisPanel({
 
   const offer = analysis.offer;
   const sections = analysis.pageArchitecture?.sections || [];
-  const sameLp = analysis.sameLandingPageAds;
+  const sameLp = hideAds ? null : analysis.sameLandingPageAds;
 
   return (
     <div className="page-analysis-panel">
