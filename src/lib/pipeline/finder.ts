@@ -45,6 +45,7 @@ import {
   MAX_PAGES_PER_QUERY,
   MAX_SEARCH_PAGES,
   MAX_SEARCH_QUERIES_META,
+  MIN_COMPETITORS,
   RELAXED_MIN_ACTIVE_ADS,
   RELAXED_MIN_AD_DURATION_DAYS,
   TARGET_COMPETITORS,
@@ -63,9 +64,14 @@ import { metaCountriesFromGeo } from "../geo";
 /** How many advertisers ahead of the current one get their LLM review started. */
 const REVIEW_AHEAD = 3;
 
-function currentThresholds(acceptedCount: number, platform: AdPlatform) {
+/**
+ * The bar an advertiser must clear. `widened` is set once the planned queries
+ * ran out short of the target: from then on the review is relaxed and a
+ * landing page is not required, so a small market still yields a full list.
+ */
+function currentThresholds(acceptedCount: number, platform: AdPlatform, widened = false) {
   // Keep LLM strict early; only relax after we have a solid local/relevant core
-  const relaxedLlm = acceptedCount >= 5;
+  const relaxedLlm = widened || acceptedCount >= 5;
 
   if (platform !== "facebook") {
     const t = getPlatformAdThresholds(platform);
@@ -76,7 +82,7 @@ function currentThresholds(acceptedCount: number, platform: AdPlatform) {
         requireDaysGreaterThan: true,
         skipDuration: false,
         relaxedLlm,
-        requireLanding: acceptedCount < 5,
+        requireLanding: !widened && acceptedCount < 5,
       };
     }
     return {
@@ -85,7 +91,7 @@ function currentThresholds(acceptedCount: number, platform: AdPlatform) {
       requireDaysGreaterThan: t.requireDaysGreaterThan,
       skipDuration: t.skipDuration,
       relaxedLlm,
-      requireLanding: acceptedCount < 5,
+      requireLanding: !widened && acceptedCount < 5,
     };
   }
 
@@ -95,7 +101,7 @@ function currentThresholds(acceptedCount: number, platform: AdPlatform) {
     requireDaysGreaterThan: false,
     skipDuration: false,
     relaxedLlm,
-    requireLanding: acceptedCount < 3,
+    requireLanding: !widened && acceptedCount < 3,
   };
 }
 
@@ -397,6 +403,49 @@ export async function runCompetitorSearch(
   };
   const nearMisses: NearMiss[] = [];
   const addressLookups: Promise<void>[] = [];
+  /** Set once the planned queries ran out short of the target (see currentThresholds). */
+  let widened = false;
+  /** Pages turned down only by the strict early bar; they get another look once widened. */
+  const strictRejected = new Set<string>();
+
+  /**
+   * More queries for when the planned ones run out short of the target: AI
+   * expansions of every keyword, the category and the business's competitor
+   * keywords, then those seeds as typed. A place-named search otherwise runs
+   * only one or two queries ("suit hire melbourne", "suit hire").
+   */
+  const widenSearchQueries = async (): Promise<string[]> => {
+    const seeds = Array.from(
+      new Set(
+        [
+          ...(keywords.length ? keywords : [primaryKeyword]),
+          selectedCategory?.label || "",
+          ...(businessProfile?.competitorKeywords || []).slice(0, 4),
+        ]
+          .map((q) => q.replace(/\s+/g, " ").trim())
+          .filter(Boolean),
+      ),
+    );
+    let expanded: string[] = [];
+    try {
+      expanded = await searchQueriesForKeywords(
+        seeds.slice(0, 6),
+        (kw) => expandKeywordQueries(kw, businessProfile, { geoMode, targetLocations, selectedCategory }),
+        MAX_SEARCH_QUERIES_META + 6,
+      );
+    } catch (err) {
+      if (isCreditError(err)) throw err;
+    }
+    const out: string[] = [];
+    const seenQ = new Set<string>();
+    for (const q of [...expanded, ...seeds]) {
+      const key = q.trim().toLowerCase();
+      if (!key || seenQ.has(key)) continue;
+      seenQ.add(key);
+      out.push(q.trim());
+    }
+    return out;
+  };
 
   // Cheap check before any AI review, cached per page.
   const prechecks = new Map<string, ReturnType<typeof precheckCompetitor>>();
@@ -577,8 +626,46 @@ export async function runCompetitorSearch(
     });
 
     let pageBudget = 0;
+    // The planned queries run first. If they run out short of the target,
+    // the search widens once: more queries and a relaxed bar.
+    const queryQueue = [...queries];
+    const planned = queryQueue.length;
+    const ranQueries = new Set<string>();
 
-    outer: for (const query of queries) {
+    outer: for (let qi = 0; ; qi += 1) {
+      if (qi >= queryQueue.length) {
+        if (
+          widened ||
+          accepted.length >= TARGET_COMPETITORS ||
+          isSearchJobSuppressed(job.id) ||
+          pageBudget >= MAX_SEARCH_PAGES
+        ) {
+          break;
+        }
+        widened = true;
+        for (const id of strictRejected) {
+          rejectedPages.delete(id);
+          analyzedPages.delete(id);
+        }
+        setProgress(job, {
+          stage: "expanding_queries",
+          message: `Found ${accepted.length} of ${TARGET_COMPETITORS} so far. Widening the search…`,
+        });
+        const more = (await widenSearchQueries())
+          .filter((q) => !ranQueries.has(q.toLowerCase()))
+          .slice(0, MAX_SEARCH_QUERIES_META);
+        if (!more.length) break;
+        queryQueue.push(...more);
+        setProgress(job, {
+          stage: "searching_ads",
+          message: `Found ${accepted.length} of ${TARGET_COMPETITORS} so far. Searching ${more.length} more queries with a wider net…`,
+        });
+      }
+      const query = queryQueue[qi];
+      ranQueries.add(query.toLowerCase());
+      // Widened queries are not shared between places, so each may fill any slot.
+      const querySlot = qi < planned ? acceptSlot : TARGET_COMPETITORS;
+      const queryPageCap = qi < planned ? pageCap : MAX_PAGES_PER_QUERY;
       const acceptedAtStart = accepted.length;
           for (const country of countries as SearchCountry[]) {
         let cursor: string | null = null;
@@ -586,10 +673,10 @@ export async function runCompetitorSearch(
 
         do {
           if (accepted.length >= TARGET_COMPETITORS) break outer;
-          if (accepted.length - acceptedAtStart >= acceptSlot) break;
+          if (accepted.length - acceptedAtStart >= querySlot) break;
           if (isSearchJobSuppressed(job.id)) break outer;
           if (pageBudget >= MAX_SEARCH_PAGES) break outer;
-          if (pagesForQuery >= pageCap) break;
+          if (pagesForQuery >= queryPageCap) break;
 
           setProgress(job, {
             stage: "searching_ads",
@@ -633,7 +720,7 @@ export async function runCompetitorSearch(
             break;
           }
 
-          const thresholds = currentThresholds(accepted.length, platform);
+          const thresholds = currentThresholds(accepted.length, platform, widened);
           const byPage = new Map<string, AdCandidate[]>();
 
           for (const raw of ads) {
@@ -738,7 +825,7 @@ export async function runCompetitorSearch(
             );
           const prefetchReviews = (fromIndex: number) => {
             if (accepted.length >= TARGET_COMPETITORS || isSearchJobSuppressed(job.id)) return;
-            const thrNow = currentThresholds(accepted.length, platform);
+            const thrNow = currentThresholds(accepted.length, platform, widened);
             for (
               let j = fromIndex + 1;
               j < pageEntries.length && j <= fromIndex + REVIEW_AHEAD;
@@ -789,7 +876,7 @@ export async function runCompetitorSearch(
             }
 
             analyzedPages.add(pageId);
-            const thr = currentThresholds(accepted.length, platform);
+            const thr = currentThresholds(accepted.length, platform, widened);
             const primary =
               pickSampleAd(pageAds, {
                 requireLanding: thr.requireLanding,
@@ -801,6 +888,7 @@ export async function runCompetitorSearch(
             if (!primary) {
               bumpReason("noLandingPage");
               rejectedPages.add(pageId);
+              if (thr.requireLanding) strictRejected.add(pageId);
               continue;
             }
             const extras = pageAds.filter(
@@ -873,6 +961,7 @@ export async function runCompetitorSearch(
               (!businessProfile && !filter.isMarketingAgency)
             ) {
               rejectedPages.add(pageId);
+              if (!thr.relaxedLlm && !filter.relevant) strictRejected.add(pageId);
               bumpReason("llmReject");
               setProgress(job, {
                 message: `Rejected ${primary.pageName}: ${
@@ -994,12 +1083,12 @@ export async function runCompetitorSearch(
     if (accepted.length < TARGET_COMPETITORS && nearMisses.length > 0) {
       setProgress(job, {
         stage: "filling_quota",
-        message: `Filling remaining slots from ${nearMisses.length} held candidates (prefer geo-local, ≥${currentThresholds(accepted.length, platform).minActiveAds} ads)…`,
+        message: `Filling remaining slots from ${nearMisses.length} held candidates (prefer geo-local, ≥${currentThresholds(accepted.length, platform, widened).minActiveAds} ads)…`,
       });
 
-      const fillFrom = async (pool: NearMiss[]) => {
+      const fillFrom = async (pool: NearMiss[], minActiveAds?: number) => {
         const ranked = [...pool].sort((a, b) => b.score - a.score);
-        const floor = currentThresholds(accepted.length, platform).minActiveAds;
+        const floor = minActiveAds ?? currentThresholds(accepted.length, platform, widened).minActiveAds;
         for (const miss of ranked) {
           if (accepted.length >= TARGET_COMPETITORS) break;
           if (seen.has(miss.pageId) || rejectedPages.has(miss.pageId)) continue;
@@ -1034,6 +1123,16 @@ export async function runCompetitorSearch(
       };
 
       await fillFrom(nearMisses.filter((m) => m.reason === "geoMismatch"));
+
+      // Still under the minimum: a small market's relevant rivals often run
+      // only a few ads. Take the best of them (at least one active ad).
+      if (accepted.length < MIN_COMPETITORS && !isSearchJobSuppressed(job.id)) {
+        setProgress(job, {
+          stage: "filling_quota",
+          message: `Found ${accepted.length} of ${TARGET_COMPETITORS}. Adding relevant competitors that run fewer ads…`,
+        });
+        await fillFrom(nearMisses, 1);
+      }
     }
 
     await Promise.allSettled(addressLookups);

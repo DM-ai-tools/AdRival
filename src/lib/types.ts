@@ -2,6 +2,8 @@ export const SEARCH_COUNTRIES = ["US", "AU"] as const;
 export type SearchCountry = (typeof SEARCH_COUNTRIES)[number] | string;
 
 export const TARGET_COMPETITORS = 10;
+/** A search keeps widening and relaxing until it has at least this many (when the market has them). */
+export const MIN_COMPETITORS = 8;
 /** Facebook: prefer ads live at least this many days (relaxed further if under target). */
 export const MIN_AD_DURATION_DAYS = 7;
 /** Facebook: prefer advertisers with at least this many active ads. */
