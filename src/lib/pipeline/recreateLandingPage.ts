@@ -1,4 +1,5 @@
 import { imageContextFromProfile } from "./unified/imagePrompt";
+import { verifyBrandColors } from "./unified/brandColorCheck";
 import type {
   BrandColors,
   BusinessProfile,
@@ -1078,6 +1079,15 @@ export async function refreshBrandColorsForRecreation(
     businessUrl: ctx.businessUrl,
     profile: ctx.job.businessProfile || null,
   });
+  // Confirm the extracted colours against the website itself.
+  const colorCheck = await verifyBrandColors({
+    siteUrl: brand.finalUrl || ctx.businessUrl,
+    businessName: ctx.brandName,
+    colors: brand.colors,
+    force: true,
+  });
+  brand.colors = colorCheck.colors;
+  if (colorCheck.notes) brand.warnings.push(`Colour check: ${colorCheck.notes}`);
 
   const nextProfile: BusinessProfile = {
     ...(ctx.job.businessProfile || {

@@ -132,6 +132,10 @@ export interface BrandColors {
   text: string;
   muted?: string;
   source?: string;
+  /** When the palette was last checked against screenshots of the website (see brandColorCheck.ts). */
+  checkedAt?: string;
+  /** The website page that check looked at. */
+  checkedUrl?: string;
 }
 
 /** Subset of Firecrawl BrandingProfile useful for landing-page recreation. */
@@ -1008,6 +1012,8 @@ export type RecreationProgressDetails = {
   logoEmbedded?: boolean;
   logoWarnings?: string[];
   screenshotWarnings?: string[];
+  /** What the brand colour check on the client's website changed, and why. */
+  colorCheckNotes?: string | null;
 };
 
 export type RecreationProgressStage = {

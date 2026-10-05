@@ -23,6 +23,7 @@ import { captureLayoutEvidence } from "../design/captureLayout";
 import { alignLayoutEvidence } from "../design/layoutEvidence";
 import { logoScore, logoStatus } from "../design/constructPage";
 import { pickBrandLogo } from "./logoCheck";
+import { verifyBrandColors } from "./brandColorCheck";
 import { assertPublicHttpUrl } from "../content/safeUrl";
 import { extractColorsViaFirecrawl } from "../brandColorSources";
 import type { BrandSiteAssets } from "../brandAssets";
@@ -661,6 +662,34 @@ export async function runUnifiedRecreation(
             businessUrl,
             profile: cached || null,
           });
+
+      // Look at the client's website before building: extracted colours can
+      // come from a photo or a partner logo, or have their roles swapped.
+      page = persist(competitorId, page, stages, "analyzing_client", "Checking your brand colours on your website…");
+      const colorCheck = await verifyBrandColors({
+        siteUrl: brand.finalUrl || businessUrl,
+        businessName: page.businessName || hostOf(businessUrl),
+        colors: brand.colors,
+      });
+      brand.colors = colorCheck.colors;
+      if (colorCheck.checked) {
+        page = persist(
+          competitorId,
+          page,
+          stages,
+          "analyzing_client",
+          colorCheck.changed.length
+            ? `Brand colours corrected from your website (${colorCheck.changed.join(", ")}).`
+            : "Brand colours confirmed on your website.",
+          {
+            brandColors: brand.colors,
+            progress: {
+              ...page.progress!,
+              details: { ...page.progress?.details, colorCheckNotes: colorCheck.notes },
+            },
+          },
+        );
+      }
 
       let assets = brand.assets;
       if (!hasCachedBrand) {
