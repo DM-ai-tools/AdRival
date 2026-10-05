@@ -213,13 +213,25 @@ async function discoverGapDomains(args: {
   onProgress(
     `Searching the web for more ${platform} competitor domains…`,
   );
+  // Firecrawl first; when it fails (out of credits, down), SociaVault's Google
+  // search answers instead, so a Firecrawl problem never stops the search.
+  let firecrawlDown = !hasFirecrawlKey();
   await mapPool(queries.slice(0, 4), 4, async (query) => {
     try {
-      if (hasFirecrawlKey()) {
-        const res = await firecrawlSearch(query, {
-          limit: 5,
-          country: searchRegion,
-        });
+      let firecrawlRes: Awaited<ReturnType<typeof firecrawlSearch>> | null = null;
+      if (!firecrawlDown) {
+        try {
+          firecrawlRes = await firecrawlSearch(query, {
+            limit: 5,
+            country: searchRegion,
+          });
+        } catch (err) {
+          firecrawlDown = true;
+          console.warn("[googleSearch] Firecrawl web search failed; using SociaVault search", (err as Error).message);
+        }
+      }
+      if (firecrawlRes) {
+        const res = firecrawlRes;
         for (const hit of flattenFirecrawlSearchResults(res).slice(0, 5)) {
           snippets.push({
             title: hit.title || undefined,
@@ -260,8 +272,10 @@ async function discoverGapDomains(args: {
         webDomains.push(domain);
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (/credit|quota|402|401|403|rate limited/i.test(msg)) throw err;
+      // SociaVault out of credits stops the search (it also finds the ads);
+      // anything else only loses this extra web search.
+      if (isCreditError(err)) throw err;
+      console.warn("[googleSearch] web search for more domains failed", (err as Error).message);
     }
   });
 

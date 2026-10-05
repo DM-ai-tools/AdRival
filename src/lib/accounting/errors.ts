@@ -108,3 +108,15 @@ export function isCreditError(err: unknown): boolean {
     err instanceof ProviderCreditsExhaustedError
   );
 }
+
+/**
+ * For administrators: the provider whose account ran out during a run, from
+ * the run's failed provider calls, so "the provider has insufficient credits"
+ * can name it (Firecrawl, SociaVault, OpenRouter…). Users never see it.
+ */
+export function providerOutOfCreditsNote(
+  calls: Array<{ provider: string; errorMessage?: string | null }>,
+): string | null {
+  const failed = calls.find((call) => call.errorMessage && looksLikeProviderCreditFailure(new Error(call.errorMessage)));
+  return failed ? `Admin note: the ${failed.provider} account is out of credits. Top it up, then run again.` : null;
+}

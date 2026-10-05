@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import { getLookupAds, getLookupJob } from "@/lib/db";
 import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
 import { reportRunCredits } from "@/lib/accounting/run";
-import { redactProviderCreditText } from "@/lib/accounting/errors";
+import { providerOutOfCreditsNote, redactProviderCreditText, USER_PROVIDER_CREDIT_MESSAGE } from "@/lib/accounting/errors";
+import { queryProviderCalls } from "@/lib/accounting/service";
 import { maskClientFacingText, maskPageAnalysis } from "@/lib/clientFacing";
 import { getCreditSummary } from "@/lib/accounting/service";
 
@@ -29,8 +30,14 @@ export async function GET(request: Request) {
       pageAnalysis: maskPageAnalysis(ad.pageAnalysis),
     }));
     const summary = getCreditSummary(user.id);
-    const visible = (text: string | null | undefined) =>
-      maskClientFacingText(redactProviderCreditText(text, false));
+    // Users see a generic provider message; administrators also see which provider ran out.
+    let adminNote: string | null | undefined;
+    const visible = (text: string | null | undefined) => {
+      const out = maskClientFacingText(redactProviderCreditText(text, false));
+      if (user.role !== "admin" || !out || !out.includes(USER_PROVIDER_CREDIT_MESSAGE)) return out;
+      if (adminNote === undefined) adminNote = providerOutOfCreditsNote(queryProviderCalls({ runId: lookupId, limit: 300 }).rows);
+      return adminNote ? `${out} ${adminNote}` : out;
+    };
     return NextResponse.json({
       job: {
         ...job,
