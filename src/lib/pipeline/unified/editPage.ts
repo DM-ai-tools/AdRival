@@ -5,7 +5,7 @@ import type { CompetitorRecord, RecreatedLandingPage } from "../../types";
 import { applyDesignFixes } from "../skills/designAudit";
 import { beginUnifiedAbort, endUnifiedAbort } from "./abort";
 import { repairFromReview } from "./generateBlueprint";
-import { restoreSlotImages } from "./integrity";
+import { repairPageImages, restoreSlotImages } from "./integrity";
 import { partHtml, renderForReview, replacePart, withCss } from "./visualReview";
 
 /**
@@ -135,7 +135,7 @@ export async function editRecreatedPage(competitorId: string, request: string): 
 
   try {
     // 1. Integrity first: every image back in its slot.
-    const restored = restoreSlotImages(original, page.generatedImages, page.brandColors);
+    const restored = await repairPageImages(original, page.generatedImages, page.brandColors);
     let html = restored.html;
     const repaired = restored.fixed.length ? [`Images put back in ${restored.fixed.length} place${restored.fixed.length === 1 ? "" : "s"}`] : [];
 
@@ -156,6 +156,8 @@ export async function editRecreatedPage(competitorId: string, request: string): 
     // 3. Change only those parts, in parallel.
     const changed: string[] = [];
     const reverted: string[] = [];
+    /** Why a part was left as it was, shown in the summary. */
+    const why = new Map<string, string>();
     if (edits.length && !signal.aborted) {
       save(competitorId, { progress: progress(startedPage, `Changing ${edits.map((e) => (e.target === STYLES ? "page styles" : e.target)).join(", ")}…`, 35) });
       const rendered = await renderForReview(html).catch(() => null);
@@ -198,7 +200,11 @@ export async function editRecreatedPage(competitorId: string, request: string): 
         next = withCss(next, css);
         return restoreSlotImages(applyDesignFixes(next).html, page.generatedImages, page.brandColors).html;
       };
-      let kept = rows.filter((row) => !integrityProblems(html, place(html, [row])).length);
+      let kept = rows.filter((row) => {
+        const problems = integrityProblems(html, place(html, [row]));
+        if (problems.length) why.set(row.target, problems.join(", "));
+        return !problems.length;
+      });
       for (const row of rows) if (!kept.includes(row)) reverted.push(row.target);
       if (kept.length) {
         const trial = place(html, kept);
@@ -208,6 +214,7 @@ export async function editRecreatedPage(competitorId: string, request: string): 
             (row) => row.target !== STYLES && (after.lint.get(row.target) || []).length > (rendered.lint.get(row.target) || []).length + 1,
           );
           if (worse.length) {
+            for (const row of worse) why.set(row.target, "the change made its layout worse (text squeezed, spilling or hard to read)");
             reverted.push(...worse.map((row) => row.target));
             kept = kept.filter((row) => !worse.includes(row));
           }
@@ -220,22 +227,31 @@ export async function editRecreatedPage(competitorId: string, request: string): 
         html = kept.length ? place(html, kept) : html;
         changed.push(...kept.map((row) => row.target));
       }
-      for (const edit of edits) if (!changed.includes(edit.target) && !reverted.includes(edit.target)) reverted.push(edit.target);
+      for (const edit of edits) {
+        if (changed.includes(edit.target) || reverted.includes(edit.target)) continue;
+        reverted.push(edit.target);
+        why.set(edit.target, "no usable rewrite came back");
+      }
     }
 
     const label = (id: string) => (id === STYLES ? "page styles" : id === "header" || id === "footer" ? `the ${id}` : `section ${id.replace("sec-", "")}`);
     const summary = [
       changed.length ? `Changed ${changed.map(label).join(", ")}.` : edits.length ? "No change could be applied safely; the page is as it was." : "Nothing on the page matched the request.",
-      reverted.length ? `Left as it was: ${[...new Set(reverted)].map(label).join(", ")} (the change failed a check).` : "",
+      reverted.length
+        ? `Left as it was: ${[...new Set(reverted)].map((id) => `${label(id)} (${why.get(id) || "the change failed a check"})`).join("; ")}.`
+        : "",
       repaired.join(". "),
       reply && changed.length ? `(${reply})` : "",
     ]
       .filter(Boolean)
       .join(" ");
 
+    const note = "Page ready with image placeholders. Generate missing images when credits allow.";
+    const placeholdersAdded = restored.fixed.some((id) => id.startsWith("img-fix-")) && !(page.publishBlockers || []).includes(note);
     const saved = save(competitorId, {
       status: "completed",
       html,
+      ...(placeholdersAdded ? { publishBlockers: [...(page.publishBlockers || []), note], publishReady: false } : {}),
       previousHtml: html !== original ? original : page.previousHtml || null,
       lastEdit: {
         at: new Date().toISOString(),

@@ -86,7 +86,7 @@ export function OfferInsights({
         </div>
       </section>
       {/* Only a written takeaway; a line of counts repeats the tiles above. */}
-      {summary && !/^\s*\d+\s+(cached\s+)?ads/i.test(summary) ? <p className="insights-summary">{summary}</p> : null}
+      {summary && !/^\s*\d+\s+(cached\s+)?ads\b/i.test(summary) ? <p className="insights-summary">{summary}</p> : null}
 
       <div className="insights-head">
         <h3>Top offers by virality</h3>

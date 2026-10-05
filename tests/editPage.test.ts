@@ -13,6 +13,7 @@ const { editRecreatedPage, undoLastEdit, pageOutline } = await import("@/lib/pip
 const { restoreSlotImages, hasBrokenImages } = await import("@/lib/pipeline/unified/integrity");
 
 const PHOTO = `data:image/png;base64,${"iVBORw0KGgo".padEnd(400, "A")}`;
+const PHOTO2 = `data:image/png;base64,${"iVBORw0KGgoTWO".padEnd(400, "C")}`;
 const LOGO = `data:image/png;base64,${"iVBORw0KGgoLOGO".padEnd(300, "B")}`;
 
 function page(heroImgSrc: string) {
@@ -36,6 +37,28 @@ test("broken image slots get their generated image back; stray tokens are remove
   // A slot with no generated image gets a placeholder rather than a broken image.
   const none = restoreSlotImages(page(""), [], { primary: "#3BA9F0" });
   assert.match(none.html, /data-adrival-slot="img-sec-1" src="data:image\/svg\+xml;base64,/);
+});
+
+test("every broken image in the page body is repaired, not only marked slots", () => {
+  const gif = "data:image/gif;base64,R0lGODlhAQABAAAAACw=";
+  const fakePng = `data:image/png;base64,${Buffer.from("not really a png".repeat(30)).toString("base64")}`;
+  const html = `<html><head></head><body><header><img data-logo-role="company" src="${LOGO}"></header><main>
+    <section data-section-id="sec-1"><img class="hero-bg" src="${gif}" alt="Home lift"></section>
+    <section data-section-id="sec-2"><img src="${fakePng}" alt="Lift cabin"></section>
+    <section data-section-id="sec-3"><img data-adrival-slot="img-sec-3" src="${PHOTO2}" srcset="adr-asset://2 2x" alt="x"></section>
+    <section data-section-id="sec-4"><img src="https://cdn.example.com/lift.jpg" alt="Remote"></section>
+  </main></body></html>`;
+  assert.equal(hasBrokenImages(html), true);
+  const remote = `data:image/jpeg;base64,${Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), Buffer.alloc(400, 1)]).toString("base64")}`;
+  const out = restoreSlotImages(html, [{ id: "img-sec-1", publicUrl: PHOTO } as never], { primary: "#3BA9F0" }, new Map([["https://cdn.example.com/lift.jpg", remote]]));
+  // The hero's unmarked stand-in gets the generated image that was not on the page.
+  assert.match(out.html, new RegExp(`<img class="hero-bg" src="${PHOTO.slice(0, 40)}[^"]*"[^>]*data-adrival-slot="img-sec-1"|<img data-adrival-slot="img-sec-1" class="hero-bg" src="${PHOTO.slice(0, 40)}`));
+  // An image whose data does not decode becomes a marked placeholder.
+  assert.match(out.html, /data-adrival-slot="img-fix-1"[^>]*|src="data:image\/svg\+xml;base64,[^"]+"[^>]*alt="Lift cabin"/);
+  assert.ok(!out.html.includes("srcset="), "a broken srcset is dropped");
+  assert.ok(out.html.includes(remote), "a remote image that loads is embedded");
+  assert.ok(out.html.includes(LOGO), "the logo is left alone");
+  assert.equal(hasBrokenImages(out.html), false);
 });
 
 test("the planner sees each part of the page", () => {

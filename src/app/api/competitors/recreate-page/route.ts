@@ -29,7 +29,7 @@ import {
 } from "@/lib/pipeline/unified/run";
 import { recreationActionPermission } from "@/lib/pipeline/content/permissions";
 import { editRecreatedPage, undoLastEdit } from "@/lib/pipeline/unified/editPage";
-import { hasBrokenImages, restoreSlotImages } from "@/lib/pipeline/unified/integrity";
+import { hasBrokenImages, repairPageImages } from "@/lib/pipeline/unified/integrity";
 import { draftIsCurrent } from "@/lib/pipeline/content/pageIntent";
 import type { CanonicalContent } from "@/lib/pipeline/content/model";
 import { ContentRevisionError } from "@/lib/pipeline/content/revisions";
@@ -488,9 +488,17 @@ export async function GET(request: Request) {
     // Pages built before the image fix can show broken images: put them back.
     const builtPage = competitor.recreatedPage;
     if (builtPage?.html && builtPage.status === "completed" && hasBrokenImages(builtPage.html)) {
-      const restored = restoreSlotImages(builtPage.html, builtPage.generatedImages, builtPage.brandColors);
+      const restored = await repairPageImages(builtPage.html, builtPage.generatedImages, builtPage.brandColors);
       if (restored.fixed.length) {
-        const fixedPage = { ...builtPage, html: restored.html };
+        // A spot that got a placeholder can be filled with "Generate missing images".
+        const note = "Page ready with image placeholders. Generate missing images when credits allow.";
+        const blockers = builtPage.publishBlockers || [];
+        const needsImages = restored.fixed.some((id) => id.startsWith("img-fix-"));
+        const fixedPage = {
+          ...builtPage,
+          html: restored.html,
+          ...(needsImages && !blockers.includes(note) ? { publishBlockers: [...blockers, note], publishReady: false } : {}),
+        };
         competitor =
           access.role !== "viewer"
             ? updateCompetitor(competitorId, { recreatedPage: fixedPage }) || competitor

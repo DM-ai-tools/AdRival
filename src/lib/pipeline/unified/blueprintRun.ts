@@ -27,7 +27,7 @@ import { industryBrief, type IndustryGuide } from "../skills/industry";
 import { imageContextFromProfile } from "./imagePrompt";
 import { styleGuide, type StyleDirection } from "../skills/playbook";
 import { reviewAndFixPage, type VisualReviewSummary } from "./visualReview";
-import { restoreSlotImages } from "./integrity";
+import { repairPageImages } from "./integrity";
 
 const NAV_LABEL: Partial<Record<SectionKind, string>> = {
   features: "Services",
@@ -591,7 +591,7 @@ export async function buildFromBlueprint(input: {
   }
 
   // Every image slot carries its image (a rewritten section can lose one).
-  html = restoreSlotImages(html, imageReport.images, input.colors).html;
+  html = (await repairPageImages(html, imageReport.images, input.colors)).html;
   // Sections rebuilt during the checks may carry new light placeholders.
   html = retonePlaceholders(html, input.colors);
   // Images the writer added beyond the plan are listed as missing, so
