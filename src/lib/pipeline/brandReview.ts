@@ -1,10 +1,5 @@
 import { v4 as uuidv4 } from "uuid";
 import {
-  getFacebookProfile,
-  getInstagramProfile,
-  getLinkedInCompany,
-  getTwitterProfile,
-  getYoutubeChannel,
   googleSearch as sociavaultGoogleSearch,
   normalizeList,
 } from "../sociavault/client";
@@ -20,15 +15,22 @@ import {
 } from "./brandAssets";
 import { normalizeWebsiteUrl } from "./linkGuards";
 import {
-  extractFacebookUrl,
   extractInstagramHandle,
-  extractLinkedInCompanyUrl,
   extractTwitterHandle,
   extractYouTubeParams,
   socialLinksToSociavaultParams,
   type SociavaultSocialParams,
 } from "./socialParams";
 import { applyBrandScoresForJob, withBrandScore } from "./brandScore";
+import {
+  candidatesFromLinks,
+  fetchCandidate,
+  NEEDS_PROOF,
+  profileMatchesBrand,
+  type Candidate,
+  type CandidateSource,
+  type FetchedProfile,
+} from "./brandProfiles";
 import {
   getCompetitorsByRun,
   getJob,
@@ -49,97 +51,6 @@ export { normalizeLinkedInCompanyUrl, parseYouTubeFromUrl } from "./socialParams
 
 /** Competitors brand-reviewed at the same time in a batch run. */
 const BRAND_REVIEW_CONCURRENCY = 3;
-
-function safeNum(n: unknown): number | null {
-  if (typeof n === "number" && Number.isFinite(n)) return Math.round(n);
-  if (typeof n === "string" && n.trim()) {
-    const cleaned = n.replace(/,/g, "").trim();
-    const asNum = Number(cleaned);
-    if (!Number.isNaN(asNum) && Number.isFinite(asNum)) return Math.round(asNum);
-    const range = cleaned.match(/([\d.]+)\s*[–-]\s*([\d.]+)/);
-    if (range) {
-      const a = Number(range[1]);
-      const b = Number(range[2]);
-      if (Number.isFinite(a) && Number.isFinite(b)) return Math.round((a + b) / 2);
-    }
-    const m = cleaned.match(/([\d.]+)\s*([kmb])\b/i);
-    if (m) {
-      const base = Number(m[1]);
-      if (!Number.isFinite(base)) return null;
-      const mult =
-        m[2].toLowerCase() === "k"
-          ? 1_000
-          : m[2].toLowerCase() === "m"
-            ? 1_000_000
-            : 1_000_000_000;
-      return Math.round(base * mult);
-    }
-    const plus = cleaned.match(/([\d.]+)\s*\+/);
-    if (plus) return Math.round(Number(plus[1]));
-  }
-  return null;
-}
-
-function digNum(root: unknown, paths: string[][]): number | null {
-  for (const path of paths) {
-    let cur: unknown = root;
-    for (const key of path) {
-      if (!cur || typeof cur !== "object") {
-        cur = null;
-        break;
-      }
-      cur = (cur as Record<string, unknown>)[key];
-    }
-    const n = safeNum(cur);
-    if (n != null) return n;
-  }
-  return null;
-}
-
-function unwrapSvData(payload: unknown): Record<string, unknown> {
-  if (!payload || typeof payload !== "object") return {};
-  const root = payload as Record<string, unknown>;
-  const inner = root.data;
-  if (inner && typeof inner === "object" && !Array.isArray(inner)) {
-    const nested = inner as Record<string, unknown>;
-    if (
-      "followerCount" in nested ||
-      "followers" in nested ||
-      "employeeCount" in nested ||
-      "subscriberCount" in nested ||
-      "legacy" in nested ||
-      "user" in nested
-    ) {
-      return nested;
-    }
-  }
-  return root;
-}
-
-function digAnyFollowerCount(root: unknown, depth = 0): number | null {
-  if (!root || typeof root !== "object" || depth > 4) return null;
-  const obj = root as Record<string, unknown>;
-  for (const [key, value] of Object.entries(obj)) {
-    if (/follower/i.test(key) && !/following/i.test(key)) {
-      const n = safeNum(value);
-      if (n != null && n >= 0) return n;
-      if (typeof value === "string") {
-        const m = value.match(/([\d,.]+)\s*[kmb]?/i);
-        if (m) {
-          const parsed = safeNum(m[0]);
-          if (parsed != null) return parsed;
-        }
-      }
-    }
-  }
-  for (const value of Object.values(obj)) {
-    if (value && typeof value === "object" && !Array.isArray(value)) {
-      const nested = digAnyFollowerCount(value, depth + 1);
-      if (nested != null) return nested;
-    }
-  }
-  return null;
-}
 
 /** Landing deep-links often hide footer socials — also scrape origin, apex, contact/about. */
 function scrapeUrlCandidates(website: string): string[] {
@@ -333,6 +244,28 @@ async function fetchPageHtml(url: string): Promise<string | null> {
   }
 }
 
+/** Social links on a page as a browser renders it (for sites that add their links with JavaScript). */
+async function renderedSocialLinks(url: string): Promise<string[]> {
+  try {
+    const { launchChromium } = await import("./content/playwrightRuntime");
+    const browser = await launchChromium();
+    try {
+      const page = await browser.newPage();
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25_000 });
+      await page.waitForLoadState("networkidle", { timeout: 6_000 }).catch(() => undefined);
+      const links = (await page.evaluate(
+        "Array.from(document.querySelectorAll('a[href]')).map(function(a){ return a.href; })",
+      )) as string[];
+      return links.filter((href) => detectSocialNetwork(href));
+    } finally {
+      await browser.close().catch(() => undefined);
+    }
+  } catch (err) {
+    console.warn("[brandReview] rendered link read failed", (err as Error).message);
+    return [];
+  }
+}
+
 /** Search results as { url, title, description } rows from SociaVault's Google search. */
 async function sociavaultSearchRows(query: string): Promise<Array<{ url?: string; title?: string; description?: string }>> {
   const res = await sociavaultGoogleSearch(query);
@@ -426,7 +359,6 @@ async function searchSocialHrefs(
 
 async function collectSocialHrefsFromWebsite(
   website: string,
-  pageName: string | null | undefined,
   lookup: Lookup,
   shouldAbort?: () => boolean,
 ): Promise<{ hrefs: string[]; markdown: string | null; canonicalWebsite: string | null }> {
@@ -464,8 +396,10 @@ async function collectSocialHrefsFromWebsite(
         if (/credits|not configured/.test(lookupIssue("Firecrawl", err))) firecrawlDown = true;
       }
     }
-    // Without Firecrawl (or when it fails), read the page directly.
-    if (!read) {
+    // Also read the page directly: Firecrawl sometimes misses footer icon
+    // links, and it may be down or out of credits.
+    const foundBefore = platformCount(socialLinksToSociavaultParams(hrefs));
+    if (!read || foundBefore < 5) {
       const html = await fetchPageHtml(url);
       if (html) {
         read = true;
@@ -484,26 +418,12 @@ async function collectSocialHrefsFromWebsite(
     if (platformCount(socialLinksToSociavaultParams(hrefs)) >= 4) break;
   }
 
-  const partial = socialLinksToSociavaultParams(hrefs);
-  if (platformCount(partial) < 5 && pageName && !shouldAbort?.()) {
-    hrefs.push(...(await searchSocialHrefs(pageName, canonicalWebsite || website, partial, lookup, shouldAbort)));
+  // A site that builds its links with JavaScript: render it once in a browser.
+  if (!platformCount(socialLinksToSociavaultParams(hrefs)) && !shouldAbort?.()) {
+    hrefs.push(...(await renderedSocialLinks(canonicalWebsite || website)));
   }
 
   return { hrefs: Array.from(new Set(hrefs)), markdown, canonicalWebsite };
-}
-
-function mergeParams(
-  ...parts: SociavaultSocialParams[]
-): SociavaultSocialParams {
-  const out: SociavaultSocialParams = {};
-  for (const p of parts) {
-    if (p.facebook && !out.facebook) out.facebook = p.facebook;
-    if (p.instagram && !out.instagram) out.instagram = p.instagram;
-    if (p.twitter && !out.twitter) out.twitter = p.twitter;
-    if (p.youtube && !out.youtube) out.youtube = p.youtube;
-    if (p.linkedin && !out.linkedin) out.linkedin = p.linkedin;
-  }
-  return out;
 }
 
 function hostSlug(url: unknown): string | null {
@@ -548,312 +468,6 @@ function guessLinkedInFromWebsite(website: string | null | undefined): string | 
   } catch {
     return null;
   }
-}
-
-async function fetchMetricsFromParams(
-  params: SociavaultSocialParams,
-  brand: BrandReview,
-  options?: { linkedinIsGuess?: boolean; lookup?: Lookup },
-): Promise<void> {
-  const tasks: Array<Promise<void>> = [];
-  const siteWebsite = brand.website || null;
-  /** A searched-for profile that names another website is someone else's. */
-  const foreign = (platform: SocialPlatform, profileWebsite: unknown) =>
-    Boolean(options?.lookup?.fromSearch.has(platform)) && pointsElsewhere(profileWebsite, siteWebsite);
-  const noteFailure = (err: unknown) => options?.lookup?.issues.add(lookupIssue("SociaVault", err));
-
-  if (params.facebook?.url) {
-    brand.facebookUrl = params.facebook.url;
-    tasks.push(
-      (async () => {
-        try {
-          const fb = await getFacebookProfile(params.facebook!.url);
-          const data = unwrapSvData(fb.data || fb);
-          if (foreign("facebook", data.website)) {
-            brand.facebookUrl = null;
-            return;
-          }
-          brand.facebookUrl =
-            (typeof data.url === "string" && data.url) || params.facebook!.url;
-          brand.facebookFollowers = digNum(data, [
-            ["followerCount"],
-            ["followers"],
-            ["fan_count"],
-            ["page_followers"],
-          ]);
-          brand.facebookLikes = digNum(data, [["likeCount"], ["likes"]]);
-          brand.category =
-            (typeof data.category === "string" && data.category) || brand.category;
-          if (!brand.website && data.website) {
-            brand.website = normalizeWebsiteUrl(String(data.website));
-          }
-          if (typeof data.address === "string" && data.address.trim()) {
-            brand.address = data.address.trim();
-          }
-          const introBits = [
-            typeof data.pageIntro === "string" ? data.pageIntro : "",
-            typeof data.about === "string" ? data.about : "",
-            typeof data.website === "string" ? data.website : "",
-          ].join("\n");
-          if (introBits.trim()) {
-            const found: string[] = [];
-            pushSocialUrlsFromText(introBits, found);
-            for (const href of found) {
-              if (!brand.instagramHandle) {
-                const ig = extractInstagramHandle(href);
-                if (ig) brand.instagramHandle = ig;
-              }
-              if (!brand.twitterHandle) {
-                const tw = extractTwitterHandle(href);
-                if (tw) brand.twitterHandle = tw;
-              }
-              if (!brand.youtubeUrl && !brand.youtubeHandle) {
-                const yt = extractYouTubeParams(href);
-                if (yt) {
-                  brand.youtubeUrl = yt.url || brand.youtubeUrl;
-                  brand.youtubeHandle = yt.handle || brand.youtubeHandle;
-                }
-              }
-              if (!brand.linkedinUrl) {
-                const li = extractLinkedInCompanyUrl(href);
-                if (li) brand.linkedinUrl = li;
-              }
-            }
-          }
-        } catch (err) {
-          noteFailure(err);
-          console.warn(
-            "[brandReview] Facebook profile failed:",
-            (err as Error).message,
-          );
-        }
-      })(),
-    );
-  }
-
-  if (params.instagram?.handle) {
-    const handle = params.instagram.handle.replace(/^@/, "");
-    brand.instagramHandle = handle;
-    tasks.push(
-      (async () => {
-        try {
-          const ig = await getInstagramProfile(handle);
-          const root = unwrapSvData(ig.data || ig);
-          const igExternal =
-            (root as { data?: { user?: { external_url?: string } } })?.data?.user?.external_url ||
-            (root as { user?: { external_url?: string } })?.user?.external_url ||
-            (root as { external_url?: string }).external_url;
-          if (foreign("instagram", igExternal)) {
-            brand.instagramHandle = null;
-            return;
-          }
-          brand.instagramFollowers = digNum(root, [
-            ["data", "user", "edge_followed_by", "count"],
-            ["user", "edge_followed_by", "count"],
-            ["edge_followed_by", "count"],
-            ["follower_count"],
-            ["followers"],
-          ]);
-          if (brand.instagramFollowers == null) {
-            const edge = (root as { edge_followed_by?: { count?: number } })
-              .edge_followed_by;
-            brand.instagramFollowers = safeNum(edge?.count);
-          }
-          const username =
-            (root as { data?: { user?: { username?: string } } })?.data?.user
-              ?.username ||
-            (root as { user?: { username?: string } })?.user?.username ||
-            (root as { username?: string }).username;
-          if (typeof username === "string" && username.trim()) {
-            brand.instagramHandle = username.replace(/^@/, "");
-          }
-          const external =
-            (root as { data?: { user?: { external_url?: string } } })?.data?.user
-              ?.external_url ||
-            (root as { user?: { external_url?: string } })?.user?.external_url;
-          if (!brand.website && external) {
-            brand.website = normalizeWebsiteUrl(String(external));
-          }
-        } catch (err) {
-          noteFailure(err);
-          console.warn(
-            "[brandReview] Instagram profile failed:",
-            (err as Error).message,
-          );
-        }
-      })(),
-    );
-  }
-
-  if (params.twitter?.handle) {
-    const handle = params.twitter.handle.replace(/^@/, "");
-    brand.twitterHandle = handle;
-    tasks.push(
-      (async () => {
-        try {
-          const tw = await getTwitterProfile(handle);
-          const data = unwrapSvData(tw.data || tw);
-          brand.twitterFollowers = digNum(data, [
-            ["legacy", "followers_count"],
-            ["followers_count"],
-            ["followers"],
-            ["normal_followers_count"],
-          ]);
-          const screen =
-            (data.core as { screen_name?: string } | undefined)?.screen_name ||
-            (data.legacy as { screen_name?: string } | undefined)?.screen_name;
-          if (screen) brand.twitterHandle = String(screen).replace(/^@/, "");
-        } catch (err) {
-          noteFailure(err);
-          console.warn(
-            "[brandReview] Twitter profile failed:",
-            (err as Error).message,
-          );
-        }
-      })(),
-    );
-  }
-
-  if (
-    params.youtube &&
-    (params.youtube.channelId || params.youtube.handle || params.youtube.url)
-  ) {
-    brand.youtubeHandle = params.youtube.handle
-      ? params.youtube.handle.replace(/^@/, "")
-      : brand.youtubeHandle;
-    brand.youtubeUrl = params.youtube.url || brand.youtubeUrl;
-    tasks.push(
-      (async () => {
-        try {
-          const yt = await getYoutubeChannel({
-            channelId: params.youtube!.channelId,
-            handle: params.youtube!.handle
-              ? params.youtube!.handle.replace(/^@/, "")
-              : undefined,
-            url: params.youtube!.url,
-          });
-          const data = unwrapSvData(yt.data || yt);
-          brand.youtubeSubscribers =
-            digNum(data, [["subscriberCount"], ["subscribers"]]) ??
-            safeNum(data.subscriberCountText);
-          brand.youtubeUrl =
-            (typeof data.url === "string" && data.url) ||
-            (typeof data.channel === "string" && data.channel) ||
-            brand.youtubeUrl;
-          if (data.handle) {
-            brand.youtubeHandle = String(data.handle).replace(/^@/, "");
-          }
-          const links = data.links;
-          const linkList: string[] = Array.isArray(links)
-            ? links.filter((x): x is string => typeof x === "string")
-            : links && typeof links === "object"
-              ? Object.values(links).filter(
-                  (x): x is string => typeof x === "string",
-                )
-              : [];
-          for (const key of ["twitter", "instagram", "facebook", "linkedin"] as const) {
-            const v = data[key];
-            if (typeof v === "string") linkList.push(v);
-          }
-          for (const href of linkList) {
-            if (!brand.instagramHandle) {
-              const ig = extractInstagramHandle(href);
-              if (ig) brand.instagramHandle = ig;
-            }
-            if (!brand.twitterHandle) {
-              const tw = extractTwitterHandle(href);
-              if (tw) brand.twitterHandle = tw;
-            }
-            if (!brand.facebookUrl) {
-              const fb = extractFacebookUrl(href);
-              if (fb) brand.facebookUrl = fb;
-            }
-            if (!brand.linkedinUrl) {
-              const li = extractLinkedInCompanyUrl(href);
-              if (li) brand.linkedinUrl = li;
-            }
-          }
-        } catch (err) {
-          noteFailure(err);
-          console.warn(
-            "[brandReview] YouTube channel failed:",
-            (err as Error).message,
-          );
-        }
-      })(),
-    );
-  }
-
-  if (params.linkedin?.url) {
-    brand.linkedinUrl = params.linkedin.url;
-    tasks.push(
-      (async () => {
-        try {
-          const li = await getLinkedInCompany(params.linkedin!.url);
-          const data = unwrapSvData(li.data || li);
-          if (foreign("linkedin", data.website)) {
-            brand.linkedinUrl = null;
-            return;
-          }
-          brand.linkedinUrl =
-            (typeof data.url === "string" && data.url) || params.linkedin!.url;
-          brand.linkedinEmployees =
-            digNum(data, [["employeeCount"], ["staffCount"], ["employees"]]) ??
-            safeNum(data.size);
-          brand.linkedinFollowers =
-            digNum(data, [
-              ["followers"],
-              ["followerCount"],
-              ["follower_count"],
-              ["companyFollowers"],
-              ["numFollowers"],
-            ]) ?? digAnyFollowerCount(data);
-          if (!brand.website && data.website) {
-            brand.website = normalizeWebsiteUrl(String(data.website));
-          }
-          if (!brand.address) {
-            if (
-              typeof data.headquarters === "string" &&
-              data.headquarters.trim()
-            ) {
-              brand.address = data.headquarters.trim();
-            } else if (data.location && typeof data.location === "object") {
-              const loc = data.location as {
-                city?: string;
-                state?: string;
-                country?: string;
-              };
-              const label = [loc.city, loc.state, loc.country]
-                .filter(Boolean)
-                .join(", ");
-              if (label) brand.address = label;
-            } else if (
-              typeof data.location === "string" &&
-              data.location.trim()
-            ) {
-              brand.address = data.location.trim();
-            }
-          }
-          if (
-            options?.linkedinIsGuess &&
-            brand.linkedinEmployees == null &&
-            brand.linkedinFollowers == null
-          ) {
-            brand.linkedinUrl = null;
-          }
-        } catch (err) {
-          noteFailure(err);
-          console.warn(
-            "[brandReview] LinkedIn company failed:",
-            (err as Error).message,
-          );
-          if (options?.linkedinIsGuess) brand.linkedinUrl = null;
-        }
-      })(),
-    );
-  }
-
-  await Promise.all(tasks);
 }
 
 function revenueFromEmployees(employees: number | null): string | null {
@@ -1006,6 +620,10 @@ export async function runBrandReview(input: {
   twitterHandleHint?: string | null;
   categoryHint?: string | null;
   sourcePlatform?: import("../platforms").AdPlatform | string;
+  /** What an earlier review found; each account is used only if its profile proves it is this brand's. */
+  previous?: BrandReview | null;
+  /** The ad's YouTube channel (YouTube ads). */
+  adYoutubeUrl?: string | null;
   /** Return true to bail out of long scrapes (e.g. user hit Stop). */
   shouldAbort?: () => boolean;
 }): Promise<BrandReview> {
@@ -1015,183 +633,146 @@ export async function runBrandReview(input: {
     category: input.categoryHint || null,
   };
 
-  const hintParams = socialLinksToSociavaultParams([
-    input.facebookUrlHint,
-    input.pageProfileUri,
-    input.linkedinUrlHint,
-    input.youtubeUrlHint,
-  ]);
-  if (input.instagramHandleHint) {
-    const ig = extractInstagramHandle(input.instagramHandleHint);
-    if (ig) hintParams.instagram = { handle: ig };
-  }
-  if (input.twitterHandleHint) {
-    const tw = extractTwitterHandle(input.twitterHandleHint);
-    if (tw) hintParams.twitter = { handle: tw };
-  }
-  if (input.youtubeHandleHint && !hintParams.youtube) {
-    hintParams.youtube = extractYouTubeParams(input.youtubeHandleHint);
-  }
-
-  if (
-    !hintParams.facebook &&
-    input.sourcePlatform !== "google" &&
-    input.sourcePlatform !== "youtube" &&
-    input.sourcePlatform !== "linkedin" &&
-    String(input.pageId).match(/^\d+$/)
-  ) {
-    hintParams.facebook = {
-      url: `https://www.facebook.com/${input.pageId}`,
-    };
-  }
-
   const lookup = newLookup();
-  // Accounts the ad platform already gave us are known, not searched for.
-  for (const platform of PLATFORMS) if (paramsHave(hintParams, platform)) lookup.searched.add(platform);
+  const candidates: Candidate[] = [];
+  const addCandidates = (list: Candidate[]) => {
+    for (const c of list) {
+      if (candidates.some((x) => x.platform === c.platform && x.value.toLowerCase() === c.value.toLowerCase())) continue;
+      candidates.push(c);
+    }
+  };
 
-  let firecrawlParams: SociavaultSocialParams = {};
+  // 1. The advertiser's own page on the ad platform.
+  const metaAd = input.sourcePlatform !== "google" && input.sourcePlatform !== "youtube" && input.sourcePlatform !== "linkedin";
+  addCandidates(candidatesFromLinks([input.pageProfileUri, input.adYoutubeUrl], "ad"));
+  if (metaAd && /^\d+$/.test(String(input.pageId))) {
+    addCandidates([{ platform: "facebook", value: `https://www.facebook.com/${input.pageId}`, source: "ad" }]);
+  }
+  for (const c of candidates) lookup.searched.add(c.platform);
+
+  // 2. Links on the brand's own website (Firecrawl, then a direct read of the page).
   let siteMarkdown: string | null = null;
   if (brand.website && !abort()) {
-    const collected = await collectSocialHrefsFromWebsite(
-      brand.website,
-      input.pageName,
-      lookup,
-      abort,
-    );
+    const collected = await collectSocialHrefsFromWebsite(brand.website, lookup, abort);
     siteMarkdown = collected.markdown;
-    if (collected.canonicalWebsite) {
-      brand.website = collected.canonicalWebsite;
-    }
-    firecrawlParams = socialLinksToSociavaultParams(collected.hrefs);
-  } else if (input.pageName && !abort()) {
-    const found = await searchSocialHrefs(
-      input.pageName,
-      null,
-      hintParams,
-      lookup,
-      abort,
-    );
-    firecrawlParams = socialLinksToSociavaultParams(found);
+    if (collected.canonicalWebsite) brand.website = collected.canonicalWebsite;
+    addCandidates(candidatesFromLinks(collected.hrefs, "site"));
   }
+
+  // 3. What an earlier review found: used only if the profile proves it is this brand's.
+  const prev = input.previous || null;
+  addCandidates(
+    candidatesFromLinks(
+      [
+        prev?.facebookUrl || input.facebookUrlHint,
+        (prev?.instagramHandle || input.instagramHandleHint) ? `https://www.instagram.com/${(prev?.instagramHandle || input.instagramHandleHint)!.replace(/^@/, "")}` : null,
+        (prev?.twitterHandle || input.twitterHandleHint) ? `https://x.com/${(prev?.twitterHandle || input.twitterHandleHint)!.replace(/^@/, "")}` : null,
+        prev?.youtubeUrl || input.youtubeUrlHint || ((prev?.youtubeHandle || input.youtubeHandleHint) ? `https://www.youtube.com/@${(prev?.youtubeHandle || input.youtubeHandleHint)!.replace(/^@/, "")}` : null),
+        prev?.linkedinUrl || input.linkedinUrlHint,
+      ],
+      "previous",
+    ),
+  );
 
   if (abort()) {
     brand.website = normalizeWebsiteUrl(brand.website) || null;
     return brand;
   }
 
-  const params = mergeParams(firecrawlParams, hintParams);
+  // Each platform tries its candidates, most trusted first, until one
+  // returns a real count. A candidate that needs proof must show it is this
+  // brand's (its website or its name); a site link is dropped only when its
+  // profile is clearly another business's.
+  const RANK: Record<CandidateSource, number> = { ad: 0, site: 1, profile: 2, previous: 3, search: 4, guess: 5 };
+  const tried = new Set<string>();
+  const resolved = new Map<SocialPlatform, { candidate: Candidate; profile: FetchedProfile | null }>();
+  const profileLinks: string[] = [];
+  const brandRef = () => ({ name: input.pageName, website: brand.website || null });
 
-  let linkedinIsGuess = false;
-  if (!params.linkedin) {
+  const resolvePlatform = async (platform: SocialPlatform) => {
+    if (resolved.get(platform)?.profile?.count != null) return;
+    const list = candidates
+      .filter((c) => c.platform === platform && !tried.has(`${platform}|${c.value.toLowerCase()}`))
+      .sort((a, b) => RANK[a.source] - RANK[b.source])
+      .slice(0, 4);
+    for (const c of list) {
+      if (abort()) return;
+      tried.add(`${platform}|${c.value.toLowerCase()}`);
+      let profile: FetchedProfile;
+      try {
+        profile = await fetchCandidate(c);
+      } catch (err) {
+        lookup.issues.add(lookupIssue("SociaVault", err));
+        console.warn(`[brandReview] ${platform} lookup failed for ${c.value}:`, (err as Error).message);
+        // A link from the ad or the brand's own site is still the brand's account.
+        if (!NEEDS_PROOF.has(c.source) && !resolved.has(platform)) resolved.set(platform, { candidate: c, profile: null });
+        continue;
+      }
+      const match = profileMatchesBrand(profile, brandRef());
+      const accept =
+        c.source === "ad" ||
+        (NEEDS_PROOF.has(c.source) ? match.site === "same" || (match.site !== "other" && match.name) : !(match.site === "other" && !match.name));
+      if (!accept) continue;
+      profileLinks.push(...profile.links);
+      const current = resolved.get(platform);
+      if (!current || current.profile?.count == null) resolved.set(platform, { candidate: c, profile });
+      if (profile.count != null) return;
+    }
+  };
+  const resolveAll = async () => {
+    await Promise.all(PLATFORMS.map((p) => resolvePlatform(p)));
+  };
+
+  await resolveAll();
+
+  // 4. Links on the brand's own profiles (a Facebook page listing its Instagram).
+  if (!abort() && profileLinks.length) {
+    addCandidates(candidatesFromLinks(profileLinks, "profile"));
+    await resolveAll();
+  }
+
+  // 5. Web search for the platforms still missing.
+  const missing = () => PLATFORMS.filter((p) => !resolved.has(p));
+  if (!abort() && missing().length && input.pageName) {
+    const known: SociavaultSocialParams = {};
+    for (const p of PLATFORMS) if (resolved.has(p)) (known as Record<string, unknown>)[p] = { url: "known", handle: "known" };
+    const found = await searchSocialHrefs(input.pageName, brand.website ?? null, known, lookup, abort);
+    addCandidates(candidatesFromLinks(found, "search"));
+    await resolveAll();
+  }
+
+  // 6. LinkedIn from the domain name, if it proves to be this company.
+  if (!abort() && !resolved.has("linkedin")) {
     const guessed = guessLinkedInFromWebsite(brand.website);
     if (guessed) {
-      params.linkedin = { url: guessed };
-      linkedinIsGuess = true;
+      addCandidates([{ platform: "linkedin", value: guessed, source: "guess" }]);
+      await resolvePlatform("linkedin");
     }
   }
 
-  if (
-    input.sourcePlatform === "google" ||
-    input.sourcePlatform === "youtube"
-  ) {
-    params.facebook = firecrawlParams.facebook || hintParams.facebook || null;
-  }
-
-  await fetchMetricsFromParams(params, brand, { linkedinIsGuess, lookup });
-  if (abort()) {
-    brand.website = normalizeWebsiteUrl(brand.website) || null;
-    return brand;
-  }
-
-  const followUp: SociavaultSocialParams = {};
-  if (brand.instagramHandle && brand.instagramFollowers == null) {
-    followUp.instagram = { handle: brand.instagramHandle };
-  }
-  if (brand.twitterHandle && brand.twitterFollowers == null) {
-    followUp.twitter = { handle: brand.twitterHandle };
-  }
-  if (brand.facebookUrl && brand.facebookFollowers == null) {
-    followUp.facebook = { url: brand.facebookUrl };
-  }
-  if (
-    brand.linkedinUrl &&
-    brand.linkedinEmployees == null &&
-    brand.linkedinFollowers == null
-  ) {
-    followUp.linkedin = { url: brand.linkedinUrl };
-  }
-  if (brand.youtubeUrl && brand.youtubeSubscribers == null) {
-    followUp.youtube = extractYouTubeParams(brand.youtubeUrl);
-  }
-  if (
-    followUp.facebook ||
-    followUp.instagram ||
-    followUp.twitter ||
-    followUp.linkedin ||
-    followUp.youtube
-  ) {
-    await fetchMetricsFromParams(followUp, brand, { lookup });
-  }
-
-  const stillThin =
-    !abort() &&
-    (!brand.facebookUrl ||
-      !brand.instagramHandle ||
-      !brand.twitterHandle ||
-      !(brand.youtubeUrl || brand.youtubeHandle) ||
-      !brand.linkedinUrl);
-  if (stillThin) {
-    const current: SociavaultSocialParams = {
-      facebook: brand.facebookUrl ? { url: brand.facebookUrl } : null,
-      instagram: brand.instagramHandle
-        ? { handle: brand.instagramHandle }
-        : null,
-      twitter: brand.twitterHandle ? { handle: brand.twitterHandle } : null,
-      youtube:
-        brand.youtubeUrl || brand.youtubeHandle
-          ? extractYouTubeParams(brand.youtubeUrl || brand.youtubeHandle || "")
-          : null,
-      linkedin: brand.linkedinUrl ? { url: brand.linkedinUrl } : null,
-    };
-    // Search only — avoid a second full multi-page scrape (that was hanging the UI).
-    const searched = await searchSocialHrefs(
-      input.pageName,
-      brand.website ?? null,
-      current,
-      lookup,
-      abort,
-    );
-    const more = socialLinksToSociavaultParams(searched);
-    const gap: SociavaultSocialParams = {};
-    if (more.instagram && !brand.instagramHandle) gap.instagram = more.instagram;
-    if (more.twitter && !brand.twitterHandle) gap.twitter = more.twitter;
-    if (more.youtube && !brand.youtubeUrl && !brand.youtubeHandle) {
-      gap.youtube = more.youtube;
+  for (const [platform, { candidate, profile }] of resolved) {
+    if (profile) {
+      Object.assign(brand, profile.fields);
+      if (!brand.website && profile.website && !/facebook|instagram|twitter|x\.com|linkedin|youtube|linktr/i.test(profile.website)) {
+        brand.website = normalizeWebsiteUrl(profile.website);
+      }
+      continue;
     }
-    if (more.linkedin && !brand.linkedinUrl) gap.linkedin = more.linkedin;
-    if (more.facebook && !brand.facebookUrl) gap.facebook = more.facebook;
-    if (
-      !abort() &&
-      (gap.instagram ||
-        gap.twitter ||
-        gap.youtube ||
-        gap.linkedin ||
-        gap.facebook)
-    ) {
-      await fetchMetricsFromParams(gap, brand, { lookup });
+    // Present, but SociaVault gave no data: keep the account so it shows as "Unavailable".
+    if (platform === "facebook") brand.facebookUrl = candidate.value;
+    if (platform === "instagram") brand.instagramHandle = extractInstagramHandle(candidate.value);
+    if (platform === "twitter") brand.twitterHandle = extractTwitterHandle(candidate.value);
+    if (platform === "youtube") {
+      const yt = extractYouTubeParams(candidate.value);
+      brand.youtubeUrl = yt?.url || candidate.value;
+      brand.youtubeHandle = yt?.handle || null;
     }
+    if (platform === "linkedin") brand.linkedinUrl = candidate.value;
   }
 
   // A missing platform is "not present" only when a search for it ran;
   // otherwise it is "not checked" and the next brand review retries it.
-  const has: Record<SocialPlatform, boolean> = {
-    facebook: Boolean(brand.facebookUrl),
-    instagram: Boolean(brand.instagramHandle),
-    twitter: Boolean(brand.twitterHandle),
-    youtube: Boolean(brand.youtubeUrl || brand.youtubeHandle),
-    linkedin: Boolean(brand.linkedinUrl),
-  };
-  const unchecked = PLATFORMS.filter((platform) => !has[platform] && !lookup.searched.has(platform));
+  const unchecked = PLATFORMS.filter((platform) => !resolved.has(platform) && !lookup.searched.has(platform));
   brand.uncheckedPlatforms = unchecked.length ? unchecked : null;
   brand.lookupIssues = lookup.issues.size ? [...lookup.issues] : null;
 
@@ -1280,15 +861,10 @@ export async function runBrandReviewForJob(
       const brand = await runBrandReview({
         pageId: c.pageId,
         pageName: c.pageName,
-        pageProfileUri:
-          c.sampleAd?.advertiserPageUrl || c.brand?.facebookUrl || null,
+        pageProfileUri: c.sampleAd?.advertiserPageUrl || null,
         websiteHint: c.brand?.website || c.sampleAd?.landingPageUrl || null,
-        linkedinUrlHint: c.brand?.linkedinUrl || null,
-        youtubeUrlHint: c.brand?.youtubeUrl || c.sampleAd?.youtubeUrl || null,
-        youtubeHandleHint: c.brand?.youtubeHandle || null,
-        instagramHandleHint: c.brand?.instagramHandle || null,
-        facebookUrlHint: c.brand?.facebookUrl || null,
-        twitterHandleHint: c.brand?.twitterHandle || null,
+        adYoutubeUrl: c.platform === "youtube" ? c.sampleAd?.advertiserPageUrl || null : null,
+        previous: c.brand || null,
         categoryHint: c.brand?.category || null,
         sourcePlatform: c.platform,
         shouldAbort: () => isSearchJobSuppressed(jobId),
@@ -1377,23 +953,13 @@ export async function runBrandReviewForCompetitor(
   const brand = await runBrandReview({
     pageId: competitor.pageId,
     pageName: competitor.pageName,
-    pageProfileUri:
-      competitor.sampleAd?.advertiserPageUrl ||
-      competitor.brand?.facebookUrl ||
-      null,
+    pageProfileUri: competitor.sampleAd?.advertiserPageUrl || null,
     websiteHint:
       competitor.brand?.website ||
       competitor.sampleAd?.landingPageUrl ||
       null,
-    linkedinUrlHint: competitor.brand?.linkedinUrl || null,
-    youtubeUrlHint:
-      competitor.brand?.youtubeUrl ||
-      competitor.sampleAd?.youtubeUrl ||
-      null,
-    youtubeHandleHint: competitor.brand?.youtubeHandle || null,
-    instagramHandleHint: competitor.brand?.instagramHandle || null,
-    facebookUrlHint: competitor.brand?.facebookUrl || null,
-    twitterHandleHint: competitor.brand?.twitterHandle || null,
+    adYoutubeUrl: competitor.platform === "youtube" ? competitor.sampleAd?.advertiserPageUrl || null : null,
+    previous: competitor.brand || null,
     categoryHint: competitor.brand?.category || null,
     sourcePlatform: competitor.platform,
   });

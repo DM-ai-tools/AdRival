@@ -155,10 +155,23 @@ export function extractFacebookUrl(
     if (!/facebook\.com|fb\.com|fb\.me/i.test(u.hostname)) return null;
     const path = u.pathname.replace(/\/+$/, "");
     if (!path || path === "/") return null;
-    if (/\/(sharer|share|login|dialog)\b/i.test(path)) return null;
+    // Not a page: share and login links, the Meta Pixel (facebook.com/tr?id=…),
+    // plugins, posts, photos, events and help pages.
+    if (
+      /^\/(sharer|share|login|dialog|tr|plugins|policies|policy|privacy|help|ads|business|watch|events|hashtag|photo|photo\.php|permalink\.php|story\.php|l\.php|reel|reels|stories|marketplace|gaming|legal|terms|settings|pages\/create)(\/|$)/i.test(
+        path,
+      ) ||
+      /\/(posts|photos|videos|reviews)\//i.test(path)
+    ) {
+      return null;
+    }
     u.hash = "";
-    u.search = "";
-    return u.toString().replace(/\/$/, "");
+    // A profile.php link names the page only by its id; keep it.
+    const id = /\/profile\.php$/i.test(path) ? u.searchParams.get("id") : null;
+    if (/\/profile\.php$/i.test(path) && !id) return null;
+    u.search = id ? `?id=${id}` : "";
+    u.hostname = "www.facebook.com";
+    return u.toString().replace(/\/(\?|$)/, "$1");
   } catch {
     return null;
   }
