@@ -4,6 +4,22 @@ import { FormEvent, useCallback, useEffect, useState } from "react";
 
 export const SPACE_EVENT = "adrival-space-change";
 
+/** sessionStorage key for the home page's last screen, restored when landing on a bare "/". */
+export const LAST_VIEW_KEY = "adrival:lastView";
+
+/**
+ * Open the home page fresh for the chosen client: no run, lookup or history
+ * item from the previous client stays on screen.
+ */
+function startFresh() {
+  try {
+    window.sessionStorage.removeItem(LAST_VIEW_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+  window.location.assign(`${window.location.pathname}?mode=search`);
+}
+
 export interface SpaceSelection {
   id: string;
   clientName: string;
@@ -83,9 +99,12 @@ export function ClientSpaceBar() {
   }, [load]);
 
   function choose(id: string) {
+    const changed = id !== selectedId;
     setSelectedId(id);
     if (userId) window.localStorage.setItem(storageKey(userId), id);
     publish(spaces.find((space) => space.id === id));
+    // Another client's results must not stay on screen.
+    if (changed && id) startFresh();
   }
 
   async function createSpace(e: FormEvent) {
@@ -102,7 +121,8 @@ export function ClientSpaceBar() {
       if (!res.ok) throw new Error(json.error || "Could not create the space");
       setClientName("");
       if (userId) window.localStorage.setItem(storageKey(userId), json.space.id);
-      await load(userId);
+      // A new client starts from an empty page in its own space.
+      startFresh();
     } catch (err) {
       setError((err as Error).message);
     } finally {

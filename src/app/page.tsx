@@ -16,7 +16,7 @@ import {
 import { UnifiedHistoryPanel } from "@/components/UnifiedHistoryPanel";
 import { KillWorkButton } from "@/components/KillWorkButton";
 import { AuthHeaderActions } from "@/components/AuthHeaderActions";
-import { ClientSpaceBar, SPACE_EVENT, type SpaceSelection } from "@/components/ClientSpaceBar";
+import { ClientSpaceBar, LAST_VIEW_KEY, SPACE_EVENT, type SpaceSelection } from "@/components/ClientSpaceBar";
 import { PlatformPicker } from "@/components/PlatformPicker";
 import { BusinessProfileSummary } from "@/components/BusinessProfileSummary";
 import { RunCreditLine, type RunCredits } from "@/components/RunCreditLine";
@@ -52,8 +52,6 @@ const LOOKUP_BUSY_STAGES = new Set([
 ]);
 type ResultsView = "website" | "preview" | "brand" | "offers";
 
-/** sessionStorage key for the last screen, restored when landing on a bare "/". */
-const LAST_VIEW_KEY = "adrival:lastView";
 
 /** The address parts this page owns; dashboards add their own (DASHBOARD_PARAMS). */
 const PAGE_PARAMS = ["mode", "run", "tab", "lookup", "item"] as const;
