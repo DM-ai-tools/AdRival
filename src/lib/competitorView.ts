@@ -11,6 +11,7 @@ export function competitorForList<T extends CompetitorRecord>(competitor: T): T 
   if (!competitor.recreatedPage) return competitor;
   const summary = { ...competitor.recreatedPage };
   delete summary.html;
+  delete summary.previousHtml;
   delete summary.sourceArchive;
   delete summary.contentPack;
   delete summary.contentDraft;

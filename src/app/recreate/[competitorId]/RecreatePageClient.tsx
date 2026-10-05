@@ -419,6 +419,62 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     }
   }, [blocks, competitorId, designFeedback, followBuild, styleDirection, syncFromPage]);
 
+  /**
+   * Targeted changes: only the parts the feedback mentions are rewritten and
+   * checked; the rest of the page stays as built. Asking to "rebuild the
+   * whole page" makes the server rebuild it instead.
+   */
+  const applyChanges = useCallback(async () => {
+    const request = [designFeedback.trim(), contentFeedback.trim()].filter(Boolean).join("\n");
+    if (!request) {
+      setError("Describe the changes you want in the feedback boxes below, then press Apply changes.");
+      return;
+    }
+    setError(null);
+    setBuilding(true);
+    setView("design");
+    let running = false;
+    try {
+      const res = await fetch("/api/competitors/recreate-page", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ competitorId, action: "edit_page", userFeedback: request, styleDirection }),
+      });
+      const data = await readJson(res);
+      running = await followBuild(data);
+      if (running) return;
+      if (!res.ok) throw new Error(data.error || "The changes could not be applied");
+      const next = data.competitor as CompetitorRecord;
+      setCompetitor(next);
+      syncFromPage(next.recreatedPage ?? null);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      if (!running) setBuilding(false);
+    }
+  }, [competitorId, contentFeedback, designFeedback, followBuild, styleDirection, syncFromPage]);
+
+  const undoEdit = useCallback(async () => {
+    setError(null);
+    setBuilding(true);
+    try {
+      const res = await fetch("/api/competitors/recreate-page", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ competitorId, action: "undo_edit" }),
+      });
+      const data = await readJson(res);
+      if (!res.ok) throw new Error(data.error || "The last change could not be undone");
+      const next = data.competitor as CompetitorRecord;
+      setCompetitor(next);
+      syncFromPage(next.recreatedPage ?? null);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBuilding(false);
+    }
+  }, [competitorId, syncFromPage]);
+
   const requestRegenerateDesign = useCallback(() => {
     if (page?.status === "completed" && page.html) {
       setConfirmRedesignOpen(true);
@@ -880,17 +936,23 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
           {canRegenerateDesign && page?.html ? (
             <button
               type="button"
+              className={designFeedback.trim() || contentFeedback.trim() ? "search-btn" : "ghost-btn"}
+              disabled={busy}
+              title="Changes only the parts your feedback mentions and checks them; the rest of the page stays as it is."
+              onClick={() => void applyChanges()}
+            >
+              {building ? "Applying changes…" : "Apply changes"}
+            </button>
+          ) : null}
+          {page?.canUndo ? (
+            <button
+              type="button"
               className="ghost-btn"
               disabled={busy}
-              onClick={() => requestRegenerateDesign()}
+              title="Go back to the page as it was before the last change."
+              onClick={() => void undoEdit()}
             >
-              {building
-                ? "Updating page…"
-                : designFeedback.trim()
-                  ? "Apply design feedback"
-                  : page?.html
-                    ? "Request design changes"
-                    : "Create page"}
+              Undo last change
             </button>
           ) : null}
         </div>
@@ -1141,11 +1203,18 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
               onChange={(e) => setDesignFeedback(e.target.value)}
             />
             <p className="muted recreate-feedback-hint">
-              Combined with content notes for a unified regenerate. Layout-only changes keep copy where possible.
+              Apply changes rewrites only the parts you mention (e.g. &ldquo;show the full logo&rdquo;, &ldquo;make the hero
+              headline white on a dark overlay&rdquo;) and keeps the rest as built. To start over, use Regenerate page or say
+              &ldquo;rebuild the whole page&rdquo;.
               {designFeedback.trim()
                 ? ` · ${designFeedback.trim().length}/4000`
                 : null}
             </p>
+            {page?.lastEdit ? (
+              <p className="muted recreate-feedback-hint" role="status">
+                Last change: {page.lastEdit.summary}
+              </p>
+            ) : null}
           </div>
         </div>
       </section>

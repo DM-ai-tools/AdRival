@@ -7,6 +7,8 @@ const EDIT_ACTIONS = new Set([
   "undo_content",
   "update_intent",
   "set_business_url",
+  // Going back to the page before the last edit spends nothing.
+  "undo_edit",
 ]);
 
 /** Opening and manual edits are free. Model research, drafting, and design builds are runs. */

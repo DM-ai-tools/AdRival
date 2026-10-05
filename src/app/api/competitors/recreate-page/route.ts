@@ -28,6 +28,8 @@ import {
   stopUnifiedRecreation,
 } from "@/lib/pipeline/unified/run";
 import { recreationActionPermission } from "@/lib/pipeline/content/permissions";
+import { editRecreatedPage, undoLastEdit } from "@/lib/pipeline/unified/editPage";
+import { hasBrokenImages, restoreSlotImages } from "@/lib/pipeline/unified/integrity";
 import { draftIsCurrent } from "@/lib/pipeline/content/pageIntent";
 import type { CanonicalContent } from "@/lib/pipeline/content/model";
 import { ContentRevisionError } from "@/lib/pipeline/content/revisions";
@@ -108,14 +110,24 @@ async function startBuild(
   );
 }
 
+/**
+ * The page as the browser gets it: the stored previous version (kept for
+ * Undo) is replaced by a flag, so polling does not send the page twice.
+ */
+function pageForClient<T extends { previousHtml?: string | null } | null | undefined>(page: T): T {
+  if (!page) return page;
+  const { previousHtml, ...rest } = page;
+  return { ...rest, canUndo: Boolean(previousHtml) } as unknown as T;
+}
+
 function maskCompetitor<T extends {
   recreatedPage?: unknown;
   pageAnalysis?: unknown;
 }>(competitor: T): T {
   return {
     ...competitor,
-    recreatedPage: maskRecreatedPage(
-      (competitor.recreatedPage ?? null) as Parameters<typeof maskRecreatedPage>[0],
+    recreatedPage: pageForClient(
+      maskRecreatedPage((competitor.recreatedPage ?? null) as Parameters<typeof maskRecreatedPage>[0]) as { previousHtml?: string | null } | null,
     ),
     pageAnalysis: maskPageAnalysis(
       (competitor.pageAnalysis ?? null) as Parameters<typeof maskPageAnalysis>[0],
@@ -362,6 +374,29 @@ export async function POST(request: Request) {
       return NextResponse.json({ competitor: maskCompetitor(competitor), cached: false });
     }
 
+    // Targeted changes: only the parts the request mentions are rewritten;
+    // the whole page is rebuilt only when the request asks for that.
+    if (action === "edit_page") {
+      const request = userFeedback || (typeof body.request === "string" ? body.request.trim().slice(0, 4000) : "");
+      if (!request) {
+        return NextResponse.json({ error: "Describe the changes you want." }, { status: 400 });
+      }
+      if (!existing.recreatedPage?.html) {
+        return NextResponse.json({ error: "There is no finished page to change yet. Create the page first." }, { status: 400 });
+      }
+      return startBuild(competitorId, () =>
+        billed("recreate.edit_page", async () => {
+          const outcome = await editRecreatedPage(competitorId, request);
+          if (!outcome.full) return outcome.competitor;
+          return runUnifiedRecreation(competitorId, { force: true, userFeedback: outcome.feedback, styleDirection });
+        }),
+      );
+    }
+
+    if (action === "undo_edit") {
+      return NextResponse.json({ competitor: maskCompetitor(undoLastEdit(competitorId)), cached: false });
+    }
+
     if (
       action === "approve_and_build" ||
       action === "build_design" ||
@@ -450,6 +485,18 @@ export async function GET(request: Request) {
       );
     }
     const access = resolveProjectAccess("search", competitor.runId, user, "view");
+    // Pages built before the image fix can show broken images: put them back.
+    const builtPage = competitor.recreatedPage;
+    if (builtPage?.html && builtPage.status === "completed" && hasBrokenImages(builtPage.html)) {
+      const restored = restoreSlotImages(builtPage.html, builtPage.generatedImages, builtPage.brandColors);
+      if (restored.fixed.length) {
+        const fixedPage = { ...builtPage, html: restored.html };
+        competitor =
+          access.role !== "viewer"
+            ? updateCompetitor(competitorId, { recreatedPage: fixedPage }) || competitor
+            : { ...competitor, recreatedPage: fixedPage };
+      }
+    }
     const pack = competitor.recreatedPage?.contentPack;
     if (pack) {
       const repaired = repairPackEvidence(pack);
@@ -466,7 +513,7 @@ export async function GET(request: Request) {
     }
     return NextResponse.json({
       competitor: maskCompetitor(competitor),
-      recreatedPage: maskRecreatedPage(competitor.recreatedPage ?? null),
+      recreatedPage: pageForClient(maskRecreatedPage(competitor.recreatedPage ?? null)),
       pageAnalysis: maskPageAnalysis(competitor.pageAnalysis ?? null),
       access: { role: access.role, canEdit: access.role !== "viewer" },
       brand: brandFor(competitor.runId),

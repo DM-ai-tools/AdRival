@@ -320,7 +320,7 @@ function chromeRange(html: string, id: "header" | "footer"): [number, number] | 
   return close < 0 ? null : [open, close + id.length + 3];
 }
 
-function partHtml(html: string, id: string): string {
+export function partHtml(html: string, id: string): string {
   if (id === "header" || id === "footer") {
     const range = chromeRange(html, id);
     return range ? html.slice(range[0], range[1]) : "";
@@ -340,7 +340,7 @@ function partHtml(html: string, id: string): string {
   return "";
 }
 
-function replacePart(html: string, id: string, next: string): string {
+export function replacePart(html: string, id: string, next: string): string {
   if (id === "header" || id === "footer") {
     const range = chromeRange(html, id);
     return range ? html.slice(0, range[0]) + next + html.slice(range[1]) : html;
@@ -348,7 +348,7 @@ function replacePart(html: string, id: string, next: string): string {
   return replaceSection(html, id, next.replace(/<section\b(?![^>]*\bid=)/i, `<section id="${id}"`));
 }
 
-function withCss(html: string, rows: Array<{ id: string; css: string }>): string {
+export function withCss(html: string, rows: Array<{ id: string; css: string }>): string {
   const css = rows.filter((r) => r.css.trim()).map((r) => `/* ${r.id} (reviewed) */\n${r.css}`);
   return css.length ? html.replace(/<\/style>/i, () => `${css.join("\n")}\n</style>`) : html;
 }

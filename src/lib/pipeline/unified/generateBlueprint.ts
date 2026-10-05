@@ -686,6 +686,8 @@ export async function regenerateBlueprintSection(input: BlueprintGenerationInput
   currentHtml: string;
 }): Promise<{ html: string; css: string; imageSlots: UnifiedImageSlot[] } | null> {
   const slots = planImageSlots(input.blueprint.sections, input.imageBudget);
+  // The previous attempt's images travel as short tokens and are put back after.
+  const assets = holdAssets(input.currentHtml);
   const parts: ContentPart[] = [];
   if (input.section.crop) parts.push(imagePart(input.section.crop));
   parts.push({
@@ -693,7 +695,7 @@ export async function regenerateBlueprintSection(input: BlueprintGenerationInput
     text: JSON.stringify({
       task: `Rebuild competitor section ${input.section.id} again. The previous attempt did not match the competitor closely enough.`,
       problems: input.problems,
-      previousAttempt: holdAssets(input.currentHtml).html.slice(0, 12_000),
+      previousAttempt: assets.html.slice(0, 12_000),
       client: clientBrief(input),
       campaignOffer: input.campaignOffer,
       classSystem: input.design.vocabulary,
@@ -714,7 +716,7 @@ export async function regenerateBlueprintSection(input: BlueprintGenerationInput
   const row = Array.isArray(result.json?.sections) ? (result.json!.sections as Array<Record<string, unknown>>)[0] : null;
   const html = typeof row?.html === "string" ? row.html : "";
   if (!/<section[\s>]/i.test(html)) return null;
-  const cleaned = sanitizeFragment(html, input.section.id);
+  const cleaned = sanitizeFragment(assets.restore(html), input.section.id);
   return { html: cleaned.html, css: cleaned.css, imageSlots: slotsFrom(row?.imageSlots, slots, input.section.id) };
 }
 
@@ -782,10 +784,13 @@ export async function repairFromReview(input: {
   fix: string;
   classSystem: string;
   designDirection?: BlueprintGenerationInput["designDirection"];
+  /** "edit": a change the user asked for (words may change if asked); default: fix review flaws. */
+  mode?: "review" | "edit";
   signal?: AbortSignal;
   onProgress?: (info: UnifiedProgressInfo) => void;
 }): Promise<{ html: string; css: string } | null> {
   const isChrome = input.target === "header" || input.target === "footer";
+  const edit = input.mode === "edit";
   const tag = isChrome ? input.target : "section";
   const held = holdForm(input.html);
   const assets = holdAssets(held.html);
@@ -802,12 +807,16 @@ export async function repairFromReview(input: {
   parts.push({
     type: "text",
     text: JSON.stringify({
-      task: `A design reviewer compared the rebuilt ${isChrome ? input.target : `section ${input.target}`} with the competitor's side by side and found the flaws below. Fix every flaw so it renders cleanly and follows the competitor's layout.`,
+      task: edit
+        ? `The page owner asked for this change to the ${isChrome ? input.target : `section ${input.target}`}. Make exactly this change and nothing else; everything not mentioned stays as it is.`
+        : `A design reviewer compared the rebuilt ${isChrome ? input.target : `section ${input.target}`} with the competitor's side by side and found the flaws below. Fix every flaw so it renders cleanly and follows the competitor's layout.`,
       images,
-      flaws: input.flaws.slice(0, 12),
-      reviewerFix: input.fix.slice(0, 1200),
+      ...(edit ? { requestedChange: input.fix.slice(0, 1500) } : { flaws: input.flaws.slice(0, 12), reviewerFix: input.fix.slice(0, 1200) }),
       rules: [
-        "Keep every word, link, button label and image: keep each <img> tag with its data-adrival-slot, data-logo-role and src exactly as given.",
+        edit
+          ? "Keep every image: keep each <img> tag with its data-adrival-slot, data-logo-role and src exactly as given. Change words, links or labels only where the requested change asks for it."
+          : "Keep every word, link, button label and image: keep each <img> tag with its data-adrival-slot, data-logo-role and src exactly as given.",
+        "Text must be readable: on a photo or a dark band use light text over a dark overlay; on a light background use dark text.",
         `Keep the data-section-id and the ${FORM_SLOT_ATTR} slot if present.`,
         "You may change the markup structure, classes and wrappers to fix layout, alignment, column widths and spacing.",
         "Align text consistently: the heading, intro and body of one column share one left edge, or are all centred when the competitor centres them.",
@@ -824,7 +833,7 @@ export async function repairFromReview(input: {
   const result = await runJson({
     content: parts,
     maxTokens: Math.min(14_000, 3_000 + Math.ceil(assets.html.length / 2.2)),
-    label: `Fixing ${isChrome ? `the ${input.target}` : `section ${input.target.replace("sec-", "")}`} after review`,
+    label: `${edit ? "Changing" : "Fixing"} ${isChrome ? `the ${input.target}` : `section ${input.target.replace("sec-", "")}`}${edit ? "" : " after review"}`,
     pass: "polish",
     signal: input.signal,
     onProgress: input.onProgress,

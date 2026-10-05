@@ -1068,6 +1068,19 @@ export interface RecreatedLandingPage {
    * this string is kept on the record for audit / UI until the next run.
    */
   designMd?: string | null;
+  /** The page before the last targeted edit, so the edit can be undone. */
+  previousHtml?: string | null;
+  /** Sent to the browser instead of previousHtml: whether Undo is available. */
+  canUndo?: boolean;
+  /** The last targeted edit: what was asked, what changed, what was repaired. */
+  lastEdit?: {
+    at: string;
+    request: string;
+    changed: string[];
+    reverted: string[];
+    repaired: string[];
+    summary: string;
+  } | null;
   /** Publish readiness from last design fit */
   publishReady?: boolean | null;
   publishBlockers?: string[] | null;
