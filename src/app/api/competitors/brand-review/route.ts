@@ -17,6 +17,7 @@ import {
   markBrandReviewRunning,
   markBrandReviewStopped,
   runBrandReviewForJob,
+  BrandReviewStopped,
 } from "@/lib/pipeline/brandReview";
 
 export const runtime = "nodejs";
@@ -48,16 +49,25 @@ export async function POST(request: Request) {
       }
       resolveProjectAccess("search", competitor.runId, user, "run");
 
-      const brand = await runBillable(
-        {
-          user,
-          operation: "competitor.brand_review",
-          projectKind: "search",
-          projectId: competitor.runId,
-          runId: competitor.runId,
-        },
-        () => runBrandReviewForCompetitor(competitor),
-      );
+      let brand;
+      try {
+        brand = await runBillable(
+          {
+            user,
+            operation: "competitor.brand_review",
+            projectKind: "search",
+            projectId: competitor.runId,
+            runId: competitor.runId,
+          },
+          // Stops on the Stop button, or when the page stops waiting.
+          () => runBrandReviewForCompetitor(competitor, { signal: request.signal }),
+        );
+      } catch (err) {
+        if (err instanceof BrandReviewStopped) {
+          return NextResponse.json({ ok: true, mode: "single", competitorId: body.competitorId, stopped: true });
+        }
+        throw err;
+      }
       const updated = getCompetitor(body.competitorId);
       return NextResponse.json({
         ok: true,

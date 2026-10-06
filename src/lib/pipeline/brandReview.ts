@@ -982,8 +982,52 @@ async function runBrandReviewBatch(
 }
 
 /** Enrich a single competitor (history redo). */
+/**
+ * One-competitor checks in progress, per run. They do not mark the run as
+ * working, so Stop reaches them through here.
+ */
+function singleReviewsInProcess(): Map<string, Set<AbortController>> {
+  const g = globalThis as typeof globalThis & { __adrivalSingleReviews?: Map<string, Set<AbortController>> };
+  return (g.__adrivalSingleReviews ??= new Map());
+}
+
+/** Stops every one-competitor check running for a run. Returns how many were stopped. */
+export function stopSingleBrandReviews(runId: string): number {
+  const list = singleReviewsInProcess().get(runId);
+  if (!list?.size) return 0;
+  for (const ctrl of list) ctrl.abort();
+  return list.size;
+}
+
+/** Thrown when Stop cancels a one-competitor check; nothing is saved. */
+export class BrandReviewStopped extends Error {
+  constructor() {
+    super("Brand review stopped");
+    this.name = "BrandReviewStopped";
+  }
+}
+
 export async function runBrandReviewForCompetitor(
   competitor: CompetitorRecord,
+  options?: { signal?: AbortSignal },
+): Promise<BrandReview> {
+  const ctrl = new AbortController();
+  const runs = singleReviewsInProcess();
+  const mine = runs.get(competitor.runId) ?? new Set<AbortController>();
+  mine.add(ctrl);
+  runs.set(competitor.runId, mine);
+  const stopped = () => ctrl.signal.aborted || Boolean(options?.signal?.aborted);
+  try {
+    return await reviewOneCompetitor(competitor, stopped);
+  } finally {
+    mine.delete(ctrl);
+    if (!mine.size) runs.delete(competitor.runId);
+  }
+}
+
+async function reviewOneCompetitor(
+  competitor: CompetitorRecord,
+  stopped: () => boolean,
 ): Promise<BrandReview> {
   const brand = await runBrandReview({
     pageId: competitor.pageId,
@@ -997,7 +1041,10 @@ export async function runBrandReviewForCompetitor(
     previous: competitor.brand || null,
     categoryHint: competitor.brand?.category || null,
     sourcePlatform: competitor.platform,
+    shouldAbort: stopped,
   });
+  // A stopped check is cut short; its partial result is not saved.
+  if (stopped()) throw new BrandReviewStopped();
   const patch: Partial<CompetitorRecord> = { brand };
   if (brand.address && !competitor.locationLabel) {
     patch.locationLabel = brand.address;

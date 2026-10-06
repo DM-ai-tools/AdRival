@@ -234,6 +234,8 @@ export function BrandReviewPanel({
 
   async function stopBrandReview() {
     if (!resolvedRunId || stopping) return;
+    // A one-competitor check reports its own stop; only a batch waits for the run.
+    const single = Boolean(rowBusy) && !batchBusy && !liveBrandActive;
     setStopping(true);
     setError(null);
     abortRef.current?.abort();
@@ -243,6 +245,10 @@ export function BrandReviewPanel({
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ jobId: resolvedRunId }),
       });
+      if (single) {
+        setStopping(false);
+        return;
+      }
       setLocalProgress((prev) =>
         prev
           ? {
@@ -396,9 +402,14 @@ export function BrandReviewPanel({
       if ((err as Error).name !== "AbortError") {
         setError((err as Error).message);
         setLocalProgress(null);
+      } else {
+        // Stopped: the server stops too and keeps the competitor's earlier details.
+        setLocalProgress({ done: 0, total: 1, currentName: null, message: `Stopped checking ${name}` });
+        window.setTimeout(() => setLocalProgress(null), 2500);
       }
     } finally {
       setRowBusy(null);
+      setStopping(false);
     }
   }
 

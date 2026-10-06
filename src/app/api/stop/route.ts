@@ -10,6 +10,7 @@ import {
   stopSearchJob,
 } from "@/lib/db";
 import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
+import { stopSingleBrandReviews } from "@/lib/pipeline/brandReview";
 
 export const runtime = "nodejs";
 
@@ -41,6 +42,8 @@ export async function POST(request: Request) {
       if (job && isSearchWorkInFlight(job) && stopSearchJob(jobId, reason)) {
         searchJobIds.push(jobId);
       }
+      // One-competitor brand checks do not mark the run as working.
+      if (stopSingleBrandReviews(jobId)) searchJobIds.push(jobId);
     }
     if (lookupId) {
       resolveProjectAccess("lookup", lookupId, user, "edit");
@@ -53,6 +56,7 @@ export async function POST(request: Request) {
     if (all) {
       for (const job of listJobs(500)) {
         if (job.ownerUserId !== user.id) continue;
+        if (stopSingleBrandReviews(job.id)) searchJobIds.push(job.id);
         if (!isSearchWorkInFlight(job)) continue;
         if (stopSearchJob(job.id, reason)) searchJobIds.push(job.id);
       }
