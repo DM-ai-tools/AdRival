@@ -805,8 +805,43 @@ export async function runBrandReview(input: {
   return withBrandScore(brand);
 }
 
+/**
+ * Runs whose brand review this app process is working on. A run whose saved
+ * stage says "brand_review" but is not in here was interrupted (the app
+ * restarted or was redeployed) and must not block a new start.
+ */
+function brandReviewsInProcess(): Set<string> {
+  const g = globalThis as typeof globalThis & { __adrivalBrandReviews?: Set<string> };
+  return (g.__adrivalBrandReviews ??= new Set<string>());
+}
+
+/** Called just before a batch is scheduled, so a second click does not start a duplicate. */
+export function markBrandReviewRunning(jobId: string): void {
+  brandReviewsInProcess().add(jobId);
+}
+
+export function markBrandReviewStopped(jobId: string): void {
+  brandReviewsInProcess().delete(jobId);
+}
+
+export function isBrandReviewRunning(jobId: string): boolean {
+  return brandReviewsInProcess().has(jobId);
+}
+
 /** Run brand review for every competitor in a finished search job. */
 export async function runBrandReviewForJob(
+  jobId: string,
+  options?: { force?: boolean },
+): Promise<{ updated: number; skipped: number; stopped?: boolean }> {
+  markBrandReviewRunning(jobId);
+  try {
+    return await runBrandReviewBatch(jobId, options);
+  } finally {
+    markBrandReviewStopped(jobId);
+  }
+}
+
+async function runBrandReviewBatch(
   jobId: string,
   options?: { force?: boolean },
 ): Promise<{ updated: number; skipped: number; stopped?: boolean }> {

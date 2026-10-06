@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { getCompetitorsByRun, getJob, getSearchCompetitorAdsByRun } from "@/lib/db";
+import { getCompetitorsByRun, getJob, getSearchCompetitorAdsByRun, updateJob } from "@/lib/db";
+import { isBrandReviewRunning } from "@/lib/pipeline/brandReview";
 import { competitorForList } from "@/lib/competitorView";
 import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
 import { reportRunCredits } from "@/lib/accounting/run";
@@ -23,9 +24,28 @@ export async function GET(request: Request) {
     // user's job id reveals nothing.
     const access = resolveProjectAccess("search", jobId, user, "view");
 
-    const job = getJob(jobId);
+    let job = getJob(jobId);
     if (!job) {
       return NextResponse.json({ error: "Job not found" }, { status: 404 });
+    }
+    // A brand review this app is not running was cut off by a restart or
+    // redeploy. Say so, so it can be started again instead of looking stuck.
+    if (
+      job.progress?.stage === "brand_review" &&
+      !isBrandReviewRunning(jobId) &&
+      Date.now() - Date.parse(job.updatedAt) > 30_000
+    ) {
+      const done = job.progress.brandReviewDone ?? 0;
+      const total = job.progress.brandReviewTotal ?? getCompetitorsByRun(jobId).length;
+      job =
+        updateJob(jobId, {
+          progress: {
+            ...job.progress,
+            stage: "done",
+            brandReviewCurrentName: null,
+            message: `Brand review stopped after ${done} of ${total} competitors because the app restarted. Run brand review again to finish it.`,
+          },
+        }) || job;
     }
 
     const competitors = getCompetitorsByRun(jobId).map((competitor) => ({

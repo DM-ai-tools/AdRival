@@ -13,6 +13,9 @@ import { precheckRun, runBillable } from "@/lib/accounting/run";
 import { isCreditError } from "@/lib/accounting/errors";
 import {
   runBrandReviewForCompetitor,
+  isBrandReviewRunning,
+  markBrandReviewRunning,
+  markBrandReviewStopped,
   runBrandReviewForJob,
 } from "@/lib/pipeline/brandReview";
 
@@ -81,9 +84,12 @@ export async function POST(request: Request) {
           { status: precheck.reason === "suspended" ? 403 : 402 },
         );
       }
-      if (job.progress.stage === "brand_review") {
+      // Already running in this app: follow it. A saved "brand_review" stage
+      // with nothing running was interrupted by a restart and starts again.
+      if (job.progress.stage === "brand_review" && isBrandReviewRunning(runId)) {
         return NextResponse.json({ ok: true, mode: "batch", runId, started: true, job });
       }
+      markBrandReviewRunning(runId);
       // A batch takes minutes, longer than a request may stay open, so it runs
       // in the background and the panel follows it through the status poll.
       // The stage is set before replying so the first poll already sees it.
@@ -111,6 +117,7 @@ export async function POST(request: Request) {
           },
           () => runBrandReviewForJob(runId, { force: body.force !== false }),
         ).catch((err) => {
+          markBrandReviewStopped(runId);
           console.error("[brand-review] batch failed", err);
           const current = getJob(runId);
           updateJob(runId, {
