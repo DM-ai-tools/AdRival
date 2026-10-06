@@ -33,6 +33,9 @@ const REASON_LABELS: Array<[keyof NonNullable<JobProgress["rejectReasons"]>, str
   ["nonEnglish", "Not in English"],
   ["guardrailReject", "Blocked by industry rules"],
   ["llmError", "Could not be checked"],
+  ["noReadableCopy", "Ad text could not be read"],
+  ["noAdsInRegion", "Sites with no Google ads in this country"],
+  ["notCompetitorSite", "Search results that are not competitors"],
 ];
 
 const RECENT_LIMIT = 5;

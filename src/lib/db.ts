@@ -917,6 +917,8 @@ function settleProgress<T>(
 
 /** Save routine search progress, throttled (see PROGRESS_WRITE_MS). */
 export function saveJobProgress(job: SearchJob): void {
+  // SEARCH_DEBUG=1 prints every progress line (local diagnosis of a search).
+  if (process.env.SEARCH_DEBUG) console.log(`[search] ${job.progress?.message || ""}`);
   throttleProgress(pendingSearchProgress, job, writeSearchJob);
 }
 

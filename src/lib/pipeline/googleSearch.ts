@@ -98,6 +98,8 @@ const NOT_ADVERTISER_HOST =
 const AD_REVIEW_BATCH = 4;
 /** Detail calls per advertiser before the model runs. More copy is loaded after accept. */
 const DETAILS_PER_ADVERTISER = 1;
+/** Ads read per advertiser while looking for one with readable text (image ads often have none). */
+const MAX_DETAIL_TRIES = 3;
 /** User keywords always run. This many extra expansions are allowed after them. */
 const MAX_EXTRA_GOOGLE_QUERIES = 3;
 
@@ -395,6 +397,22 @@ function isYouTubeCreative(
   return format === "video" || Boolean(details?.youtubeUrl);
 }
 
+/** Counts why an advertiser or site was dropped, for the run's "Why were ads rejected?" breakdown. */
+function bumpReason(job: SearchJob, key: keyof NonNullable<SearchJob["progress"]["rejectReasons"]>, by = 1) {
+  const reasons = (job.progress.rejectReasons ??= {
+    inactive: 0,
+    shortDuration: 0,
+    noServiceSignal: 0,
+    nonEnglish: 0,
+    noLandingPage: 0,
+    llmReject: 0,
+    llmError: 0,
+    lowActiveAds: 0,
+    countError: 0,
+  });
+  reasons[key] = (reasons[key] || 0) + by;
+}
+
 function websiteUrl(domain: string): string {
   const d = domain.replace(/^https?:\/\//i, "").replace(/\/$/, "");
   return `https://${d}`;
@@ -603,6 +621,7 @@ export async function runGoogleFamilySearch(
       const rows = await mapPool(slice, AD_REVIEW_BATCH, async (domain) => {
         try {
           const ads = await fetchAds({ domain });
+          if (!ads.length) bumpReason(job, "noAdsInRegion");
           return ads.length ? { domain, ads } : null;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -797,6 +816,7 @@ export async function runGoogleFamilySearch(
           platform,
           businessProfile,
         });
+        if (kept.length < web.domains.length) bumpReason(job, "notCompetitorSite", web.domains.length - kept.length);
         await checkWebDomains(kept.slice(0, MAX_DOMAIN_CHECKS_PER_STEP), webQueries[0] || "");
       }
       if (!done()) {
@@ -908,6 +928,7 @@ async function tryAcceptFromAds(args: {
     })
   ) {
     job.progress.rejected += 1;
+    bumpReason(job, "guardrailReject");
     job.progress.message = `Skipped ${pageName}: this is your client's own business`;
     saveJobProgress(job);
     return;
@@ -933,25 +954,31 @@ async function tryAcceptFromAds(args: {
   const sampleSource =
     durationQualified.length > 0 ? durationQualified : pool;
 
-  const sample = sampleSource.slice(0, DETAILS_PER_ADVERTISER);
-  const detailed = await mapPool(sample, DETAILS_PER_ADVERTISER, async (ad) => {
-    if (isSearchJobSuppressed(job.id)) return null;
-    const details = await enrichGoogleAd(ad);
-    return { ad, details };
-  });
+  // Text ads first: image and video ads often come back with no readable
+  // words, and one unreadable ad must not cost the whole advertiser. Up to
+  // MAX_DETAIL_TRIES ads are read, stopping at the first with English copy.
+  const isText = (ad: GoogleAdCreative) => String(ad.format || "").toLowerCase() === "text";
+  const textFirst = [...sampleSource].sort((a, b) => Number(isText(b)) - Number(isText(a)));
   const english: AdCandidate[] = [];
-  for (const row of detailed) {
-    if (!row) continue;
-    if (platform === "youtube" && !isYouTubeCreative(row.ad, row.details)) continue;
-    const candidate = mapGoogleCreativeToCandidate(row.ad, row.details);
-    const copy = `${candidate.title}\n${candidate.body}\n${candidate.fullText}`;
-    if (!looksLikeEnglish(copy)) continue;
+  let readable = 0;
+  for (const ad of textFirst.slice(0, MAX_DETAIL_TRIES)) {
+    if (isSearchJobSuppressed(job.id)) return;
+    const details = await enrichGoogleAd(ad);
+    if (platform === "youtube" && !isYouTubeCreative(ad, details)) continue;
+    const candidate = mapGoogleCreativeToCandidate(ad, details);
+    if (`${candidate.title} ${candidate.body}`.trim().length < 12) continue;
+    readable += 1;
+    if (!looksLikeEnglish(`${candidate.title}\n${candidate.body}\n${candidate.fullText}`)) continue;
     english.push(candidate);
+    if (english.length >= DETAILS_PER_ADVERTISER) break;
   }
 
   if (english.length === 0) {
     job.progress.rejected += 1;
-    job.progress.message = `Skipped ${pageName}: ad copy is not English`;
+    bumpReason(job, readable ? "nonEnglish" : "noReadableCopy");
+    job.progress.message = readable
+      ? `Skipped ${pageName}: ad copy is not English`
+      : `Skipped ${pageName}: none of its ads had readable text`;
     saveJobProgress(job);
     return;
   }
@@ -986,6 +1013,7 @@ async function tryAcceptFromAds(args: {
   ).trim();
   if (primaryCopy.length < 12) {
     job.progress.rejected += 1;
+    bumpReason(job, "noReadableCopy");
     job.progress.message = `Skipped ${pageName}: creatives had no readable ad copy`;
     saveJobProgress(job);
     return;
@@ -1004,6 +1032,7 @@ async function tryAcceptFromAds(args: {
     }) === 0
   ) {
     job.progress.rejected += 1;
+    bumpReason(job, "noServiceSignal");
     job.progress.message = `Skipped ${pageName}: ad copy does not match the keywords`;
     saveJobProgress(job);
     return;
@@ -1011,6 +1040,9 @@ async function tryAcceptFromAds(args: {
 
   if (!meetsDurationThreshold(primary.daysRunning, thresholds)) {
     job.progress.rejected += 1;
+    bumpReason(job, "shortDuration");
+    job.progress.message = `Skipped ${pageName}: its ads have not run long enough`;
+    saveJobProgress(job);
     return;
   }
 
@@ -1034,6 +1066,7 @@ async function tryAcceptFromAds(args: {
   });
   if (!pre.ok) {
     job.progress.rejected += 1;
+    bumpReason(job, "guardrailReject");
     job.progress.message = `Skipped ${pageName}: ${pre.reason}`;
     saveJobProgress(job);
     return;
@@ -1060,6 +1093,9 @@ async function tryAcceptFromAds(args: {
   } catch (err) {
     if (isCreditError(err)) throw err;
     job.progress.rejected += 1;
+    bumpReason(job, "llmError");
+    job.progress.message = `Skipped ${pageName}: the relevance review failed (${(err as Error).message.slice(0, 80)})`;
+    saveJobProgress(job);
     return;
   }
 
@@ -1068,6 +1104,9 @@ async function tryAcceptFromAds(args: {
     (!job.businessProfile && !filter.isMarketingAgency)
   ) {
     job.progress.rejected += 1;
+    bumpReason(job, "llmReject");
+    job.progress.message = `Rejected ${pageName}: ${filter.reason || "not a competitor"}`;
+    saveJobProgress(job);
     return;
   }
 
@@ -1079,6 +1118,7 @@ async function tryAcceptFromAds(args: {
   });
   if (!guard.ok) {
     job.progress.rejected += 1;
+    bumpReason(job, "guardrailReject");
     job.progress.message = `Guardrail blocked ${pageName}: ${guard.reason}`;
     saveJobProgress(job);
     return;
@@ -1090,6 +1130,7 @@ async function tryAcceptFromAds(args: {
 
   if (!meetsActiveAdsThreshold(activeCount, thresholds)) {
     job.progress.rejected += 1;
+    bumpReason(job, "lowActiveAds");
     job.progress.message = `Skipped ${pageName}: ${activeCount} ads (need ≥${thresholds.minActiveAds})`;
     saveJobProgress(job);
     return;

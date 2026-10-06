@@ -414,6 +414,12 @@ export interface JobProgress {
     countError: number;
     /** Industry SOP / guardrail agent rejects */
     guardrailReject?: number;
+    /** Google: ads whose text could not be read (image ads without text). */
+    noReadableCopy?: number;
+    /** Google: top-ranked sites checked that show no Google ads in the chosen country. */
+    noAdsInRegion?: number;
+    /** Google: search results dropped as directories, publishers or non-competitors. */
+    notCompetitorSite?: number;
   };
   /** Offers analysis progress when stage === "analyzing_offers" */
   offersPhase?: string | null;
