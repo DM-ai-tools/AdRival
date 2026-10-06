@@ -251,6 +251,10 @@ ${wantLocal && locLabels.length ? `- Target markets: ${locLabels.join(", ")} —
 Return queries that surface rivals in the SAME industry advertising similar products/services.
 Prefer precise service phrases from the seed keyword and offerings — avoid generic words like "business" or "online".
 Queries must find businesses that SELL the service, not software, plugins, courses, guides or news about the topic.${
+        isProductSeed(businessProfile, geoOptions?.selectedCategory)
+          ? `\nThe business is an online store: write queries a shopper types to BUY the products (e.g. "buy <product> online", "<product> online store", "<product> shop", "<product> specialist"), not "best <product>" or review queries.`
+          : ""
+      }${
         agency
           ? `\nThe business is an agency: every query should name the provider, e.g. "<service> agency", "<service> services", "<service> company".`
           : ""
@@ -412,8 +416,27 @@ export function blockedAdvertiserTypes(
     selectedCategory?.type === "service" ||
     (!selectedCategory && profile?.businessModel === "service");
   if (serviceSeed) return new Set(nonProvider);
+  // An online store competes with stores and brands, not marketplaces, tools or content.
+  if (isProductSeed(profile, selectedCategory)) {
+    return new Set(["agency", "software_tool", "education_or_content", "marketplace_or_directory", "media_or_publisher"]);
+  }
   return new Set(["education_or_content", "media_or_publisher", "agency"]);
 }
+
+/** Online stores compete with other stores selling the same products, not with service providers. */
+export function isProductSeed(
+  profile: BusinessProfile | null | undefined,
+  selectedCategory?: BusinessCategory | null,
+): boolean {
+  if (!profile) return false;
+  if (selectedCategory) return selectedCategory.type === "product";
+  return profile.businessModel === "ecommerce" || profile.serviceDelivery === "n_a";
+}
+
+/** What an online store's competitor looks like, for the review and ranking prompts. */
+export const PRODUCT_SEED_RULES = `The seed is an ONLINE STORE. Its competitors are other stores and direct-to-consumer brands that sell the same products online, and specialists whose range centres on those products (e.g. a mobility-aids store for wheelchairs, a suit shop for suits).
+Not competitors: marketplaces (Amazon, eBay, Etsy, Catch, Kogan, Temu, AliExpress), department and general stores whose range is mostly other categories (Big W, Kmart, Target, Myer, David Jones, Walmart, Bunnings, Officeworks), price-comparison, deal, review and "best X" sites, blogs and magazines, and manufacturers that only sell through resellers.
+Google Shopping and display ads often show only a product title, price or store name: a product title or store name that names the searched product counts as evidence.`;
 
 export function advertiserTypeLabel(t: AdvertiserType): string {
   return (
@@ -576,9 +599,12 @@ export async function analyzeAdCandidate(
   const blockedTypes = profile
     ? blockedAdvertiserTypes(profile, selectedCategory, searchKeywords)
     : new Set<AdvertiserType>(["software_tool", "physical_product", "education_or_content", "marketplace_or_directory", "media_or_publisher"]);
+  const productSeed = !agencySeed && isProductSeed(profile, selectedCategory);
   const seedKind = agencySeed
     ? "a marketing agency (sells done-for-you marketing services to other businesses)"
-    : blockedTypes.has("software_tool")
+    : productSeed
+      ? "an online store"
+      : blockedTypes.has("software_tool")
       ? "a service provider"
       : blockedTypes.has("agency")
         ? "a product brand"
@@ -621,7 +647,7 @@ SEED BUSINESS:
 - The seed is ${seedKind}.${targetCountry ? `\n- Market: customers in ${targetCountry}` : ""}
 - Search keywords the user is matching on: ${keywordList}
 
-GOAL: Keep advertisers who SELL the SAME (or clearly competing) service/product to the same kind of customer.
+GOAL: Keep advertisers who SELL the SAME (or clearly competing) service/product to the same kind of customer.${productSeed ? `\n${PRODUCT_SEED_RULES}` : ""}
 A competitor must be the same KIND of business as the seed. Mentioning the keyword is not enough:
 a plugin, proxy, rank tracker or other software that "helps with SEO", a "what is SEO" guide, a course,
 a blog, a news site or a directory is NOT a competitor of an SEO agency, even though its ad says "SEO".
@@ -1044,7 +1070,9 @@ SEED BUSINESS:
 
 Prefer domains of rivals in the SAME industry / offerings as the seed (e.g. lenders, brokers, clinics — whatever matches).
 Prefer domains that appear in Google Ads Transparency results for the keyword.
-Exclude marketing agencies (unless the seed is an agency), directories, social networks, and unrelated e-commerce.
+Exclude marketing agencies (unless the seed is an agency), directories, social networks, and unrelated e-commerce.${
+        isProductSeed(profile) ? `\n${PRODUCT_SEED_RULES}\nKeep every specialist online store for these products — they are the competitors.` : ""
+      }
 
 Return up to ${limit} domains EXACTLY as they appear in the candidate list (hostname only).`
     : `You select website domains for marketing agencies / PPC / SEO / SMM / AEO firms that are MOST LIKELY to run ${platform === "youtube" ? "YouTube video" : "Google"} ads related to the user's keyword.

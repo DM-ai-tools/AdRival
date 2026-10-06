@@ -16,6 +16,7 @@ import {
   analyzeAdCandidate,
   expandKeywordQueries,
   isAgencySeed,
+  isProductSeed,
   pickCompanyPageMatch,
   pickGoogleAdDomains,
   serviceKeywordOverlapScore,
@@ -91,6 +92,14 @@ const WEB_RESULTS_PER_QUERY = 10;
 const MAX_DOMAIN_CHECKS_PER_STEP = 20;
 /** Domains checked for live ads across the whole run. */
 const MAX_DOMAIN_CHECKS_TOTAL = 60;
+/** For an online store: marketplaces and department / general stores, whose range is mostly other products. */
+const GENERALIST_STORE =
+  /(^|\.)(bigw|kmart|target|myer|davidjones|harveynorman|jbhifi|officeworks|bunnings|catch|kogan|temu|aliexpress|alibaba|shein|walmart|bestbuy|costco|homedepot|lowes|wayfair|etsy|mydeal|woolworths|coles|aldi|argos|currys|johnlewis|tesco|asda|flipkart)\.[a-z.]+$/i;
+
+const COUNTRY_NAMES: Record<string, string> = {
+  AU: "Australia", US: "USA", GB: "UK", CA: "Canada", NZ: "New Zealand", IN: "India", SG: "Singapore", DE: "Germany", AE: "UAE",
+};
+
 /** Directories, marketplaces, review and job sites: they rank but are not competitors. */
 const NOT_ADVERTISER_HOST =
   /(^|\.)(yellowpages|truelocal|hotfrog|localsearch|startlocal|yell|healthengine|hotdoc|whitecoat|ratemds|healthgrades|zocdoc|webmd|tripadvisor|reddit|quora|amazon|ebay|gumtree|craigslist|seek|indeed|glassdoor|angi|angieslist|homeadvisor|thumbtack|houzz|bark|oneflare|hipages|serviceseeking|airtasker|productreview|trustpilot|capterra|bbb|mapquest|foursquare|nextdoor|wikihow|medium|pinterest|apple|bing|yahoo|bookings?|opentable|zomato|doctify|nhs|realestate|domain|zillow|wix|wordpress|blogspot)\.[a-z.]+$/i;
@@ -224,12 +233,14 @@ async function webSearchDomains(args: {
   /** Keyword words a result must share (service part, without place names). */
   signalKeywords: string[];
   exclude: Set<string>;
+  /** An online store's search: skip marketplaces and general stores. */
+  productSeed?: boolean;
   state: { firecrawlDown: boolean };
 }): Promise<{
   domains: string[];
   snippets: Array<{ title?: string; url?: string; description?: string }>;
 }> {
-  const { queries, country, businessProfile, signalKeywords, exclude, state } = args;
+  const { queries, country, businessProfile, signalKeywords, exclude, state, productSeed } = args;
   const perQuery = await mapPool(queries, 4, async (query) => {
     const hits: Array<{ title?: string; url?: string; description?: string }> = [];
     try {
@@ -280,6 +291,7 @@ async function webSearchDomains(args: {
       if (!hit) continue;
       const domain = domainFromUrl(hit.url);
       if (!domain || seen.has(domain) || exclude.has(domain)) continue;
+      if (productSeed && GENERALIST_STORE.test(domain)) continue;
       const blob = `${hit.title || ""}\n${hit.description || ""}\n${hit.url || ""}`;
       if (
         serviceKeywordOverlapScore(blob, {
@@ -538,6 +550,7 @@ export async function runGoogleFamilySearch(
     country: string;
     websiteHint: string | null;
     fromWeb: boolean;
+    webSnippet?: { title?: string; description?: string } | null;
   }) => {
     job.progress.scannedAds += row.ads.length;
     pendingReview.push({
@@ -605,6 +618,8 @@ export async function runGoogleFamilySearch(
   };
 
   /** Top-ranked web domains → their ads in the chosen country → review. */
+  /** Each web-found site's search listing, for reviewing stores whose ads have no readable text. */
+  const snippetOf = new Map<string, { title?: string; description?: string }>();
   const checkWebDomains = async (domains: string[], query: string) => {
     const fresh = domains.filter((d) => !checkedDomains.has(d));
     for (let i = 0; i < fresh.length; i += AD_REVIEW_BATCH) {
@@ -650,6 +665,7 @@ export async function runGoogleFamilySearch(
             country: webCountry || String(job.geo || "US"),
             websiteHint: websiteUrl(row.domain),
             fromWeb: true,
+            webSnippet: snippetOf.get(row.domain) || null,
           });
         }
       }
@@ -722,6 +738,7 @@ export async function runGoogleFamilySearch(
     // Transparency search matches advertiser names: "SEO" finds
     // "Yoast SEO"-style tools, "SEO agency" finds agencies.
     const agency = isAgencySeed(businessProfile, job.selectedCategory, allKeywords);
+    const productSeed = !agency && isProductSeed(businessProfile, job.selectedCategory);
     const nameQueriesFor = (list: string[]) =>
       agency
         ? Array.from(
@@ -776,6 +793,24 @@ export async function runGoogleFamilySearch(
       webQueries: async () => [...anchors.slice(0, 4), ...(await extraOnce())],
       nameQueries: async () => [...nameQueriesFor(anchors), ...(await extraOnce())],
     });
+    // Still short after that: more searches across the country, the kind a
+    // buyer types (for a store) or wider phrasing (for a service).
+    const countryName = webCountry ? COUNTRY_NAMES[webCountry] || webCountry : "";
+    steps.push({
+      label: webCountry ? `across ${webCountry} (more searches)` : "in all regions (more searches)",
+      level: null,
+      webQueries: async () =>
+        Array.from(
+          new Set(
+            anchors.slice(0, 3).flatMap((a) =>
+              productSeed
+                ? [`buy ${a} online`, `${a} online store ${countryName}`.trim(), `${a} shop`]
+                : [`${a} ${countryName}`.trim(), `${a} specialists`, `${a} company`],
+            ),
+          ),
+        ).slice(0, 8),
+      nameQueries: async () => [],
+    });
 
     for (const [index, step] of steps.entries()) {
       if (done()) break;
@@ -806,6 +841,11 @@ export async function runGoogleFamilySearch(
         signalKeywords: anchors.length ? anchors : allKeywords,
         exclude: checkedDomains,
         state: webState,
+        productSeed,
+      });
+      web.domains.forEach((d, i) => {
+        const hit = web.snippets[i];
+        if (hit) snippetOf.set(d, { title: hit.title || undefined, description: hit.description || undefined });
       });
       if (web.domains.length && !done()) {
         progress("ranking_domains", `Ranking ${web.domains.length} sites found ${step.label}…`);
@@ -899,6 +939,8 @@ async function tryAcceptFromAds(args: {
   relaxedReview?: boolean;
   /** Found by a web search for the keywords, so its copy need not repeat them. */
   fromWeb?: boolean;
+  /** The site's search listing (title, description), used when its ads have no readable text. */
+  webSnippet?: { title?: string; description?: string } | null;
 }) {
   const {
     ads,
@@ -971,6 +1013,28 @@ async function tryAcceptFromAds(args: {
     if (!looksLikeEnglish(`${candidate.title}\n${candidate.body}\n${candidate.fullText}`)) continue;
     english.push(candidate);
     if (english.length >= DETAILS_PER_ADVERTISER) break;
+  }
+
+  // Shopping and image ads often have no readable text. A store found by a
+  // web search for the products is then judged by its own listing instead.
+  const snippetText = `${args.webSnippet?.title || ""} ${args.webSnippet?.description || ""}`.trim();
+  if (english.length === 0 && !readable && args.fromWeb && snippetText.length >= 20 && sampleSource[0]) {
+    const first = sampleSource[0];
+    english.push(
+      mapGoogleCreativeToCandidate(first, {
+        title: args.webSnippet?.title || "",
+        body: args.webSnippet?.description || "",
+        cta: null,
+        landing: websiteHint,
+        youtubeUrl: null,
+        visibleUrl: null,
+        firstShown: first.firstShown || null,
+        lastShown: first.lastShown || null,
+        format: first.format || null,
+      }),
+    );
+    job.progress.message = `Reviewing ${pageName} from its website listing (its ads have no readable text)…`;
+    saveJobProgress(job);
   }
 
   if (english.length === 0) {
