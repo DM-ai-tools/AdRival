@@ -25,7 +25,16 @@ export type BlueprintSection = {
   layout: {
     columns: number;
     cards: number;
-    card: { radius: number | null; shadow: boolean; border: boolean; background: string | null } | null;
+    card: {
+      radius: number | null;
+      shadow: boolean;
+      border: boolean;
+      background: string | null;
+      /** Where a card's icon sits relative to its text. */
+      iconSide?: "left" | "top" | null;
+      /** Thin vertical rules between the cards. */
+      divided?: boolean;
+    } | null;
   };
   media: {
     images: number;
@@ -112,6 +121,8 @@ export type BlueprintFormStyle = {
 export type BlueprintForm = CompetitorFormSpec & {
   id: string;
   sectionId: string | null;
+  /** Where the form sits on the page (for left/right placement checks). */
+  bounds?: { x: number; y: number; width: number; height: number } | null;
   hidden: boolean;
   provider: string | null;
   /** Booking widgets (Calendly etc.) have no fields to copy. */
@@ -141,8 +152,12 @@ export type CompetitorBlueprint = {
     nav: string[];
     cta: string | null;
     dark: boolean;
+    /** A light but coloured band (beige, grey), not the plain page. */
+    tinted?: boolean;
     sticky: boolean;
     logoPosition: string;
+    /** What sits around the logo (address, phone, links, buttons) and on which side. */
+    items?: Array<{ text: string; side: "left" | "center" | "right"; kind: "phone" | "email" | "address" | "button" | "link" | "text"; button: boolean }>;
     crop: string | null;
   } | null;
   footer: {
@@ -331,6 +346,7 @@ export function classifySection(section: Pick<BlueprintSection, "order" | "headi
   if (section.faq || /frequently asked|faqs?\b|common questions|got questions|answers you need/.test(text)) return "faq";
   if (section.media.logos >= 4 && section.wordCount < 60) return "logos";
   if (roles.filter((r) => r === "stat").length >= 3) return "stats";
+  if (section.layout.cards >= 3 && section.wordCount < 45 && !roles.includes("quote")) return "stats";
   // Real price signals only: "Get my growth plan" on a button is not a pricing table.
   // One dollar figure is a result ("$2M in sales"); a price list shows several.
   if (/\bpricing\b|\bper (month|year|week)\b|\/(mo|month|yr)\b/.test(text) || (text.match(/[$€£]\s?\d/g) || []).length >= 2) return "pricing";
@@ -598,6 +614,7 @@ export async function captureBlueprintFromPage(page: Page, sourceUrl: string): P
       sections.find((s) => centre >= s.bounds.y && centre <= s.bounds.y + s.bounds.height) ||
       (entry.raw.hidden ? null : sections.find((s) => Math.abs(s.bounds.y - bounds.y) < 200) || null);
     form.sectionId = entry.raw.hidden ? null : owner?.id || null;
+    form.bounds = bounds;
     forms.push(form);
   });
   const visibleForms = forms.filter((f) => !f.hidden && (f.fields.length >= 1 || f.booking));

@@ -70,12 +70,12 @@ function skipTag(el){ return /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|LINK|META|SVG|IFR
 
 // ---- header / footer ----
 function findHeader(){
-  var cands = Array.prototype.slice.call(document.querySelectorAll('header, [role="banner"], .site-header, #header, nav'));
+  var cands = Array.prototype.slice.call(document.querySelectorAll('header, [role="banner"], .site-header, #header, #masthead, .masthead, [data-elementor-type="header"], .elementor-location-header, [class*="site-header"], nav'));
   for (var i = 0; i < cands.length; i++) { var b = box(cands[i]); if (visible(cands[i]) && b.y < 220 && b.width > W * 0.6 && b.height < 260) return cands[i].tagName === 'NAV' ? (cands[i].closest('header') || cands[i]) : cands[i]; }
   return null;
 }
 function findFooter(){
-  var cands = Array.prototype.slice.call(document.querySelectorAll('footer, [role="contentinfo"], .site-footer, #footer'));
+  var cands = Array.prototype.slice.call(document.querySelectorAll('footer, [role="contentinfo"], .site-footer, #footer, #colophon, [data-elementor-type="footer"], .elementor-location-footer'));
   var best = null;
   for (var i = 0; i < cands.length; i++) { if (!visible(cands[i])) continue; var b = box(cands[i]); if (b.width < W * 0.6) continue; if (!best || b.y > box(best).y) best = cands[i]; }
   return best;
@@ -161,6 +161,58 @@ for (var i = 0; i < bands.length; i++) {
 }
 merged = merged.slice(0, 40);
 
+// The logo: the largest image, svg or background-image element of logo size,
+// else a short line of large text (a wordmark).
+function findLogo(root){
+  var best = null, bestArea = 0;
+  var nodes = root.querySelectorAll('img, svg, picture, a, div, span');
+  for (var i = 0; i < nodes.length && i < 500; i++) {
+    var n = nodes[i]; if (!visible(n)) continue;
+    var b = box(n); if (b.height < 18 || b.height > 170 || b.width < 50) continue;
+    var tag = n.tagName.toUpperCase();
+    var isImg = tag === 'IMG' || tag === 'SVG' || tag === 'PICTURE';
+    var bg = !isImg && /url\(/.test(cs(n).backgroundImage || '') && clean(n.innerText).length < 3;
+    if (!isImg && !bg) continue;
+    if (n.closest('a[href^="tel:"], a[href^="mailto:"]')) continue;
+    var area = b.width * b.height; if (area > bestArea) { best = n; bestArea = area; }
+  }
+  if (best) return best;
+  var texts = root.querySelectorAll('a, span, p, div, strong, h1, h2, h3, h4, h5, h6');
+  for (var j = 0; j < texts.length && j < 400; j++) {
+    var t = texts[j]; if (!visible(t)) continue;
+    var own = leafTextOf(t); if (!own || own.split(' ').length > 5) continue;
+    if (/\d{3}|@/.test(own)) continue;
+    if (parseFloat(cs(t).fontSize) >= 22) return t;
+  }
+  return null;
+}
+function leafTextOf(el){
+  var t = '';
+  for (var i = 0; i < el.childNodes.length; i++) { var n = el.childNodes[i]; if (n.nodeType === 3) t += n.textContent; }
+  return clean(t);
+}
+function looksLikeHeaderBand(m){
+  var el = m.el; var b = box(el);
+  if (b.y > 12 || b.height > 190 || b.height < 30) return false;
+  var h1 = el.querySelector('h1'); if (h1 && visible(h1)) return false;
+  if (el.querySelector('form, input:not([type=hidden]), textarea, select')) return false;
+  var words = clean(el.innerText).split(' ').filter(Boolean).length;
+  if (words > 30) return false;
+  var contact = !!el.querySelector('a[href^="tel:"], a[href^="mailto:"]') || /\(?\+?\d[\d\s()-]{7,}\d/.test(el.innerText || '');
+  return !!findLogo(el) || contact || el.querySelectorAll('a').length >= 3;
+}
+if (!header && merged.length >= 2 && looksLikeHeaderBand(merged[0])) {
+  header = merged[0].el;
+  merged.shift();
+}
+if (!footer && merged.length >= 2) {
+  var lastBand = merged[merged.length - 1];
+  if (/©|copyright|all rights reserved/i.test(lastBand.el.innerText || '') && box(lastBand.el).height <= 520) {
+    footer = lastBand.el;
+    merged.pop();
+  }
+}
+
 // ---- per-section content ----
 var BLOCK_SEL = 'h1,h2,h3,h4,h5,h6,p,li,blockquote,button,a,figcaption,dt,dd,label,summary,td,th,span,strong,div';
 function leafText(el){
@@ -230,7 +282,21 @@ function layoutOf(sec){
   var cardStyle = null;
   if (best.el && best.cards) {
     var c = best.el.children[0]; var s = cs(c);
-    cardStyle = { radius: px(s.borderTopLeftRadius), shadow: s.boxShadow && s.boxShadow !== 'none', border: parseFloat(s.borderTopWidth) > 0, background: painted(s.backgroundColor) ? norm(s.backgroundColor) : null };
+    var kids2 = Array.prototype.slice.call(best.el.children).filter(function(k){ return visible(k); });
+    // Dividers: side borders on the cards, or thin rules between them.
+    var divided = kids2.some(function(k){ var ks = cs(k); return parseFloat(ks.borderLeftWidth) > 0 && parseFloat(ks.borderTopWidth) === 0 || parseFloat(ks.borderRightWidth) > 0 && parseFloat(ks.borderTopWidth) === 0; })
+      || kids2.some(function(k){ var kb = box(k); return kb.width <= 4 && kb.height >= 30; })
+      || Array.prototype.slice.call(c.querySelectorAll('*')).some(function(n){ var nb = box(n); return nb.width <= 3 && nb.height >= 40 && painted(cs(n).backgroundColor); });
+    // Icon side: an icon or small image left of the card's text, or above it.
+    var icon = null; var iconCands = c.querySelectorAll('img, svg, i, [class*="icon"]');
+    for (var q = 0; q < iconCands.length; q++) { var ib = box(iconCands[q]); if (visible(iconCands[q]) && ib.width >= 12 && ib.width <= 140 && ib.height >= 12 && ib.height <= 140) { icon = iconCands[q]; break; } }
+    var iconSide = null;
+    if (icon) {
+      var ibx = box(icon); var textEl = null; var tcs = c.querySelectorAll('h1,h2,h3,h4,h5,h6,p,span,div');
+      for (var r = 0; r < tcs.length; r++) { if (visible(tcs[r]) && !tcs[r].contains(icon) && !icon.contains(tcs[r]) && leafTextOf(tcs[r]).length > 2) { textEl = tcs[r]; break; } }
+      if (textEl) { var tb = box(textEl); iconSide = tb.x >= ibx.x + ibx.width - 4 && tb.y < ibx.y + ibx.height ? 'left' : 'top'; }
+    }
+    cardStyle = { radius: px(s.borderTopLeftRadius), shadow: s.boxShadow && s.boxShadow !== 'none', border: parseFloat(s.borderTopWidth) > 0, background: painted(s.backgroundColor) ? norm(s.backgroundColor) : null, iconSide: iconSide, divided: divided };
   }
   return { columns: Math.min(best.columns, 6), cards: best.cards, card: cardStyle };
 }
@@ -362,8 +428,40 @@ if (header) {
   var hb = box(header); var hs = cs(header);
   var cta = null; var ha = header.querySelectorAll('a,button');
   for (var h = 0; h < ha.length; h++) { var s = cs(ha[h]); if (visible(ha[h]) && painted(s.backgroundColor) && parseFloat(s.paddingLeft) >= 8) { cta = clean(ha[h].innerText).slice(0, 40); break; } }
-  var logo = header.querySelector('img, svg'); var lb = logo ? box(logo) : null;
-  headerInfo = { bounds: hb, nav: linkLabels(header, 10).filter(function(t){ return t !== cta; }), cta: cta, dark: (lum(backdropOf(header)) ?? 1) < 0.18, sticky: /sticky|fixed/.test(hs.position), logoPosition: lb ? (lb.x < W * 0.3 ? 'left' : lb.x > W * 0.6 ? 'right' : 'center') : 'unknown', topBar: false };
+  var logo = findLogo(header); var lb = logo ? box(logo) : null;
+  var lc = lb ? lb.x + lb.width / 2 : null;
+  var hLum = lum(backdropOf(header)) ?? 1;
+  var items = [];
+  var seenItem = {};
+  var nodes = header.querySelectorAll('a, button, p, span, li, div, strong, h1, h2, h3, h4, h5, h6');
+  for (var hi = 0; hi < nodes.length && items.length < 10; hi++) {
+    var n = nodes[hi]; if (!visible(n)) continue;
+    if (logo && (n === logo || logo.contains(n))) continue;
+    var isLink = n.tagName === 'A' || n.tagName === 'BUTTON';
+    if (!isLink && n.closest('a, button')) continue;
+    var t = isLink ? clean(n.innerText) : leafTextOf(n);
+    if (!t || t.length < 2 || t.length > 70 || seenItem[t]) continue;
+    seenItem[t] = 1;
+    var nb = box(n); var ncx = nb.x + nb.width / 2;
+    var href = n.getAttribute('href') || '';
+    var ns = cs(n);
+    // A filled box around the link (often drawn by its wrapper) makes it a button.
+    var boxed = null;
+    var around = [];
+    for (var up = n, d2 = 0; up && up !== header && d2 < 3; up = up.parentElement, d2++) around.push(up);
+    around = around.concat(Array.prototype.slice.call(n.querySelectorAll('button, span, div')).slice(0, 6));
+    for (var ai = 0; ai < around.length; ai++) {
+      var us = cs(around[ai]); var ub = box(around[ai]);
+      if (ub.width >= 40 && ub.width < 420 && (painted(us.backgroundColor) && norm(us.backgroundColor) !== backdropOf(header) || parseFloat(us.borderTopWidth) > 0)) { boxed = around[ai]; break; }
+    }
+    var asButton = !!boxed;
+    var kind = /^tel:/i.test(href) || /^\(?\+?\d[\d\s()-]{6,}\d$/.test(t) ? 'phone'
+      : /^mailto:/i.test(href) || /@/.test(t) ? 'email'
+      : /\d.*\b(st|street|rd|road|ave|avenue|hwy|highway|lane|ln|drive|dr|blvd|parade|pde|place|pl|way)\b/i.test(t) ? 'address'
+      : asButton ? 'button' : isLink ? 'link' : 'text';
+    items.push({ text: t.slice(0, 70), side: ncx < W * 0.36 ? 'left' : ncx > W * 0.64 ? 'right' : 'center', kind: kind, button: asButton });
+  }
+  headerInfo = { bounds: hb, nav: linkLabels(header, 10).filter(function(t){ return t !== cta && !items.some(function(it){ return it.text === t && /phone|email|address/.test(it.kind); }); }), cta: cta, dark: hLum < 0.18, tinted: hLum >= 0.18 && hLum < 0.9, sticky: /sticky|fixed/.test(hs.position), logoPosition: lc === null ? 'unknown' : lc < W * 0.33 ? 'left' : lc > W * 0.67 ? 'right' : 'center', items: items, topBar: false };
 }
 var footerInfo = null;
 if (footer) {

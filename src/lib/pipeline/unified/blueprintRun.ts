@@ -226,7 +226,12 @@ export async function buildFromBlueprint(input: {
     keyword: input.keyword,
     hasForm: Boolean(form),
   });
-  const plannedImages = Math.min(6, blueprint.sections.filter((s) => s.media.position !== "none" && s.media.images - s.media.logos > 0).length || 1);
+  const plannedImages = Math.min(
+    6,
+    blueprint.sections.filter(
+      (s) => s.background.kind === "image" || (s.media.position !== "none" && s.media.images - s.media.logos > 0),
+    ).length || 1,
+  );
   const genInput: BlueprintGenerationInput = {
     blueprint,
     design,
@@ -236,7 +241,11 @@ export async function buildFromBlueprint(input: {
       whatTheyDo: (input.profile?.description || input.profile?.positioningSummary || "").slice(0, 400),
       offerings: input.profile?.offerings || [],
       audience: input.profile?.targetAudience || null,
-      location: null,
+      // The street address, for headers and contact lines that show one.
+      location:
+        (input.profile?.locations || []).find((l) => l.isPrimary)?.label ||
+        input.profile?.locations?.[0]?.label ||
+        null,
     },
     keyword: input.keyword,
     campaignOffer: input.campaignOffer,
@@ -579,6 +588,33 @@ export async function buildFromBlueprint(input: {
         classSystem: design.vocabulary,
         designDirection: genInput.designDirection,
         finish: (h) => applyDesignFixes(logos(h)).html,
+        // Drift the comparison measures is fixed even when the reviewer misses it.
+        required: async (h) => {
+          const r = fidelityReport({
+            blueprint,
+            measured: await measureRenderedPage(h),
+            html: h,
+            competitorName: input.competitorName,
+            expectedFormSection: form?.sectionId || null,
+            expectedFormFields,
+          });
+          const out = new Map<string, string[]>();
+          if (r.chrome.header.length) out.set("header", r.chrome.header);
+          if (r.chrome.footer.length) out.set("footer", r.chrome.footer);
+          for (const s of r.sections) {
+            const layout = s.problems.filter((p) => !/competitor's wording/.test(p));
+            if (s.severe && layout.length) out.set(s.id, layout);
+          }
+          return out;
+        },
+        chromeContext: {
+          competitorHeader: blueprint.header
+            ? { logoPosition: blueprint.header.logoPosition, items: blueprint.header.items || [], menuItems: blueprint.header.nav.length }
+            : null,
+          competitorHasFooter: Boolean(blueprint.footer),
+          slimFooterMarkup: blueprint.footer ? null : `<footer class="adr-footer adr-footer--slim"><div class="adr-container"><div class="adr-footer-meta">© ${new Date().getFullYear()} ${input.clientName} · phone or email</div></div></footer>`,
+          clientContact: { address: genInput.client.location, phones: destinations.phones, emails: destinations.emails },
+        },
         signal: input.signal,
         onProgress: (message) => input.onProgress(message),
       });
@@ -592,6 +628,22 @@ export async function buildFromBlueprint(input: {
 
   // Every image slot carries its image (a rewritten section can lose one).
   html = (await repairPageImages(html, imageReport.images, input.colors)).html;
+  // The saved match score describes the page as delivered, after the review's fixes.
+  if (report) {
+    try {
+      report = fidelityReport({
+        blueprint,
+        measured: await measureRenderedPage(html),
+        html,
+        competitorName: input.competitorName,
+        expectedFormSection: form?.sectionId || null,
+        expectedFormFields,
+      });
+      for (const p of [...report.chrome.header, ...report.chrome.footer]) warnings.push(`Still differs from the competitor: ${p}`);
+    } catch {
+      /* keep the earlier report */
+    }
+  }
   // Sections rebuilt during the checks may carry new light placeholders.
   html = retonePlaceholders(html, input.colors);
   // Images the writer added beyond the plan are listed as missing, so

@@ -281,7 +281,8 @@ export function assessPageChrome(html: string): { headerWeak: boolean; footerWea
   }
 
   let footerWeak = !$footer.length;
-  if ($footer.length) {
+  // A slim legal bar is what pages without a footer get; it is not weak.
+  if ($footer.length && !$footer.hasClass("adr-footer--slim")) {
     const text = $footer.text().replace(/\s+/g, " ").trim();
     const links = $footer.find("a[href]").length;
     const hasLogo =
@@ -341,7 +342,7 @@ export function ensurePageChrome(
       $("body").append(footerHtml);
     }
     repaired.push("footer");
-  } else if (assets.logoUrl) {
+  } else if (assets.logoUrl && !$("footer").first().hasClass("adr-footer--slim")) {
     const $footerLogo = $('footer img[data-logo-role="company"], footer img[data-adrival-logo], footer .adr-logo');
     if ($footerLogo.length) {
       $footerLogo.attr("src", assets.logoUrl);

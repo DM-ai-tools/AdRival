@@ -98,7 +98,11 @@ function ratioFor(size: { width: number; height: number } | null): string {
 /** Where the competitor shows photography, the rebuild gets an image slot (hero first, then biggest). */
 export function planImageSlots(sections: BlueprintSection[], budget: number): PlannedSlot[] {
   const candidates = sections
-    .filter((s) => s.media.position !== "none" && s.media.images - s.media.logos > 0 && s.kind !== "logos")
+    .filter(
+      (s) =>
+        s.kind !== "logos" &&
+        (s.background.kind === "image" || (s.media.position !== "none" && s.media.images - s.media.logos > 0)),
+    )
     .map((s) => ({
       s,
       score: (s.kind === "hero" ? 1e9 : 0) + (s.media.largest ? s.media.largest.width * s.media.largest.height : 0),
@@ -119,12 +123,42 @@ function bandFor(section: BlueprintSection): string {
     case "wash":
       return "adr-section--wash (light page with a soft colour glow — not a solid band)";
     case "image":
-      return "adr-section--dark (the competitor uses a photo background; use an image slot as the backdrop or the dark band)";
+      return "adr-section--dark adr-section--photo (the competitor's text sits on a full-width photo: put the image slot inside <div class=\"adr-photo-bg\"> as the band's first child; keep the text on the overlay)";
     case "color":
       return "adr-section--alt or adr-section--brand (tinted band — pick by how strong the colour is in the screenshot)";
     default:
       return "none (plain page background)";
   }
+}
+
+/** The header brief: the competitor's arrangement, filled with the client's real details. */
+function headerSpec(input: BlueprintGenerationInput) {
+  const h = input.blueprint.header;
+  const band = h?.dark ? " adr-header--dark" : h?.tinted ? " adr-header--alt" : "";
+  const logo = `<a class="adr-brand" href="${input.client.url}"><img data-logo-role="company" src="{{ADRIVAL_IDENTITY_LOGO}}" alt="${input.client.name} logo"></a>`;
+  const centred = h?.logoPosition === "center";
+  const items = (h?.items || []).map((i) => ({ side: i.side, kind: i.kind, shownAsButton: i.button, competitorText: i.text }));
+  return {
+    competitor: h
+      ? { logoPosition: h.logoPosition, band: h.dark ? "dark" : h.tinted ? "tinted" : "plain", menuItems: h.nav.length, hasCta: Boolean(h.cta), items }
+      : null,
+    clientContact: {
+      address: input.client.location,
+      phones: input.destinations.phones,
+      emails: input.destinations.emails,
+    },
+    useNav: input.destinations.nav,
+    cta: ctaIntent(input.destinations.cta[0]),
+    markup: centred
+      ? `<header class="adr-header adr-header--center${band}"><div class="adr-container adr-header-inner"><div class="adr-header-side">(the competitor's left-side items)</div>${logo}<div class="adr-header-side adr-header-side--right">(the competitor's right-side items)</div></div></header>`
+      : `<header class="adr-header${band}"><div class="adr-container adr-header-inner">${logo}<nav aria-label="Primary"><ul class="adr-nav">…</ul></nav><div class="adr-header-side adr-header-side--right">(right-side items)</div></div></header>`,
+    rules: [
+      "Mirror the competitor's header: the same logo position, band and, on each side, the same kinds of items in the same order (see competitor.items).",
+      "Fill each item with the client's real detail of the same kind from clientContact: an address as <span class=\"adr-header-item\">, a phone as <a class=\"adr-header-item\" href=\"tel:…\"> (as <a class=\"adr-btn adr-btn--primary\" href=\"tel:…\"> when shownAsButton), an email as a mailto link. competitorText is for kind and length only — never copy it.",
+      "If the client has no detail of that kind, put the CTA button there instead. Never invent an address, phone or email.",
+      "A menu only when the competitor has one (menuItems > 0), using ONLY useNav. At most one filled button in the header.",
+    ],
+  };
 }
 
 function sectionSpec(section: BlueprintSection, slots: PlannedSlot[], form: BlueprintForm | null) {
@@ -140,6 +174,15 @@ function sectionSpec(section: BlueprintSection, slots: PlannedSlot[], form: Blue
       mediaPosition: section.media.position,
       video: section.media.video,
       logoCount: section.media.logos,
+      items: section.layout.card
+        ? {
+            iconPosition: section.layout.card.iconSide === "left" ? "beside the text (.adr-card--inline)" : section.layout.card.iconSide === "top" ? "above the text" : null,
+            dividers: section.layout.card.divided ? "thin vertical rules between items (.adr-grid--divided)" : null,
+            boxed: Boolean(section.layout.card.background || section.layout.card.border || section.layout.card.shadow)
+              ? "items are cards (.adr-card)"
+              : "items are plain, not boxed (.adr-item)",
+          }
+        : null,
     },
     targetWords: section.wordCount,
     competitorContentReferenceOnly: section.blocks.map((b) => `${b.role}: ${b.text}`).slice(0, 70),
@@ -148,7 +191,14 @@ function sectionSpec(section: BlueprintSection, slots: PlannedSlot[], form: Blue
       .map((b) => b.text)
       .slice(0, 16),
     imageSlot: slot
-      ? { id: slot.id, aspectRatio: slot.aspectRatio, markup: `<img data-adrival-slot="${slot.id}" src="${TRANSPARENT_GIF}" alt="…">` }
+      ? {
+          id: slot.id,
+          aspectRatio: slot.aspectRatio,
+          markup:
+            section.background.kind === "image"
+              ? `<div class="adr-photo-bg"><img data-adrival-slot="${slot.id}" src="${TRANSPARENT_GIF}" alt="…"></div>`
+              : `<img data-adrival-slot="${slot.id}" src="${TRANSPARENT_GIF}" alt="…">`,
+        }
       : null,
     formSlot: form && form.sectionId === section.id
       ? `Place <div ${FORM_SLOT_ATTR}></div> where the competitor's form sits (it is replaced by the real form: ${form.fields.length} fields${form.mode !== "single" ? `, ${form.mode}` : ""}). Rebuild the text around it (heading, intro, reassurance) in the same arrangement.`
@@ -340,16 +390,10 @@ export async function generateBlueprintPage(input: BlueprintGenerationInput): Pr
       images: heroLabels,
       ...common,
       clientFacts: factSets[0].slice(0, 10),
-      header: {
-        competitor: blueprint.header ? { menuItems: blueprint.header.nav.length, hasCta: Boolean(blueprint.header.cta), dark: blueprint.header.dark, logoPosition: blueprint.header.logoPosition } : null,
-        useNav: input.destinations.nav,
-        cta: ctaIntent(input.destinations.cta[0]),
-        markup: `<header class="adr-header${blueprint.header?.dark ? " adr-header--dark" : ""}"><div class="adr-container adr-header-inner"><a class="adr-brand" href="${input.client.url}"><img data-logo-role="company" src="{{ADRIVAL_IDENTITY_LOGO}}" alt="${input.client.name} logo"></a><nav aria-label="Primary"><ul class="adr-nav">…</ul></nav><a class="adr-btn adr-btn--primary" href="…">…</a></div></header>`,
-        rules: "Use ONLY useNav links (same count as the competitor at most). If useNav is empty, show logo + CTA only. Exactly one CTA button.",
-      },
+      header: headerSpec(input),
       hero: hero ? sectionSpec(hero, slots, heroForm ? input.form : null) : null,
-      footer: {
-        competitor: blueprint.footer ? { columns: blueprint.footer.columns, dark: blueprint.footer.dark } : null,
+      footer: blueprint.footer ? {
+        competitor: { columns: blueprint.footer.columns, dark: blueprint.footer.dark },
         columns: input.destinations.footerColumns,
         links: input.destinations.footer,
         social: input.destinations.social,
@@ -357,6 +401,12 @@ export async function generateBlueprintPage(input: BlueprintGenerationInput): Pr
         emails: input.destinations.emails,
         markup: `<footer class="adr-footer${blueprint.footer?.dark ? " adr-footer--dark" : ""}"><div class="adr-container"><div class="adr-footer-grid">(brand column with logo + one-line description, then link columns: <div><h3>Heading</h3><ul><li><a href>…</a></li></ul></div>)</div><div class="adr-footer-meta">© year ${input.client.name} · contact</div></div></footer>`,
         rules: "Only the links given. Match the competitor's column count when enough links exist; never invent pages.",
+      } : {
+        competitor: "none — the competitor page has no footer",
+        markup: `<footer class="adr-footer adr-footer--slim"><div class="adr-container"><div class="adr-footer-meta">© year ${input.client.name} · phone or email</div></div></footer>`,
+        rules: "Only this one slim line, with a real phone or email from the lists given. No logo, no link columns, no menus.",
+        phones: input.destinations.phones,
+        emails: input.destinations.emails,
       },
       copyRules: [
         "Hero H1: the client's version of the competitor's promise, built around the campaign offer and keyword. Keep it about as long as the competitor's.",
@@ -786,6 +836,8 @@ export async function repairFromReview(input: {
   designDirection?: BlueprintGenerationInput["designDirection"];
   /** "edit": a change the user asked for (words may change if asked); default: fix review flaws. */
   mode?: "review" | "edit";
+  /** Header/footer fixes: the client's real contact details and the competitor's arrangement. */
+  context?: Record<string, unknown> | null;
   signal?: AbortSignal;
   onProgress?: (info: UnifiedProgressInfo) => void;
 }): Promise<{ html: string; css: string } | null> {
@@ -815,17 +867,21 @@ export async function repairFromReview(input: {
       rules: [
         edit
           ? "Keep every image: keep each <img> tag with its data-adrival-slot, data-logo-role and src exactly as given. Change words, links or labels only where the requested change asks for it."
-          : "Keep every word, link, button label and image: keep each <img> tag with its data-adrival-slot, data-logo-role and src exactly as given.",
+          : isChrome
+            ? "Keep the logo <img> exactly as given. To match the competitor you may move the logo, add the client's real details from context (address, phone, email — never invented ones) and remove links, columns or items that a flaw names."
+            : "Keep every word, link, button label and image: keep each <img> tag with its data-adrival-slot, data-logo-role and src exactly as given.",
         "Text must be readable: on a photo or a dark band use light text over a dark overlay; on a light background use dark text.",
         `Keep the data-section-id and the ${FORM_SLOT_ATTR} slot if present.`,
         "You may change the markup structure, classes and wrappers to fix layout, alignment, column widths and spacing.",
         "Align text consistently: the heading, intro and body of one column share one left edge, or are all centred when the competitor centres them.",
         "Card grids: 3 or more cards in a row only at full container width; beside a text column use .adr-grid--2.",
-        "No text over images unless the competitor does it; then put it on a solid chip.",
+        "No text over images unless the competitor does it; then rebuild the band as .adr-section--photo (image slot inside .adr-photo-bg, text on its overlay).",
+        "Follow the competitor's arrangement exactly: which side the media and form are on, whether item icons sit beside or above their text, and dividers between items.",
         "Use the class system. Only if a layout cannot be expressed with classes, add one small <style> scoped to this part, var(--…) tokens only.",
       ],
       classSystem: input.classSystem,
       designDirection: input.designDirection || null,
+      ...(isChrome && input.context ? { context: input.context } : {}),
       html: assets.html,
       outputContract: `{ "html": "the fixed <${tag} …>…</${tag}>" }`,
     }),

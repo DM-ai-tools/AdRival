@@ -14,7 +14,9 @@ import { repairFromReview, type BlueprintGenerationInput } from "./generateBluep
  * only when the reviewer confirms it is better.
  */
 
-const MAX_ROUNDS = 2;
+const MAX_ROUNDS = 3;
+/** Fix attempts per part before it is reported instead. */
+const MAX_ATTEMPTS = 3;
 const MAX_FIXES_PER_ROUND = 6;
 /** No new fix round starts after this long, so the review cannot hold the page up. */
 const REVIEW_BUDGET_MS = 6 * 60_000;
@@ -39,14 +41,37 @@ export type VisualReviewSummary = {
   remaining: Array<{ id: string; severity: number; flaws: string[] }>;
   /** Faults the browser measured on the final page. */
   measured: string[];
+  /** Parts the reviewer could not judge (they are not counted as passed). */
+  unreviewed?: string[];
 };
 
 type Rendered = {
   order: string[];
   crops: Map<string, string>;
   lint: Map<string, string[]>;
+  /** Measured faults that must be fixed, per part. */
+  mustFix: Map<string, string[]>;
   page: string[];
 };
+
+// At phone width: elements in each part that stick out past the screen.
+const PHONE_SCRIPT = String.raw`(function(){
+  var out = {};
+  function add(id, el){ if (!out[id]) out[id] = { n: 0, sample: (el.textContent || el.tagName).replace(/\s+/g, ' ').trim().slice(0, 60) }; out[id].n++; }
+  var parts = [];
+  var header = document.querySelector('body > header, header.adr-header'); if (header) parts.push(['header', header]);
+  document.querySelectorAll('main [data-section-id]').forEach(function(el){ if (el.parentElement && el.parentElement.closest('[data-section-id]')) return; parts.push([el.getAttribute('data-section-id'), el]); });
+  var footer = document.querySelector('body > footer, footer.adr-footer'); if (footer) parts.push(['footer', footer]);
+  parts.forEach(function(p){
+    var els = p[1].querySelectorAll('*');
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i]; if (el.closest('.adr-photo-bg')) continue;
+      var r = el.getBoundingClientRect(); if (r.width < 1 || r.height < 1) continue;
+      if (r.right > innerWidth + 2 && !el.querySelector('*')) add(p[0], el);
+    }
+  });
+  return out;
+})()`;
 
 // Runs in the page: measures every part (header, each section, footer) for
 // faults a visitor would see.
@@ -82,7 +107,7 @@ const LINT_SCRIPT = String.raw`(function(){
       if (/^(H1|H2|H3|H4|P|SPAN|LI)$/.test(el.tagName) && t.length > 1 && r.top >= 0) {
         var stack = document.elementsFromPoint(Math.min(innerWidth - 1, r.left + Math.min(r.width, 60) / 2), r.top + Math.min(r.height, 30) / 2);
         var i = stack.indexOf(el);
-        var img = i >= 0 ? stack.slice(i + 1).find(function(n){ return n.tagName === 'IMG' && (n.hasAttribute('data-adrival-slot') || n.closest('.adr-media')); }) : null;
+        var img = i >= 0 && !el.closest('.adr-section--photo') ? stack.slice(i + 1).find(function(n){ return n.tagName === 'IMG' && (n.hasAttribute('data-adrival-slot') || n.closest('.adr-media')); }) : null;
         if (img && !opaque(el, img.parentElement)) add('overImage', el);
       }
       if (block || el.tagName === 'A' || el.tagName === 'SPAN') {
@@ -132,7 +157,11 @@ const LINT_TEXT: Record<string, (n: number, sample: string) => string> = {
   ragged: (n, s) => `${n} text group(s) whose lines do not share one left edge (e.g. near "${s}").`,
   broken: (n) => `${n} image(s) that do not load.`,
   logoSmall: () => "The logo renders too small to read.",
+  phoneWide: (n, s) => `${n} element(s) wider than a phone screen (390px), so the page scrolls sideways (e.g. "${s}"). Let them wrap or stack on small screens.`,
 };
+
+/** Measured faults that are always fixed, even when the reviewer passes the part. */
+const MUST_FIX = new Set(["phoneWide", "overflow", "spill", "overImage", "sliver", "narrow"]);
 
 async function cropJpeg(full: Buffer, width: number, height: number, rect: { y: number; h: number }): Promise<string | null> {
   const top = Math.max(0, Math.min(height - 1, Math.round(rect.y)));
@@ -180,23 +209,31 @@ export async function renderForReview(html: string, browser?: Browser): Promise<
     await page.waitForTimeout(200);
     const phoneSideways = Boolean(await page.evaluate("document.documentElement.scrollWidth > innerWidth + 2"));
     if (phoneSideways) pageNotes.push("The page scrolls sideways on phones: something is wider than the screen.");
+    const phoneWide = phoneSideways
+      ? ((await page.evaluate(PHONE_SCRIPT).catch(() => ({}))) as Record<string, { n: number; sample: string }>)
+      : {};
     await page.close().catch(() => undefined);
 
     const crops = new Map<string, string>();
     const notes = new Map<string, string[]>();
+    const mustFix = new Map<string, string[]>();
     const meta = shot ? await sharp(shot).metadata() : null;
     for (const id of lint.order) {
       const row = lint.parts[id];
-      notes.set(
-        id,
-        Object.entries(row.found).map(([kind, v]) => (LINT_TEXT[kind] ? LINT_TEXT[kind](v.n, v.sample.replace(/"/g, "'")) : `${kind}: ${v.n}`)),
-      );
+      const found: Record<string, { n: number; sample: string }> = { ...row.found };
+      if (phoneWide[id]) found.phoneWide = phoneWide[id];
+      const text = (kind: string, v: { n: number; sample: string }) =>
+        LINT_TEXT[kind] ? LINT_TEXT[kind](v.n, v.sample.replace(/"/g, "'")) : `${kind}: ${v.n}`;
+      notes.set(id, Object.entries(found).map(([kind, v]) => text(kind, v)));
+      // Low contrast on two or more elements is fixed too, not just reported.
+      const forced = Object.entries(found).filter(([kind, v]) => MUST_FIX.has(kind) || (kind === "contrast" && v.n >= 2));
+      if (forced.length) mustFix.set(id, forced.map(([kind, v]) => text(kind, v)));
       if (shot && meta?.width && meta.height) {
         const crop = await cropJpeg(shot, meta.width, meta.height, row.rect);
         if (crop) crops.set(id, crop);
       }
     }
-    return { order: lint.order, crops, lint: notes, page: pageNotes };
+    return { order: lint.order, crops, lint: notes, mustFix, page: pageNotes };
   } finally {
     if (own) await b.close().catch(() => undefined);
   }
@@ -240,6 +277,7 @@ function competitorCrops(blueprint: CompetitorBlueprint): Map<string, string> {
 }
 
 function label(id: string, blueprint: CompetitorBlueprint): string {
+  if (id === "footer" && !blueprint.footer) return "the footer (the competitor page has NO footer: anything more than one slim legal line is a fault)";
   if (id === "header" || id === "footer") return `the ${id}`;
   const s = blueprint.sections.find((x) => x.id === id);
   return s ? `section ${id} (${s.kind})` : `section ${id}`;
@@ -253,11 +291,30 @@ export async function reviewParts(input: {
   blueprint: CompetitorBlueprint;
   signal?: AbortSignal;
 }): Promise<Map<string, ReviewVerdict>> {
+  const out = await reviewBatches(input, REVIEW_BATCH);
+  const missing = input.ids.filter((id) => input.rendered.crops.has(id) && !out.has(id));
+  if (missing.length && !input.signal?.aborted) {
+    const retried = await reviewBatches({ ...input, ids: missing }, 1);
+    for (const [id, v] of retried) out.set(id, v);
+  }
+  return out;
+}
+
+async function reviewBatches(
+  input: {
+    ids: string[];
+    rendered: Rendered;
+    competitor: Map<string, string>;
+    blueprint: CompetitorBlueprint;
+    signal?: AbortSignal;
+  },
+  size: number,
+): Promise<Map<string, ReviewVerdict>> {
   const out = new Map<string, ReviewVerdict>();
   if (!process.env.ANTHROPIC_API_KEY) return out;
   const ids = input.ids.filter((id) => input.rendered.crops.has(id));
   const batches: string[][] = [];
-  for (let i = 0; i < ids.length; i += REVIEW_BATCH) batches.push(ids.slice(i, i + REVIEW_BATCH));
+  for (let i = 0; i < ids.length; i += size) batches.push(ids.slice(i, i + size));
   await Promise.all(
     batches.map(async (batch) => {
       const content: Array<Record<string, unknown>> = [];
@@ -353,10 +410,46 @@ export function withCss(html: string, rows: Array<{ id: string; css: string }>):
   return css.length ? html.replace(/<\/style>/i, () => `${css.join("\n")}\n</style>`) : html;
 }
 
-const better = (after: ReviewVerdict | undefined, before: ReviewVerdict, lintBefore: number, lintAfter: number) =>
+const better = (
+  after: ReviewVerdict | undefined,
+  before: ReviewVerdict,
+  lintBefore: number,
+  lintAfter: number,
+  requiredBefore = 0,
+  requiredAfter = 0,
+) =>
   Boolean(after) &&
   lintAfter <= lintBefore &&
-  (after!.verdict === "pass" || after!.severity < before.severity || (after!.severity === before.severity && after!.flaws.length < before.flaws.length));
+  requiredAfter <= requiredBefore &&
+  (after!.verdict === "pass" ||
+    after!.severity < before.severity ||
+    (after!.severity === before.severity && after!.flaws.length < before.flaws.length) ||
+    requiredAfter < requiredBefore ||
+    lintAfter < lintBefore);
+
+/** Adds measured and required faults to the reviewer's verdicts, so they are fixed too. */
+function withForcedFaults(
+  verdicts: Map<string, ReviewVerdict>,
+  forced: Map<string, string[]>,
+): Map<string, ReviewVerdict> {
+  const out = new Map(verdicts);
+  for (const [id, flaws] of forced) {
+    if (!flaws.length) continue;
+    const v = out.get(id);
+    if (!v || v.verdict === "pass") {
+      out.set(id, { id, verdict: "fix", severity: Math.max(2, v?.severity || 0), flaws, fix: v?.fix || flaws.join(" ") });
+    } else {
+      out.set(id, { ...v, severity: Math.max(2, v.severity), flaws: [...new Set([...v.flaws, ...flaws])] });
+    }
+  }
+  return out;
+}
+
+const merge = (...maps: Array<Map<string, string[]> | undefined>) => {
+  const out = new Map<string, string[]>();
+  for (const m of maps) for (const [id, list] of m || []) out.set(id, [...(out.get(id) || []), ...list]);
+  return out;
+};
 
 /**
  * Review the page part by part against the competitor, fix what is flagged
@@ -369,6 +462,10 @@ export async function reviewAndFixPage(input: {
   classSystem: string;
   designDirection?: BlueprintGenerationInput["designDirection"];
   finish: (html: string) => string;
+  /** Faults the competitor comparison found (header, footer, sections); fixed even if the reviewer passes them. */
+  required?: (html: string) => Promise<Map<string, string[]>>;
+  /** Given to header and footer fixes: the client's real contact details and the competitor's arrangement. */
+  chromeContext?: Record<string, unknown> | null;
   signal?: AbortSignal;
   onProgress: (message: string) => void;
 }): Promise<{ html: string; summary: VisualReviewSummary; warnings: string[] }> {
@@ -381,12 +478,15 @@ export async function reviewAndFixPage(input: {
   const started = Date.now();
   try {
     let rendered = await renderForReview(html, browser);
-    const verdicts = await reviewParts({ ids: rendered.order, rendered, competitor, blueprint: input.blueprint, signal: input.signal });
-    const reviewed = verdicts.size;
+    let required = (await input.required?.(html).catch(() => undefined)) || new Map<string, string[]>();
+    const judged = await reviewParts({ ids: rendered.order, rendered, competitor, blueprint: input.blueprint, signal: input.signal });
+    const reviewed = judged.size;
+    const unreviewed = rendered.order.filter((id) => rendered.crops.has(id) && !judged.has(id));
+    let verdicts = withForcedFaults(judged, merge(rendered.mustFix, required));
     const attempts = new Map<string, number>();
     while (rounds < MAX_ROUNDS && !input.signal?.aborted && Date.now() - started < REVIEW_BUDGET_MS) {
       const todo = [...verdicts.values()]
-        .filter((v) => v.verdict === "fix" && v.severity >= (rounds === 0 ? 1 : 2) && (attempts.get(v.id) || 0) < 2)
+        .filter((v) => v.verdict === "fix" && v.severity >= (rounds === 0 ? 1 : 2) && (attempts.get(v.id) || 0) < MAX_ATTEMPTS)
         .sort((a, b) => b.severity - a.severity || b.flaws.length - a.flaws.length)
         .slice(0, MAX_FIXES_PER_ROUND);
       if (!todo.length) break;
@@ -407,6 +507,7 @@ export async function reviewAndFixPage(input: {
               fix: v.fix,
               classSystem: input.classSystem,
               designDirection: input.designDirection,
+              context: v.id === "header" || v.id === "footer" ? input.chromeContext : null,
               signal: input.signal,
             });
             return next ? { id: v.id, ...next } : null;
@@ -425,9 +526,19 @@ export async function reviewAndFixPage(input: {
       const trial = place(html, rows);
       input.onProgress("Reviewing the fixed parts side by side again…");
       const after = await renderForReview(trial, browser);
-      const confirm = await reviewParts({ ids: rows.map((r) => r.id), rendered: after, competitor, blueprint: input.blueprint, signal: input.signal });
+      const requiredAfter = (await input.required?.(trial).catch(() => undefined)) || new Map<string, string[]>();
+      const confirmed = await reviewParts({ ids: rows.map((r) => r.id), rendered: after, competitor, blueprint: input.blueprint, signal: input.signal });
+      // The reviewer's new verdict, plus whatever is still measured or required.
+      const confirm = withForcedFaults(confirmed, merge(after.mustFix, requiredAfter));
       const kept = rows.filter((r) =>
-        better(confirm.get(r.id), verdicts.get(r.id)!, (rendered.lint.get(r.id) || []).length, (after.lint.get(r.id) || []).length),
+        better(
+          confirm.get(r.id),
+          verdicts.get(r.id)!,
+          (rendered.lint.get(r.id) || []).length,
+          (after.lint.get(r.id) || []).length,
+          (required.get(r.id) || []).length,
+          (requiredAfter.get(r.id) || []).length,
+        ),
       );
       if (!kept.length) continue;
       html = kept.length === rows.length ? trial : place(html, kept);
@@ -435,8 +546,16 @@ export async function reviewAndFixPage(input: {
         fixed.add(r.id);
         const v = confirm.get(r.id);
         if (v) verdicts.set(r.id, v);
+        else verdicts.delete(r.id);
       }
-      rendered = kept.length === rows.length ? after : await renderForReview(html, browser);
+      if (kept.length === rows.length) {
+        rendered = after;
+        required = requiredAfter;
+      } else {
+        rendered = await renderForReview(html, browser);
+        required = (await input.required?.(html).catch(() => undefined)) || new Map<string, string[]>();
+      }
+      verdicts = withForcedFaults(verdicts, merge(rendered.mustFix, required));
     }
     const remaining = [...verdicts.values()]
       .filter((v) => v.verdict === "fix")
@@ -446,7 +565,10 @@ export async function reviewAndFixPage(input: {
       .filter((r) => r.severity >= 2)
       .map((r) => `Review (${r.id === "header" || r.id === "footer" ? r.id : `section ${r.id.replace("sec-", "")}`}): ${r.flaws[0] || "needs a look"}`);
     warnings.push(...rendered.page);
-    return { html, summary: { reviewed, rounds, fixed: [...fixed], remaining, measured }, warnings };
+    if (unreviewed.length) {
+      warnings.push(`The side-by-side review could not judge ${unreviewed.join(", ")}; check ${unreviewed.length === 1 ? "it" : "them"} by eye.`);
+    }
+    return { html, summary: { reviewed, rounds, fixed: [...fixed], remaining, measured, unreviewed }, warnings };
   } finally {
     await browser.close().catch(() => undefined);
   }

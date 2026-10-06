@@ -406,6 +406,12 @@ h1,h2{overflow-wrap:break-word}
 .adr-header{background:var(--bg);border-bottom:1px solid var(--border);position:relative;z-index:5}
 .adr-header--dark{background:var(--bg-dark);color:var(--text-on-dark);border-bottom-color:rgba(255,255,255,.1)}
 .adr-header-inner{display:flex;align-items:center;justify-content:space-between;gap:24px;min-height:76px;padding-block:12px}
+.adr-header--alt{background:var(--bg-alt)}
+.adr-header--center .adr-header-inner{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr)}
+.adr-header-side{display:flex;align-items:center;gap:16px;min-width:0;flex-wrap:wrap}
+.adr-header-side--right{justify-content:flex-end}
+.adr-header-item{display:inline-flex;align-items:center;gap:8px;color:inherit;text-decoration:none;font-size:15px;overflow-wrap:anywhere}
+.adr-header--center .adr-brand img{object-position:center center}
 .adr-brand{display:inline-flex;align-items:center;text-decoration:none;flex-shrink:0}
 .adr-brand img,img[data-logo-role="company"]{display:block;height:auto;max-height:48px;max-width:220px;width:auto;object-fit:contain;object-position:left center}
 [data-logo-role="proof"]{display:block;height:auto;max-height:40px;max-width:140px;width:auto;object-fit:contain}
@@ -422,8 +428,23 @@ h1,h2{overflow-wrap:break-word}
 .adr-footer ul{list-style:none;margin:0;padding:0;display:grid;gap:10px}
 .adr-footer a{text-decoration:none;color:inherit;opacity:.85}
 .adr-footer a:hover{opacity:1;text-decoration:underline}
+.adr-footer--slim{padding:18px 0}
+.adr-footer--slim .adr-footer-meta{margin-top:0;padding-top:0;border-top:0}
+.adr-footer a{overflow-wrap:anywhere}
 .adr-footer-meta{margin-top:36px;padding-top:18px;border-top:1px solid color-mix(in srgb, currentColor 14%, transparent);display:flex;flex-wrap:wrap;gap:10px 24px;font-size:14px;opacity:.8}
 img[data-adrival-slot]{display:block;width:100%;height:100%;object-fit:cover}
+/* A full-width photo behind a band, with a dark overlay so text reads. */
+.adr-section--photo{isolation:isolate;overflow:hidden}
+.adr-photo-bg{position:absolute;inset:0;z-index:-1;background:var(--bg-dark)}
+.adr-photo-bg>*,.adr-photo-bg img{position:absolute;inset:0;width:100%;height:100%;min-height:0;object-fit:cover;border-radius:0}
+.adr-photo-bg::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,color-mix(in srgb,var(--bg-dark) 84%,transparent) 0%,color-mix(in srgb,var(--bg-dark) 58%,transparent) 100%)}
+/* Items with the icon beside the text, and rows split by thin rules. */
+.adr-card--inline{display:flex;gap:16px;align-items:flex-start}
+.adr-card--inline .adr-icon{margin-bottom:0;flex-shrink:0}
+.adr-item{min-width:0}
+.adr-grid--divided{--gap:0px}
+.adr-grid--divided>*{padding:4px clamp(16px,2vw,28px)}
+.adr-grid--divided>*+*{border-left:1px solid var(--border)}
 .adr-placeholder{background:var(--gradient);min-height:280px;border-radius:var(--radius-card);position:relative;overflow:hidden}
 .adr-placeholder::after{content:"";position:absolute;inset:0;background:radial-gradient(circle at 30% 30%, rgba(255,255,255,.28), transparent 55%)}
 @media (max-width:960px){
@@ -433,10 +454,14 @@ img[data-adrival-slot]{display:block;width:100%;height:100%;object-fit:cover}
   .adr-grid--3{grid-template-columns:repeat(2,minmax(0,1fr))}
   .adr-split{grid-template-columns:1fr}
   .adr-split--reverse>:first-child{order:0}
+  .adr-header--center .adr-header-inner{grid-template-columns:1fr;justify-items:center;text-align:center}
+  .adr-header-side,.adr-header-side--right{justify-content:center}
+  .adr-grid--divided>*+*{border-left:0}
 }
 @media (max-width:640px){
   .adr-grid--2,.adr-grid--3,.adr-grid--4,.adr-grid--5,.adr-grid--6,.adr-form-grid{grid-template-columns:1fr}
   .adr-container{width:min(100% - 32px, var(--container))}
+  .adr-footer-grid{grid-template-columns:minmax(0,1fr)}
   .adr-btn{width:100%}
 }
 ${bandCss}
@@ -446,14 +471,17 @@ ${styleCss(style)}`;
   const vocabulary = `CLASS SYSTEM (already defined in the page stylesheet — use these; do not restyle them):
 - Section wrapper: <section class="adr-section [adr-section--alt|--wash|--dark|--brand|--gradient|--tight] [adr-center]" data-section-id="…"><div class="adr-container">…</div></section>
   Pick the variant that matches the competitor band: light page → none, tinted → --alt, soft light gradient glow → --wash, dark → --dark, strong colour → --brand, strong gradient → --gradient.
+  Full-width photo behind the band (the competitor's text sits on a photo): <section class="adr-section adr-section--dark adr-section--photo" data-section-id="…"><div class="adr-photo-bg"><img data-adrival-slot="…" src="…" alt="…"></div><div class="adr-container">…</div></section> — the band has a built-in dark overlay; text sits directly on it, forms and cards keep their own panels.
   adr-center centres the section heading block only; cards and forms stay left-aligned unless you add .adr-card--center (use it when the competitor's cards are centred).
 - Heading block: <div class="adr-section-head"><span class="adr-eyebrow">…</span><h2>…</h2><p class="adr-lead">…</p></div>
 - Type: plain h1/h2/h3/h4/p (already sized). Helpers: .adr-lead .adr-muted .adr-accent .adr-num (big stat number) .adr-badge
 - Layout: .adr-grid + .adr-grid--2/3/4/5/6 (cards/columns), .adr-split (text + media, add .adr-split--reverse to swap sides), .adr-row (inline items), .adr-stack, .adr-narrow
+- Items: .adr-card--inline puts the icon beside the text (add to .adr-card or .adr-item); .adr-item is an unboxed item (no card background); .adr-grid--divided adds thin vertical rules between the items of a row.
 - Components: .adr-card, .adr-icon (small tinted square, put an emoji-free glyph or number inside), .adr-list-check (tick list), .adr-quote (+ <cite>), .adr-logos (logo strip), .adr-faq (<details><summary>Q</summary><p>A</p></details>), .adr-media (image frame), .adr-placeholder (brand-coloured panel where no image is available)
 - Buttons: <a class="adr-btn adr-btn--primary" href="…">…</a>, secondary: .adr-btn--secondary, text link: .adr-link
 - Forms: never write form markup — put <div data-adrival-form></div> exactly where the competitor's form sits; the form is inserted there.
-LAYOUT RULES: a card grid inside one column of .adr-split uses .adr-grid--2 at most (a heading beside 4 cards → heading column + 2×2 grid). Put 3+ cards in a row only at full container width. Do not lay text, labels or badges over images; put them beside or under the image.
+LAYOUT RULES: a card grid inside one column of .adr-split uses .adr-grid--2 at most (a heading beside 4 cards → heading column + 2×2 grid). Put 3+ cards in a row only at full container width. Do not lay text, labels or badges over images; put them beside or under the image — except in an .adr-section--photo band, used only where the competitor's band has a photo behind its text.
+FIDELITY: the competitor's layout wins over general taste — same columns, same side for media and forms, same icon position (beside or above), same dividers, same band type.
 RULES: no <style> blocks for colours, fonts, font sizes, buttons or cards. Only if a layout cannot be expressed with the classes, add ONE small <style> scoped to [data-section-id="…"] using var(--…) tokens — never hex colours, never :root, body or html.`;
 
   return {
