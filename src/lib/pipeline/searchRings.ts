@@ -126,6 +126,43 @@ export function serviceAnchors(
   return out;
 }
 
+/**
+ * Ad-library queries for one ring. The Ad Library does not filter by place,
+ * so a query per suburb mostly repeats the same national ads. The first ring
+ * searches the home suburb and the city; wider rings their few main places.
+ * Advertisers found outside the current ring are held and taken once a
+ * wider ring covers their address, without searching again.
+ */
+export function adLibraryRingQueries(input: {
+  anchors: string[];
+  rings: SearchRing[];
+  level: number;
+  metro?: string | null;
+}): string[] {
+  const out: string[] = [];
+  const push = (value: string) => {
+    const text = value.replace(/\s+/g, " ").trim();
+    if (!text || out.some((x) => x.toLowerCase() === text.toLowerCase())) return;
+    out.push(text);
+  };
+  const [first, second] = input.anchors;
+  const ring = input.rings.find((r) => r.level === input.level);
+  if (!first || !ring) return out;
+  if (input.level === 0) {
+    const home = ring.places[0]?.city;
+    const metro = (input.metro || "").trim();
+    for (const anchor of [first, second].filter(Boolean) as string[]) {
+      if (home) push(`${anchor} ${home}`);
+      if (metro && metro.toLowerCase() !== (home || "").toLowerCase()) push(`${anchor} ${metro}`);
+    }
+    if (ring.places[1]) push(`${first} ${ring.places[1].city}`);
+    return out.slice(0, 5);
+  }
+  for (const place of ring.places.slice(0, 3)) push(`${first} ${place.city}`);
+  if (second && ring.places[0]) push(`${second} ${ring.places[0].city}`);
+  return out.slice(0, 4);
+}
+
 /** Place-qualified queries for one ring: the main service in every place, a second service in the first few. */
 export function ringSearchQueries(input: {
   anchors: string[];

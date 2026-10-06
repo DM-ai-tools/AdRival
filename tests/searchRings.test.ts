@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  adLibraryRingQueries,
   buildSearchRings,
   placesUpToRing,
   ringSearchQueries,
@@ -288,4 +289,39 @@ test("the client's own business is recognised even when its ad links to WhatsApp
     }),
     false,
   );
+});
+
+test("ad-library queries: home suburb and city first, a few main places per wider ring", () => {
+  const carlton: BusinessLocation = { label: "132 Elgin St, Carlton VIC 3053", city: "Melbourne", suburb: "Carlton", region: "VIC", countryCode: "AU", isPrimary: true };
+  const rings = buildSearchRings(
+    {
+      ...profile,
+      locations: [carlton],
+      serviceArea: {
+        radiusKm: 8,
+        nearbyAreas: ["Carlton North", "Brunswick", "Fitzroy", "North Melbourne", "Parkville", "Collingwood"],
+        widerRadiusKm: 20,
+        widerAreas: ["Richmond", "South Yarra", "Footscray", "Coburg"],
+        outerRadiusKm: 40,
+        outerAreas: ["Dandenong", "Frankston", "Werribee"],
+        metro: "Melbourne",
+        region: "Victoria",
+      },
+    },
+    [carlton],
+  );
+  const anchors = ["suit hire", "wedding suit hire"];
+  assert.deepEqual(adLibraryRingQueries({ anchors, rings, level: 0, metro: "Melbourne" }), [
+    "suit hire Carlton",
+    "suit hire Melbourne",
+    "wedding suit hire Carlton",
+    "wedding suit hire Melbourne",
+    "suit hire Carlton North",
+  ]);
+  assert.deepEqual(adLibraryRingQueries({ anchors, rings, level: 1, metro: "Melbourne" }), [
+    "suit hire Richmond",
+    "suit hire South Yarra",
+    "suit hire Footscray",
+    "wedding suit hire Richmond",
+  ]);
 });

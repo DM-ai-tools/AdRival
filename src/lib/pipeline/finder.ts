@@ -40,7 +40,7 @@ import { ownBusinessCheck } from "./ownBusiness";
 import {
   buildSearchRings,
   placesUpToRing,
-  ringSearchQueries,
+  adLibraryRingQueries,
   serviceAnchors,
 } from "./searchRings";
 import type { SearchDispatchOptions } from "./searchOptions";
@@ -55,7 +55,6 @@ import {
   MAX_PAGES_PER_QUERY,
   MAX_SEARCH_PAGES,
   MAX_SEARCH_QUERIES_META,
-  MIN_COMPETITORS,
   RELAXED_MIN_ACTIVE_ADS,
   RELAXED_MIN_AD_DURATION_DAYS,
   TARGET_COMPETITORS,
@@ -70,6 +69,9 @@ import {
 import type { AdPlatform } from "../platforms";
 import { parseKeywords, getPlatformAdThresholds, meetsDurationThreshold } from "../platforms";
 import { metaCountriesFromGeo } from "../geo";
+
+/** Ad Library result pages a city/suburb search may read (country-wide: MAX_SEARCH_PAGES). */
+const LOCAL_SEARCH_PAGES = 84;
 
 /** How many advertisers ahead of the current one get their LLM review started. */
 const REVIEW_AHEAD = 3;
@@ -362,6 +364,8 @@ export async function runCompetitorSearch(
   let ringLevel = 0;
   /** Places that count as local right now; grows as rings widen. */
   let activeTargets = localMode ? placesUpToRing(rings, 0) : targetLocations;
+  /** The city the business sits in: "suit hire Melbourne" finds far more local advertisers than a suburb query. */
+  const localMetro = businessProfile?.serviceArea?.metro || targetLocations.find((l) => l.isPrimary)?.city || targetLocations[0]?.city || null;
   const anchors = localMode
     ? serviceAnchors(
         // Short local phrases from the analysis ("dentist") go ahead of category names.
@@ -726,7 +730,7 @@ export async function runCompetitorSearch(
       ? Math.max(2, Math.ceil(TARGET_COMPETITORS / Math.min(targetLocations.length, 4)))
       : TARGET_COMPETITORS;
     let queries: string[] = localMode
-      ? ringSearchQueries({ anchors, ring: rings[0], maxQueries: 8 })
+      ? adLibraryRingQueries({ anchors, rings, level: 0, metro: localMetro })
       : [];
     if (queries.length) {
       // City/suburb search: the nearest ring's place-named queries.
@@ -754,6 +758,10 @@ export async function runCompetitorSearch(
     });
 
     let pageBudget = 0;
+    // A local search spends part of its budget ring by ring; the rest is kept
+    // so the country-wide step can still fill the list.
+    const pageLimit = localMode ? LOCAL_SEARCH_PAGES : MAX_SEARCH_PAGES;
+    const ringPageShare = Math.floor(pageLimit * 0.6);
     // The planned queries run first. If they run out short of the target,
     // the search widens once: more queries and a relaxed bar.
     const queryQueue = [...queries];
@@ -765,7 +773,7 @@ export async function runCompetitorSearch(
         if (
           accepted.length >= TARGET_COMPETITORS ||
           isSearchJobSuppressed(job.id) ||
-          pageBudget >= MAX_SEARCH_PAGES
+          pageBudget >= pageLimit
         ) {
           break;
         }
@@ -786,11 +794,14 @@ export async function runCompetitorSearch(
           });
           await releaseHeldLocals();
           if (accepted.length >= TARGET_COMPETITORS) break outer;
-          nextRingQueries = ringSearchQueries({
-            anchors,
-            ring: rings[ringLevel],
-            maxQueries: 8,
-          }).filter((q) => !ranQueries.has(q.toLowerCase()));
+          // Past the rings' share of the budget, wider rings only take the
+          // advertisers already held for them; the rest is kept for country-wide.
+          nextRingQueries =
+            pageBudget < ringPageShare
+              ? adLibraryRingQueries({ anchors, rings, level: ringLevel, metro: localMetro }).filter(
+                  (q) => !ranQueries.has(q.toLowerCase()),
+                )
+              : [];
         }
         if (nextRingQueries.length) {
           queryQueue.push(...nextRingQueries);
@@ -841,7 +852,7 @@ export async function runCompetitorSearch(
           if (accepted.length >= TARGET_COMPETITORS) break outer;
           if (accepted.length - acceptedAtStart >= querySlot) break;
           if (isSearchJobSuppressed(job.id)) break outer;
-          if (pageBudget >= MAX_SEARCH_PAGES) break outer;
+          if (pageBudget >= pageLimit) break outer;
           if (pagesForQuery >= queryPageCap) break;
 
           setProgress(job, {
@@ -1290,7 +1301,7 @@ export async function runCompetitorSearch(
           }
 
           saveJobProgress(job);
-        } while (cursor && pageBudget < MAX_SEARCH_PAGES);
+        } while (cursor && pageBudget < pageLimit);
       } // country
     } // query
 
@@ -1340,9 +1351,9 @@ export async function runCompetitorSearch(
 
       await fillFrom(nearMisses.filter((m) => m.reason === "geoMismatch"));
 
-      // Still under the minimum: a small market's relevant rivals often run
+      // Still short of the target: a small market's relevant rivals often run
       // only a few ads. Take the best of them (at least one active ad).
-      if (accepted.length < MIN_COMPETITORS && !isSearchJobSuppressed(job.id)) {
+      if (accepted.length < TARGET_COMPETITORS && !isSearchJobSuppressed(job.id)) {
         setProgress(job, {
           stage: "filling_quota",
           message: `Found ${accepted.length} of ${TARGET_COMPETITORS}. Adding relevant competitors that run fewer ads…`,
