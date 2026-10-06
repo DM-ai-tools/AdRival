@@ -101,7 +101,9 @@ export function mapGoogleCreativeToCandidate(
   const first = details?.firstShown || ad.firstShown || null;
   const last = details?.lastShown || ad.lastShown || null;
   const daysRunning = daysFromDateRange(first, last);
-  const landing = externalUrl(cleanStr(details?.landing)) || null;
+  const rawLanding = externalUrl(cleanStr(details?.landing)) || null;
+  // The Transparency Center page lists the ad; it is not where the ad leads.
+  const landing = rawLanding && !/adstransparency\.google\.com/i.test(rawLanding) ? rawLanding : null;
   const youtubeUrl = cleanStr(details?.youtubeUrl);
 
   return {

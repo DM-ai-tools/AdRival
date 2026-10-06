@@ -336,7 +336,8 @@ async function keepLikelyCompetitorDomains(args: {
   }
 }
 
-async function enrichGoogleAd(ad: GoogleAdCreative) {
+/** One ad's details: its real headline, text and destination (one SociaVault call). */
+export async function enrichGoogleAd(ad: GoogleAdCreative) {
   if (!ad.adUrl) {
     return {
       title: "",

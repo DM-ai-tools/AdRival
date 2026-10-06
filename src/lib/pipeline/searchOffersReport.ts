@@ -39,6 +39,8 @@ import type {
 import type { AdPlatform } from "../platforms";
 import { adRunsOnFacebook, adRunsOnInstagram } from "../sociavault/client";
 import { mapGoogleCreativeToCandidate, mapLinkedInAdToCandidate } from "./adMappers";
+import { enrichGoogleAd } from "./googleSearch";
+import { googleRegionFromGeo } from "../geo";
 import { runLookupOffersReportPhase } from "./lookupOffersReport";
 import { searchedServiceFocus, type ServiceFocus } from "./offerServiceFocus";
 import { isJunkAdCopy, junkLandingReason, offerRelevance } from "./offerRelevance";
@@ -50,6 +52,8 @@ import {
 
 const MAX_COMPETITORS = 10;
 const MAX_ADS_PER_COMPETITOR = 18;
+/** Google ads per competitor whose details (real destination, headline, text) are read — one call each. */
+const GOOGLE_DETAILS_PER_COMPETITOR = 12;
 /** Meta returns plenty of ads per page, so fetch more and analyse the best. */
 const META_MAX_ADS_PER_COMPETITOR = 36;
 /** Keep at least this many ads per competitor even when few match well. */
@@ -378,11 +382,13 @@ async function fetchGoogleAds(
   const seen = new Set<string>();
   let cursor: string | null = null;
   let pages = 0;
+  // Ads shown in the run's country, as the search found them.
+  const region = googleRegionFromGeo(String(getJob(runId)?.geo || "all"));
   do {
     const res = await getGoogleCompanyAds({
       advertiser_id: advertiserId || undefined,
       domain: advertiserId ? undefined : domain || undefined,
-      region: "all",
+      region,
       cursor,
     });
     pages += 1;
@@ -398,18 +404,41 @@ async function fetchGoogleAds(
     if (creatives.length >= MAX_ADS_PER_COMPETITOR) break;
   } while (cursor && pages < 4);
 
+  // The listing has no destination: read each ad's details for where it
+  // really leads (and its headline and text), text ads first. Ads beyond the
+  // limit keep no landing page rather than a wrong one.
+  const picked = creatives.slice(0, MAX_ADS_PER_COMPETITOR);
+  const isText = (ad: GoogleAdCreative) => String(ad.format || "").toLowerCase() === "text";
+  const toRead = new Set(
+    [...picked].sort((a, b) => Number(isText(b)) - Number(isText(a))).slice(0, GOOGLE_DETAILS_PER_COMPETITOR),
+  );
+  const detailsOf = new Map<GoogleAdCreative, Awaited<ReturnType<typeof enrichGoogleAd>>>();
+  const queue = [...toRead];
+  await Promise.all(
+    Array.from({ length: 4 }, async () => {
+      for (let ad = queue.shift(); ad; ad = queue.shift()) {
+        try {
+          detailsOf.set(ad, await enrichGoogleAd(ad));
+        } catch (err) {
+          if (isCreditError(err)) throw err;
+        }
+      }
+    }),
+  );
+
   const out: SearchCompetitorAdRecord[] = [];
-  for (const ad of creatives.slice(0, MAX_ADS_PER_COMPETITOR)) {
+  for (const ad of picked) {
+    const read = detailsOf.get(ad);
     const details = {
-      title: String(ad.advertiserName || ""),
-      body: "",
-      cta: null as string | null,
-      landing: String(ad.adUrl || "") || null,
-      youtubeUrl: null as string | null,
-      visibleUrl: String(ad.domain || "") || null,
-      firstShown: (ad.firstShown as string) || null,
-      lastShown: (ad.lastShown as string) || null,
-      format: (ad.format as string) || null,
+      title: read?.title || String(ad.advertiserName || ""),
+      body: read?.body || "",
+      cta: read?.cta ?? null,
+      landing: read?.landing || null,
+      youtubeUrl: read?.youtubeUrl || null,
+      visibleUrl: read?.visibleUrl || String(ad.domain || "") || null,
+      firstShown: read?.firstShown || (ad.firstShown as string) || null,
+      lastShown: read?.lastShown || (ad.lastShown as string) || null,
+      format: read?.format || (ad.format as string) || null,
     };
     const mapped = mapGoogleCreativeToCandidate(ad, details);
     if (platform === "youtube") {
@@ -514,7 +543,8 @@ async function fetchAndCacheAdsForCompetitor(
 ): Promise<SearchCompetitorAdRecord[]> {
   if (!force) {
     const cached = getSearchCompetitorAdsByCompetitor(runId, competitor.id);
-    if (cached.length > 0) return cached;
+    const staleLinks = cached.some((ad) => /adstransparency\.google\.com/i.test(ad.landingPageUrl || ""));
+    if (cached.length > 0 && !staleLinks) return cached;
   }
   const platform = asPlatform(String(competitor.platform || "facebook"));
   let ads: SearchCompetitorAdRecord[] = [];
