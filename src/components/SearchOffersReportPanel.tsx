@@ -519,10 +519,24 @@ type DashSection = (typeof DASH_SECTIONS)[number];
 
 export function SearchOffersDashboard({
   job,
+  competitors,
 }: {
   job: SearchJob;
+  /** The run's competitors, for their real active-ad counts (same as the Competitors tab). */
+  competitors?: Array<{ id: string; activeAdsCount?: number }>;
 }) {
   const report = job.offersReport as LookupOffersReport | null | undefined;
+  const activeAdsOf = useMemo(
+    () => new Map((competitors || []).map((c) => [c.id, c.activeAdsCount] as const)),
+    [competitors],
+  );
+  /** "18 analysed · 57 active ads": the ads collected here, and the competitor's real total. */
+  const adCountLabel = (id: string, analysed: number) => {
+    const total = activeAdsOf.get(id);
+    return typeof total === "number" && total !== analysed
+      ? `${analysed} analysed · ${total} active ad${total === 1 ? "" : "s"}`
+      : `${analysed} ad${analysed === 1 ? "" : "s"}`;
+  };
   const [ads, setAds] = useState<SearchCompetitorAdRecord[]>([]);
   const [adsLoaded, setAdsLoaded] = useState(false);
   const [section, setSection] = useState<DashSection>("insights");
@@ -1316,7 +1330,7 @@ export function SearchOffersDashboard({
                     {group.name}
                   </span>
                   <span className="offers-competitor-jump-count">
-                    {group.ads.length} ad{group.ads.length === 1 ? "" : "s"}
+                    {adCountLabel(group.id, group.ads.length)}
                   </span>
                 </button>
               ))}
@@ -1335,7 +1349,7 @@ export function SearchOffersDashboard({
                   <header className="offers-competitor-group-head">
                     <h3>{group.name}</h3>
                     <span className="muted">
-                      {group.ads.length} ad{group.ads.length === 1 ? "" : "s"}
+                      {adCountLabel(group.id, group.ads.length)}
                     </span>
                   </header>
                   <div className="offers-ad-copy-list">

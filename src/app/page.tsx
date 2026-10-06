@@ -994,7 +994,7 @@ export default function HomePage() {
                       .finally(() => setGeneratingSearchOffers(false));
                   }}
                 />
-                <SearchOffersDashboard job={job} />
+                <SearchOffersDashboard job={job} competitors={competitors} />
               </>
             ) : (
               <p className="empty-hint panel">
@@ -1302,7 +1302,7 @@ export default function HomePage() {
                           .finally(() => setGeneratingHistoryOffers(false));
                       }}
                     />
-                    <SearchOffersDashboard job={historyJob} />
+                    <SearchOffersDashboard job={historyJob} competitors={historyCompetitors} />
                   </>
                 )}
               </>

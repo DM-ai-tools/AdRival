@@ -534,12 +534,15 @@ export async function runGoogleFamilySearch(
     });
   }
 
+  /** An advertiser's ads in the chosen country: a few to review, and Google's count of all of them. */
   const fetchAds = async (params: { advertiser_id?: string; domain?: string }) => {
     const res = await getGoogleCompanyAds({ ...params, region: adsRegion });
     let ads = extractGoogleAds(res);
     if (platform === "youtube") ads = ads.filter((ad) => isYouTubeCreative(ad));
     job.progress.scannedPages += 1;
-    return ads.slice(0, 8);
+    // YouTube counts only the video ads that were listed.
+    const total = platform === "youtube" ? ads.length : extractGoogleAdsEstimate(res) ?? ads.length;
+    return { ads: ads.slice(0, 8), total };
   };
 
   const queueReview = (row: {
@@ -552,6 +555,7 @@ export async function runGoogleFamilySearch(
     websiteHint: string | null;
     fromWeb: boolean;
     webSnippet?: { title?: string; description?: string } | null;
+    adsTotal?: number;
   }) => {
     job.progress.scannedAds += row.ads.length;
     pendingReview.push({
@@ -636,9 +640,9 @@ export async function runGoogleFamilySearch(
       );
       const rows = await mapPool(slice, AD_REVIEW_BATCH, async (domain) => {
         try {
-          const ads = await fetchAds({ domain });
+          const { ads, total } = await fetchAds({ domain });
           if (!ads.length) bumpReason(job, "noAdsInRegion");
-          return ads.length ? { domain, ads } : null;
+          return ads.length ? { domain, ads, total } : null;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           if (isCreditError(err) || /credit|quota|402|401|403|rate limited/i.test(msg)) throw err;
@@ -667,6 +671,8 @@ export async function runGoogleFamilySearch(
             websiteHint: websiteUrl(row.domain),
             fromWeb: true,
             webSnippet: snippetOf.get(row.domain) || null,
+            // A site can carry several advertisers; Google's total is for the site.
+            adsTotal: byAdvertiser.size === 1 ? row.total : advAds.length,
           });
         }
       }
@@ -697,8 +703,8 @@ export async function runGoogleFamilySearch(
           if (!id || seenAdvertisers.has(id)) return null;
           seenAdvertisers.add(id);
           try {
-            const ads = await fetchAds({ advertiser_id: id });
-            return ads.length ? { adv, id, ads } : null;
+            const { ads, total } = await fetchAds({ advertiser_id: id });
+            return ads.length ? { adv, id, ads, total } : null;
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             if (isCreditError(err) || /credit|quota|402|401|403|rate limited/i.test(msg)) throw err;
@@ -717,6 +723,7 @@ export async function runGoogleFamilySearch(
             country: row.adv.region ? String(row.adv.region) : webCountry || String(job.geo || "US"),
             websiteHint: null,
             fromWeb: false,
+            adsTotal: row.total,
           });
         }
         await flushReview();
@@ -942,6 +949,8 @@ async function tryAcceptFromAds(args: {
   fromWeb?: boolean;
   /** The site's search listing (title, description), used when its ads have no readable text. */
   webSnippet?: { title?: string; description?: string } | null;
+  /** Google's count of the advertiser's ads in the chosen country. */
+  adsTotal?: number;
 }) {
   const {
     ads,
@@ -1189,9 +1198,11 @@ async function tryAcceptFromAds(args: {
     return;
   }
 
-  const activeCount = durationQualified.length > 0
-    ? durationQualified.length
-    : pool.length;
+  // Google's count of all their ads in the country, not just the few loaded for review.
+  const activeCount = Math.max(
+    args.adsTotal || 0,
+    durationQualified.length > 0 ? durationQualified.length : pool.length,
+  );
 
   if (!meetsActiveAdsThreshold(activeCount, thresholds)) {
     job.progress.rejected += 1;

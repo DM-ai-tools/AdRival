@@ -4,8 +4,10 @@ import {
   extractCursor,
   extractFullAdCopy,
   extractGoogleAds,
+  extractGoogleAdsEstimate,
   extractGoogleCursor,
   extractLinkedInAds,
+  extractSearchResultsCount,
   extractLinkedInPagination,
   getCompanyAds,
   getGoogleCompanyAds,
@@ -25,6 +27,7 @@ import {
   saveLookupAds,
   saveLookupJob,
   saveSearchCompetitorAds,
+  updateCompetitor,
 } from "../db";
 import type {
   CompetitorRecord,
@@ -328,6 +331,11 @@ async function fetchMetaAds(
         }
       }
       pages += 1;
+      // Same count the search shows: the Ad Library's active total for this page.
+      if (pages === 1 && country === primary) {
+        const reported = extractSearchResultsCount(response);
+        if (reported != null) updateCompetitor(competitor.id, { activeAdsCount: reported });
+      }
       const ads = extractAds(response);
       cursor = extractCursor(response);
       for (const ad of ads) {
@@ -384,6 +392,7 @@ async function fetchGoogleAds(
   let pages = 0;
   // Ads shown in the run's country, as the search found them.
   const region = googleRegionFromGeo(String(getJob(runId)?.geo || "all"));
+  let estimate: number | null = null;
   do {
     const res = await getGoogleCompanyAds({
       advertiser_id: advertiserId || undefined,
@@ -392,6 +401,7 @@ async function fetchGoogleAds(
       cursor,
     });
     pages += 1;
+    estimate ??= extractGoogleAdsEstimate(res);
     const ads = extractGoogleAds(res);
     cursor = extractGoogleCursor(res);
     for (const ad of ads) {
@@ -403,6 +413,10 @@ async function fetchGoogleAds(
     }
     if (creatives.length >= MAX_ADS_PER_COMPETITOR) break;
   } while (cursor && pages < 4);
+  // The competitor's ad count everywhere is Google's count for the country
+  // (all pages read when Google gives none).
+  const total = platform === "youtube" ? null : estimate ?? (cursor ? null : creatives.length);
+  if (total != null) updateCompetitor(competitor.id, { activeAdsCount: total });
 
   // The listing has no destination: read each ad's details for where it
   // really leads (and its headline and text), text ads first. Ads beyond the
