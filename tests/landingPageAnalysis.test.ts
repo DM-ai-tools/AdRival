@@ -5,6 +5,7 @@ import { looksLikeThinShell } from "../src/lib/pipeline/htmlFetch";
 import {
   demashHeadline,
   ensureArchitectureSections,
+  groundArchitectureSections,
   extractPageOutline,
   looksLikeMashedHeadline,
   pickBestHeadline,
@@ -218,4 +219,57 @@ test("compact unified brief stays bounded for faster generation", async () => {
   assert.ok(brief.sectionCount <= 8);
   assert.ok(brief.text.length < 25_000);
   assert.equal(brief.imageTiles.length, 0);
+});
+
+test("page architecture keeps only sections the page really has (House of Smile Design)", () => {
+  // Visible text of thehouseofsmiledesign.com.au/campaign/smile-transformation/
+  const visible = `[H2] Build your confidence with the smile of your dreams
+Invisalign & veneers – discreet, natural solutions for a straighter, brighter smile.
+Smile transformations – personalised treatments designed just for you.
+Advanced technology & expertise – a dental experience like no other, right here in Echuca.
+FIRST NAME*
+LAST NAME *
+PHONE NO.*
+EMAIL *
+SELECT SERVICE OF INTERESTInvisalign OrthodonticsVeneersDental ImplantSleep DentistryGeneralOther
+Local family run clinic
+5 star Google reviews
+
+[H2] 20+
+20+ years of experience
+Digital Smile Design (DSD) provider`;
+  const section = (name: string, keyElements: string[], evidence?: string) => ({
+    name,
+    purpose: "",
+    summary: "",
+    keyElements,
+    evidence: evidence ?? null,
+  });
+  const kept = groundArchitectureSections(
+    [
+      section("Hero", ["Lead form"], "Build your confidence with the smile of your dreams"),
+      section("Trust badges", ["5 star Google reviews"], "Local family run clinic 5 star Google reviews"),
+      section("Experience", ["20+ years"], "20+ years of experience Digital Smile Design (DSD) provider"),
+      // Invented by the old prompt: none of these are on the page.
+      section("The Anatomy of a Perfect Smile", [], "Explanation of smile design principles and the anatomy of a perfect smile"),
+      section("Smile Transformation Gallery", ["Before/after photo gallery", "Patient case highlights", "Treatment type labels"]),
+      section("Patient Testimonials", ["Google review ratings", "Patient quotes", "Star rating display"]),
+      section("Final Call-to-Action / Booking", ["Repeated contact/booking form", "Encouraging closing headline"]),
+    ],
+    visible,
+  );
+  assert.deepEqual(
+    kept.map((s) => s.name),
+    ["Hero", "Trust badges", "Experience"],
+  );
+});
+
+test("structured data is kept out of the visible page text", () => {
+  const outline = extractPageOutline(
+    `<html><head><title>Smile</title><script type="application/ld+json">{"@type":"ImageObject","name":"The Anatomy of perfect smile"}</script></head>
+    <body><h2>Build your confidence</h2><p>Invisalign and veneers.</p></body></html>`,
+    null,
+  );
+  assert.match(outline.bodyText || "", /Build your confidence/);
+  assert.doesNotMatch(outline.bodyText || "", /Anatomy/);
 });

@@ -64,6 +64,8 @@ const analysisSchema = z.object({
           purpose: z.string(),
           summary: z.string(),
           keyElements: z.array(z.string()).optional().default([]),
+          /** Short quote copied from the visible page that proves the section exists. */
+          evidence: z.string().nullable().optional(),
         }),
       )
       .default([]),
@@ -113,6 +115,8 @@ type PageOutline = {
   footerLinks: Array<{ label: string; href: string }>;
   headerCta: { label: string; href: string } | null;
   plainText: string;
+  /** Visible page text only — no title, meta, noscript or structured data. */
+  bodyText?: string;
 };
 
 function resolveLandingUrl(urls: Array<string | null | undefined>): string | null {
@@ -513,6 +517,7 @@ export function extractPageOutline(html: string, fallbackTitle: string | null): 
     footerLinks: chrome.footerLinks,
     headerCta: chrome.headerCta,
     plainText: combined.slice(0, MAX_TEXT_CHARS),
+    bodyText: plain.slice(0, MAX_TEXT_CHARS),
   };
 }
 
@@ -585,7 +590,7 @@ function schemaHint(): string {
   },
   "pageArchitecture": {
     "pageType": string|null,
-    "sections": [{ "name": string, "purpose": string, "summary": string, "keyElements": string[] }]
+    "sections": [{ "name": string, "purpose": string, "summary": string, "keyElements": string[], "evidence": string }]
   },
   "audience": string|null,
   "trustSignals": string[],
@@ -609,8 +614,11 @@ Hard rules for accuracy:
 - adHeadline/adBody are ad creatives for context only — they are NOT the landing-page headline unless the page truly has no hero text.
 - offer.primaryOffer = what the visitor gets (product/service), not the headline restated awkwardly.
 - offer.cta = the primary button label from ctas[] when possible.
-- pageArchitecture.sections MUST cover the full page top-to-bottom using headingOutline as the map. Include typically: Hero, Problem/Agitation (if present), Solution/Features, Social proof, Offer/Pricing, How it works, FAQ, Final CTA, Footer (if meaningful). Aim for 5–12 sections when the page has that much content. Do NOT stop after Hero. If headingOutline is short, still infer distinct blocks from pageText (problem, benefits, proof, CTA).
-- Each section name should be human (e.g. "Hero", "Features", "Testimonials") — not raw H1 text dumped as the only section.
+- pageArchitecture.sections = the sections that are VISIBLY on this page, top to bottom, using headingOutline, visiblePageText and the screenshots. Cover the whole page, but list ONLY what is there: a short page may have 2–4 sections. NEVER add a section because landing pages typically have one (no invented galleries, testimonials, FAQs, "why choose us" or final CTAs).
+- pageMetadata (title, meta description, noscript, structured data) is NOT visible content. Never turn it into a section.
+- Every section needs "evidence": a short quote (≤20 words) copied exactly from visiblePageText that shows the section exists. If you cannot quote the page for it, leave the section out.
+- keyElements list only things actually on the page (e.g. the real form fields, the real badges), not suggestions.
+- Each section name should be human (e.g. "Hero", "Enquiry form", "Trust badges") — not raw H1 text dumped as the only section.
 - Be evidence-based. If pricing/CTA is unclear, use null. Do not invent.
 - Return a single JSON object only.`;
 }
@@ -673,6 +681,53 @@ export function pickBestHeadline(
   return null;
 }
 
+const EVIDENCE_STOPWORDS = new Set([
+  "the", "and", "for", "with", "your", "our", "you", "are", "was", "this", "that",
+  "from", "have", "has", "all", "can", "will", "get", "its", "not", "but", "who",
+]);
+
+function evidenceWords(text: string): string[] {
+  return Array.from(
+    new Set(
+      text
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .split(/\s+/)
+        .map((w) => (w.length > 4 ? w.replace(/s$/, "") : w))
+        .filter((w) => w.length >= 3 && !EVIDENCE_STOPWORDS.has(w)),
+    ),
+  );
+}
+
+/** Share of a phrase's words that appear in the page text (0–1). */
+function pageCoverage(phrase: string, pageWords: Set<string>): number {
+  const words = evidenceWords(phrase);
+  if (!words.length) return 0;
+  return words.filter((w) => pageWords.has(w)).length / words.length;
+}
+
+/**
+ * Keeps only sections the page really has. A section's quoted evidence must
+ * be found in the visible text; without a quote, most of its key elements
+ * must be. Never empties the list.
+ */
+export function groundArchitectureSections(
+  sections: z.infer<typeof analysisSchema>["pageArchitecture"]["sections"],
+  visibleText: string,
+): z.infer<typeof analysisSchema>["pageArchitecture"]["sections"] {
+  const pageWords = new Set(evidenceWords(visibleText));
+  if (pageWords.size < 5) return sections;
+  const kept = sections.filter((section) => {
+    const evidence = (section.evidence || "").trim();
+    if (evidence) return pageCoverage(evidence, pageWords) >= 0.7;
+    const elements = (section.keyElements || []).filter((e) => e.trim());
+    if (!elements.length) return pageCoverage(section.summary, pageWords) >= 0.5;
+    const supported = elements.filter((e) => pageCoverage(e, pageWords) >= 0.6).length;
+    return supported / elements.length >= 0.5;
+  });
+  return kept.length ? kept : sections.slice(0, 1);
+}
+
 export function ensureArchitectureSections(
   sections: z.infer<typeof analysisSchema>["pageArchitecture"]["sections"],
   outline: PageOutline,
@@ -704,60 +759,6 @@ export function ensureArchitectureSections(
     keyElements: [h.text].filter(Boolean),
   }));
 
-  // Infer extra blocks from plain text when still Hero-only
-  if (synthesized.length < 4 && outline.plainText.length > 400) {
-    const extras: Array<{ name: string; purpose: string; summary: string; keyElements: string[] }> = [];
-    const text = outline.plainText;
-    if (/testimonial|review|client|customer|"[^"]{20,}"/i.test(text)) {
-      extras.push({
-        name: "Social proof",
-        purpose: "Build trust with proof",
-        summary: "Page includes social proof or customer language.",
-        keyElements: ["Social proof"],
-      });
-    }
-    if (/faq|frequently asked|questions?/i.test(text)) {
-      extras.push({
-        name: "FAQ",
-        purpose: "Answer objections",
-        summary: "Page includes FAQ-style content.",
-        keyElements: ["FAQ"],
-      });
-    }
-    if (outline.ctas.length) {
-      extras.push({
-        name: "Final CTA",
-        purpose: "Convert the visitor",
-        summary: `Primary CTA candidates: ${outline.ctas.slice(0, 3).join(", ")}`,
-        keyElements: outline.ctas.slice(0, 3),
-      });
-    }
-    if (/feature|benefit|how it works|24\/7|ai-|system/i.test(text)) {
-      extras.push({
-        name: "Features",
-        purpose: "Explain the solution",
-        summary: "Page describes product capabilities or benefits.",
-        keyElements: ["Features"],
-      });
-    }
-    const base =
-      synthesized.length > 0
-        ? synthesized
-        : [
-            {
-              name: "Hero",
-              purpose: "Introduce the offer and capture attention",
-              summary: outline.heroCandidates[0] || outline.metaDescription || "Hero",
-              keyElements: outline.heroCandidates.slice(0, 2),
-            },
-          ];
-    const merged = [...base];
-    for (const extra of extras) {
-      if (!merged.some((s) => s.name === extra.name)) merged.push(extra);
-    }
-    if (merged.length > sections.length) return merged.slice(0, 12);
-  }
-
   if (synthesized.length > sections.length) return synthesized;
   return sections;
 }
@@ -778,17 +779,21 @@ async function analyzeWithLlm(input: {
 
   const userPayload = {
     landingUrl: input.url,
-    pageTitle: input.outline.title,
-    ogTitle: input.outline.ogTitle,
-    metaDescription: input.outline.metaDescription,
+    pageMetadata: {
+      note: "Not visible on the page. Never a section.",
+      title: input.outline.title,
+      ogTitle: input.outline.ogTitle,
+      metaDescription: input.outline.metaDescription,
+    },
     heroCandidates: input.outline.heroCandidates,
     headingOutline: input.outline.headingOutline,
     primaryCtas: input.outline.ctas,
     adPlatform: input.platform || null,
     adHeadline: input.adTitle || null,
     adBody: input.adBody || null,
-    // Cap body text; outline already carries structure
-    pageText: input.outline.plainText.slice(0, 14_000),
+    // Cap body text; outline already carries structure. Visible text only, so
+    // hidden structured data cannot become a section.
+    visiblePageText: (input.outline.bodyText ?? input.outline.plainText).slice(0, 14_000),
     hasScreenshots: Boolean(input.screenshots?.length),
     searchedService: input.serviceContext
       ? {
@@ -801,7 +806,7 @@ async function analyzeWithLlm(input: {
         "Prefer the H1 / hero text visible in the screenshot and heroCandidates. Do NOT concatenate brand+product+tagline. Do NOT copy adHeadline unless the page has no hero text.",
       cta: "primaryOffer.cta must match the primary CTA button text visible in the fold screenshot / primaryCtas (e.g. Book a strategy call) — not a different lead magnet.",
       architecture:
-        "Map EVERY major visible band from the screenshots + headingOutline into sections (5–12 typical). Never return only Hero. Use screenshot section rhythm when headings are sparse.",
+        "Map each visible band of the page from the screenshots + headingOutline into a section, top to bottom. Only what is really there; a short page has few sections. Each section quotes visiblePageText in evidence.",
     },
   };
   const userText = JSON.stringify(userPayload, null, 2);
@@ -932,19 +937,22 @@ async function analyzeWithLlm(input: {
 
   let data = parsed.data;
 
-  // If architecture is still thin, ask once more for sections only
+  // A long page that came back with very few sections: ask once more, for
+  // sections only. Short pages keep what they have — padding them invents
+  // sections the page does not have.
+  const visibleText = input.outline.bodyText ?? input.outline.plainText;
   if (
-    data.pageArchitecture.sections.length < 5 &&
-    (input.outline.headingOutline.length >= 2 ||
-      input.outline.plainText.length >= 500)
+    data.pageArchitecture.sections.length < 3 &&
+    input.outline.headingOutline.length >= 6 &&
+    visibleText.length >= 3_000
   ) {
-    const expandSystem = `Expand landing-page architecture into 5–12 ordered sections from the heading outline and page evidence. Never return only Hero. Return ONLY JSON: { "sections": [{ "name", "purpose", "summary", "keyElements": string[] }] }`;
+    const expandSystem = `List the sections that are visibly on this landing page, top to bottom, from the heading outline and page text. Only sections that are really there; never add typical sections the page lacks. Each section quotes the page text in "evidence" (≤20 words, copied exactly). Return ONLY JSON: { "sections": [{ "name", "purpose", "summary", "keyElements": string[], "evidence": string }] }`;
     const expandUser = JSON.stringify(
       {
         headingOutline: input.outline.headingOutline,
         heroCandidates: input.outline.heroCandidates,
         primaryCtas: input.outline.ctas,
-        pageTextExcerpt: input.outline.plainText.slice(0, 8_000),
+        visiblePageText: visibleText.slice(0, 8_000),
         existingSections: data.pageArchitecture.sections,
       },
       null,
@@ -1005,7 +1013,7 @@ async function analyzeWithLlm(input: {
     input.adTitle,
   );
   const sections = ensureArchitectureSections(
-    data.pageArchitecture.sections,
+    groundArchitectureSections(data.pageArchitecture.sections, visibleText),
     input.outline,
   );
   const cta =
