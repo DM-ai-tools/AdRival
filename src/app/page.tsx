@@ -575,7 +575,21 @@ export default function HomePage() {
 
   useEffect(() => {
     let params = new URLSearchParams(window.location.search);
-    if (![...params.keys()].length) {
+    // A refresh starts a fresh run on the same screen; links, Back and
+    // returning from another page still reopen the run they point to.
+    const nav = performance.getEntriesByType?.("navigation")[0] as
+      | PerformanceNavigationTiming
+      | undefined;
+    if (nav?.type === "reload") {
+      const mode = params.get("mode");
+      params = new URLSearchParams(mode ? { mode } : {});
+      window.history.replaceState(null, "", params.toString() ? `?${params}` : window.location.pathname);
+      try {
+        sessionStorage.removeItem(LAST_VIEW_KEY);
+      } catch {
+        /* storage unavailable */
+      }
+    } else if (![...params.keys()].length) {
       try {
         const saved = sessionStorage.getItem(LAST_VIEW_KEY);
         if (saved) params = new URLSearchParams(saved);
