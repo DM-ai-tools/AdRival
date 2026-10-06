@@ -56,6 +56,7 @@ import {
 } from "./adMappers";
 import { enrichLookupPageMetrics } from "./lookupEnrichment";
 import { linkedInCountriesFromGeo } from "../geo";
+import { ownBusinessCheck } from "./ownBusiness";
 
 const MAX_LI_PAGES = 5;
 const MAX_COMPANY_COUNT_PAGES = 3;
@@ -125,6 +126,7 @@ export async function runLinkedInSearch(
   const businessUrl =
     (options?.businessUrl || businessProfile?.url || "").trim() || null;
   const liCountries = linkedInCountriesFromGeo(geo);
+  const isOwnBusiness = ownBusinessCheck(businessProfile, businessUrl);
   const job: SearchJob = {
     id: jobId,
     keyword: keywords.join(", "),
@@ -306,6 +308,18 @@ export async function runLinkedInSearch(
 
           const pool = pageAds;
           const primary = pickBestLinkedInCandidate(pool);
+          // The client's own company shows up in its own keyword searches.
+          if (
+            isOwnBusiness({
+              pageName: primary.pageName,
+              urls: pool.map((a) => a.landingPageUrl),
+            })
+          ) {
+            job.progress.rejected += 1;
+            job.progress.message = `Skipped ${primary.pageName}: this is your client's own business`;
+            saveJobProgress(job);
+            continue;
+          }
           job.progress.message = `AI reviewing ${primary.pageName} (${pool.length} ads)…`;
           saveJobProgress(job);
 

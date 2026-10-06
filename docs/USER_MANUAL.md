@@ -169,8 +169,10 @@ These rules are applied before the keyword research. They make it less likely th
 
 | Choice | What it does |
 | --- | --- |
-| Company locations (city/suburb) | Prefers the cities on the client’s site, but still shows other relevant advertisers if needed. If a keyword already names a suburb, that place is preferred. Advertisers from elsewhere are flagged rather than dropped. |
+| City / suburb (near the business) | Searches the suburbs within a few km of the client first (the range is set during website analysis for the type of business), then a wider radius, then the state, then the whole country, stopping as soon as 10 competitors are found. Local searches accept advertisers with only a few ads. |
 | Country-wide | Ignores the site’s city list and uses the whole country you pick next. |
+
+After **Analyse website**, the option that suits the business is preselected and marked *suggested*, with the reason (for example, dental patients choose a clinic nearby). You can still pick the other one. For Google and YouTube, only advertisers whose ads are shown in the chosen country are kept.
 
 Then pick the **Country to search ads in**. This is the market the ad library searches. It does not replace a city named in a keyword.
 

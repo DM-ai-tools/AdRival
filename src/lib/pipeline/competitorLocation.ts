@@ -98,14 +98,32 @@ function normPlace(s: string | null | undefined): string {
     .trim();
 }
 
+/**
+ * Words shared by many unrelated places: "Pakenham South" must not match
+ * "New South Wales", nor "Officer South" match "South Australia".
+ */
+const GENERIC_PLACE_WORDS = new Set([
+  "south", "north", "east", "west", "upper", "lower", "new", "old", "mount",
+  "saint", "port", "point", "central", "park", "hill", "hills", "heights",
+  "beach", "lake", "lakes", "creek", "river", "vale", "valley", "wales",
+  "city", "town", "gardens", "bay", "island", "springs", "meadows", "farm",
+  "road", "street", "highway", "shop", "level", "unit", "suite", "australia",
+  "united", "states", "kingdom", "zealand",
+]);
+
+/** Whole-word containment, so "officer" does not match "officeworks". */
+function containsPlace(hay: string, needle: string): boolean {
+  return needle.length >= 3 && ` ${hay} `.includes(` ${needle} `);
+}
+
 function placesMatch(a: string, b: string): boolean {
   if (!a || !b) return false;
   if (a === b) return true;
-  if (a.length >= 3 && b.includes(a)) return true;
-  if (b.length >= 3 && a.includes(b)) return true;
+  if (containsPlace(b, a) || containsPlace(a, b)) return true;
   // token overlap (e.g. "ballarat central" vs "ballarat")
-  const ta = new Set(a.split(" ").filter((t) => t.length >= 3));
-  const tb = b.split(" ").filter((t) => t.length >= 3);
+  const keep = (t: string) => t.length >= 3 && !GENERIC_PLACE_WORDS.has(t);
+  const ta = new Set(a.split(" ").filter(keep));
+  const tb = b.split(" ").filter(keep);
   for (const t of tb) {
     if (ta.has(t)) return true;
   }
@@ -305,6 +323,44 @@ If unknown, null the fields and confidence "low". Do not invent.`,
   }
 }
 
+/**
+ * Street addresses name places too: "179 Victoria St, Potts Point NSW" is not
+ * in Victoria and "200 Pakenham Street, Echuca" is not in Pakenham. A numbered
+ * street (house number, one to three words, street type) is dropped before
+ * matching.
+ */
+const STREET_ADDRESS =
+  /\b\d+[a-z]?(?:\s*[-/]\s*\d+[a-z]?)*\s+(?:[a-z'.]+\s+){1,3}?(?:st|street|rd|road|ave|avenue|av|hwy|highway|dr|drive|pde|parade|cres|crescent|ct|court|pl|place|ln|lane|blvd|boulevard|way|tce|terrace|cl|close|gr|grove|cct|circuit|esp|esplanade|sq|square|bvd|mall|walk)\b\.?/gi;
+
+export function withoutStreetAddress(value: string | null | undefined): string {
+  return (value || "").replace(STREET_ADDRESS, " ");
+}
+
+/** State names and their short forms, both ways ("victoria" ↔ "vic"). */
+const STATE_ALIASES: Record<string, string> = {
+  victoria: "vic",
+  "new south wales": "nsw",
+  queensland: "qld",
+  "south australia": "sa",
+  "western australia": "wa",
+  tasmania: "tas",
+  "northern territory": "nt",
+  "australian capital territory": "act",
+  california: "ca",
+  texas: "tx",
+  florida: "fl",
+  "new york": "ny",
+  ontario: "on",
+  "british columbia": "bc",
+};
+
+function stateForms(region: string): string[] {
+  const r = normPlace(region);
+  if (!r) return [];
+  const full = Object.keys(STATE_ALIASES).find((k) => k === r || STATE_ALIASES[k] === r);
+  return full ? [full, STATE_ALIASES[full]] : [r];
+}
+
 function applyTargetMatch(
   resolved: ResolvedCompetitorLocation,
   targets: BusinessLocation[],
@@ -319,9 +375,9 @@ function applyTargetMatch(
     };
   }
 
-  const city = normPlace(resolved.locationCity);
-  const suburb = normPlace(resolved.locationSuburb);
-  const label = normPlace(resolved.locationLabel);
+  const city = normPlace(withoutStreetAddress(resolved.locationCity));
+  const suburb = normPlace(withoutStreetAddress(resolved.locationSuburb));
+  const label = normPlace(withoutStreetAddress(resolved.locationLabel));
   const regionBlob = `${suburb} ${city} ${label}`.trim();
   const resolvedCountry = normPlace(resolved.locationCountry);
 
@@ -344,7 +400,9 @@ function applyTargetMatch(
           placesMatch(label, tCity) ||
           placesMatch(suburb, tCity) ||
           placesMatch(regionBlob, tCity))) ||
-      (tRegion && placesMatch(regionBlob, tRegion)) ||
+      (tRegion &&
+        // A state matches by name or short form as a whole word ("VIC 3810").
+        stateForms(t.region || "").some((form) => containsPlace(regionBlob, form))) ||
       (hay.length >= 4 && placesMatch(regionBlob, hay))
     ) {
       matched = true;
@@ -960,4 +1018,48 @@ export async function enrichRunFirecrawlLocations(
     else failed += 1;
   }
   return { updated, skipped, failed };
+}
+
+/**
+ * Where a competitor actually is, before a city/suburb search accepts it:
+ * the Facebook page / LinkedIn address first, then a web search for the
+ * business's address. Null when neither finds a place.
+ */
+export async function lookupCompetitorPlace(input: {
+  pageName: string;
+  facebookUrl?: string | null;
+  linkedinUrl?: string | null;
+  website?: string | null;
+  landingPageUrl?: string | null;
+  countryHint?: string | null;
+}): Promise<ResolvedCompetitorLocation | null> {
+  const sv = await fromSociavault({
+    facebookUrl: input.facebookUrl,
+    linkedinUrl: input.linkedinUrl,
+  });
+  if (sv && (sv.locationLabel || sv.locationCity)) return sv;
+  try {
+    const fc = await fromFirecrawlSearch({
+      pageName: input.pageName,
+      website: input.website,
+      landingPageUrl: input.landingPageUrl,
+      domain: hostFromUrl(input.website || input.landingPageUrl),
+      countryHint: input.countryHint,
+    });
+    if (fc && (fc.locationLabel || fc.locationCity)) {
+      return { ...fc, locationSource: "firecrawl" as CompetitorLocationSource };
+    }
+  } catch (err) {
+    console.warn("[location] address web search failed", (err as Error).message);
+  }
+  return null;
+}
+
+/** Matches a looked-up place against the places a search currently counts as local. */
+export function matchPlaceToTargets(
+  place: ResolvedCompetitorLocation,
+  targets: BusinessLocation[],
+  geoMode: SearchGeoMode,
+): ResolvedCompetitorLocation {
+  return applyTargetMatch(place, targets, geoMode);
 }

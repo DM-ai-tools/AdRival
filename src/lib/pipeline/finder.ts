@@ -30,9 +30,19 @@ import {
 } from "../db";
 import {
   cheapLocationFromText,
+  lookupCompetitorPlace,
+  matchPlaceToTargets,
+  type ResolvedCompetitorLocation,
   locationRankScore,
 } from "./competitorLocation";
 import { compactGeoSearchQueries } from "./keywordSuggestions";
+import { ownBusinessCheck } from "./ownBusiness";
+import {
+  buildSearchRings,
+  placesUpToRing,
+  ringSearchQueries,
+  serviceAnchors,
+} from "./searchRings";
 import type { SearchDispatchOptions } from "./searchOptions";
 import {
   buildGuardrailContext,
@@ -69,9 +79,27 @@ const REVIEW_AHEAD = 3;
  * ran out short of the target: from then on the review is relaxed and a
  * landing page is not required, so a small market still yields a full list.
  */
-function currentThresholds(acceptedCount: number, platform: AdPlatform, widened = false) {
+function currentThresholds(
+  acceptedCount: number,
+  platform: AdPlatform,
+  widened = false,
+  local = false,
+) {
   // Keep LLM strict early; only relax after we have a solid local/relevant core
   const relaxedLlm = widened || acceptedCount >= 5;
+
+  // City/suburb searches: local rivals run few ads, so any live ad counts,
+  // with no run-time or landing-page requirement. Relevance is still reviewed.
+  if (local) {
+    return {
+      minDays: 0,
+      minActiveAds: 1,
+      requireDaysGreaterThan: false,
+      skipDuration: true,
+      relaxedLlm,
+      requireLanding: false,
+    };
+  }
 
   if (platform !== "facebook") {
     const t = getPlatformAdThresholds(platform);
@@ -326,6 +354,25 @@ export async function runCompetitorSearch(
   const selectedCategory = options?.selectedCategory || null;
   const preferLocalGeo =
     geoMode === "company_locations" || geoMode === "keyword_location";
+  // City/suburb search: nearest ring first, widening ring by ring while short.
+  const rings = preferLocalGeo && targetLocations.length > 0
+    ? buildSearchRings(businessProfile, targetLocations)
+    : [];
+  const localMode = rings.length > 0;
+  let ringLevel = 0;
+  /** Places that count as local right now; grows as rings widen. */
+  let activeTargets = localMode ? placesUpToRing(rings, 0) : targetLocations;
+  const anchors = localMode
+    ? serviceAnchors(
+        // Short local phrases from the analysis ("dentist") go ahead of category names.
+        [...(businessProfile?.serviceArea?.searchTerms || []), ...(keywords.length ? keywords : [primaryKeyword])],
+        [
+          ...rings.flatMap((r) => r.places.map((p) => p.city)),
+          ...targetLocations.flatMap((l) => [l.city, l.suburb || "", l.region || ""]),
+        ],
+        selectedCategory?.label || null,
+      )
+    : [];
   const signalOptions = {
     businessProfile,
     searchKeywords: keywords,
@@ -339,6 +386,13 @@ export async function runCompetitorSearch(
     skipGuardrails: Boolean(options?.skipGuardrails),
   });
   const industrySop = getSopForContext(guardrailCtx);
+  const isOwnBusiness = ownBusinessCheck(businessProfile, businessUrl);
+  const isOwnPage = (pageAds: AdCandidate[]) =>
+    isOwnBusiness({
+      pageName: pageAds[0]?.pageName,
+      facebookUrl: pageAds.find((a) => a.pageProfileUri)?.pageProfileUri,
+      urls: pageAds.map((a) => a.landingPageUrl),
+    });
   const now = new Date().toISOString();
   const job: SearchJob = {
     id: jobId,
@@ -348,7 +402,7 @@ export async function runCompetitorSearch(
     geo,
     geoMode,
     selectedCategory,
-    targetLocations,
+    targetLocations: activeTargets,
     keywordLocation: options?.keywordLocation || null,
     countries,
     businessUrl,
@@ -400,6 +454,8 @@ export async function runCompetitorSearch(
     brand?: BrandReview;
     score: number;
     reason: "lowActiveAds" | "geoMismatch";
+    /** Address looked up by a city/suburb search, matched again as rings widen. */
+    place?: ResolvedCompetitorLocation | null;
   };
   const nearMisses: NearMiss[] = [];
   const addressLookups: Promise<void>[] = [];
@@ -418,7 +474,8 @@ export async function runCompetitorSearch(
     const seeds = Array.from(
       new Set(
         [
-          ...(keywords.length ? keywords : [primaryKeyword]),
+          // A local search going country-wide drops the place names.
+          ...(localMode ? anchors : keywords.length ? keywords : [primaryKeyword]),
           selectedCategory?.label || "",
           ...(businessProfile?.competitorKeywords || []).slice(0, 4),
         ]
@@ -467,6 +524,10 @@ export async function runCompetitorSearch(
   const matchedLocalCount = () =>
     accepted.filter((c) => c.locationStatus === "matched").length;
 
+  /** The bar right now. Past the first ring the AI review is relaxed too. */
+  const thresholdsNow = () =>
+    currentThresholds(accepted.length, platform, widened || ringLevel > 0, localMode);
+
   const bumpReason = (
     key: keyof NonNullable<JobProgress["rejectReasons"]>,
   ) => {
@@ -497,15 +558,24 @@ export async function runCompetitorSearch(
     activeCount: number,
     brandInput?: BrandReview,
     countryFallback?: SearchCountry,
+    /** Address already looked up by a city/suburb search. */
+    knownPlace?: ResolvedCompetitorLocation | null,
   ) => {
-    // 1) Cheap geo (no network) — provisional label only
-    const provisional = cheapLocationFromText({
-      pageName: primary.pageName,
-      adText: primary.fullText || primary.body,
-      landingUrl: primary.landingPageUrl,
-      targets: targetLocations,
-      geoMode,
-    });
+    // Last guard: never list the client's own business.
+    if (isOwnPage([primary, ...extras])) {
+      rejectedPages.add(pageId);
+      return;
+    }
+    // 1) Looked-up address, else cheap geo (no network) — provisional label only
+    const provisional = knownPlace
+      ? matchPlaceToTargets(knownPlace, activeTargets, geoMode)
+      : cheapLocationFromText({
+          pageName: primary.pageName,
+          adText: primary.fullText || primary.body,
+          landingUrl: primary.landingPageUrl,
+          targets: activeTargets,
+          geoMode,
+        });
 
     const sampleBody =
       primary.body ||
@@ -560,7 +630,8 @@ export async function runCompetitorSearch(
 
     // Sociavault address (FB page / LI company) so Preview shows a real location.
     // It saves itself, so the search moves on and the run waits for it at the end.
-    addressLookups.push(
+    // Skipped when the city/suburb check already looked the address up.
+    if (!knownPlace?.locationLabel && !knownPlace?.locationCity) addressLookups.push(
       import("./competitorLocation")
         .then(({ enrichCompetitorSociavaultAddress }) =>
           enrichCompetitorSociavaultAddress({
@@ -568,7 +639,7 @@ export async function runCompetitorSearch(
             facebookUrl: brand.facebookUrl || primary.pageProfileUri || null,
             linkedinUrl: brand.linkedinUrl || null,
             geoMode,
-            targetLocations,
+            targetLocations: activeTargets,
           }),
         )
         .then((loc) => {
@@ -596,15 +667,70 @@ export async function runCompetitorSearch(
     saveJob(job);
   };
 
+  /**
+   * Rivals held only for being outside the local area. Once a ring widens to
+   * cover their place they are local and are taken before new searches run.
+   */
+  const releaseHeldLocals = async (opts?: { addressUnknown?: boolean }) => {
+    for (const miss of [...nearMisses]) {
+      if (accepted.length >= TARGET_COMPETITORS || isSearchJobSuppressed(job.id)) return;
+      if (miss.reason !== "geoMismatch" || seen.has(miss.pageId)) continue;
+      if (opts?.addressUnknown) {
+        // Going country-wide: rivals whose address was not found came from
+        // place-named searches, so they go ahead of new country-wide ones.
+        if (miss.place) continue;
+      } else {
+        const geo = miss.place
+          ? matchPlaceToTargets(miss.place, activeTargets, geoMode)
+          : cheapLocationFromText({
+              pageName: miss.primary.pageName,
+              adText: [miss.primary, ...miss.extras]
+                .map((a) => `${a.title}\n${a.body}\n${a.fullText}`)
+                .join("\n"),
+              landingUrl: miss.primary.landingPageUrl,
+              targets: activeTargets,
+              geoMode,
+            });
+        if (geo.locationStatus !== "matched") continue;
+      }
+      let activeCount = miss.activeCount;
+      try {
+        activeCount = Math.max(
+          activeCount,
+          await countMetaActiveAds(miss.pageId, String(miss.primary.country || countries[0] || "US")),
+        );
+      } catch (err) {
+        if (isCreditError(err)) throw err;
+      }
+      if (activeCount < thresholdsNow().minActiveAds) continue;
+      nearMisses.splice(nearMisses.indexOf(miss), 1);
+      await acceptCompetitor(
+        miss.pageId,
+        miss.primary,
+        miss.extras,
+        miss.filter,
+        activeCount,
+        undefined,
+        miss.primary.country as SearchCountry | undefined,
+        miss.place,
+      );
+    }
+  };
+
   try {
     const preferPlaces = preferLocalGeo && targetLocations.length > 0;
-    const multiPlace = preferLocalGeo && targetLocations.length > 1;
-    const pageCap = multiPlace ? 2 : MAX_PAGES_PER_QUERY;
+    const multiPlace = !localMode && preferLocalGeo && targetLocations.length > 1;
+    // Place-named queries return few ads; spread the budget over more places.
+    const pageCap = localMode || multiPlace ? 2 : MAX_PAGES_PER_QUERY;
     const acceptSlot = multiPlace
       ? Math.max(2, Math.ceil(TARGET_COMPETITORS / Math.min(targetLocations.length, 4)))
       : TARGET_COMPETITORS;
-    let queries: string[];
-    if (preferPlaces) {
+    let queries: string[] = localMode
+      ? ringSearchQueries({ anchors, ring: rings[0], maxQueries: 8 })
+      : [];
+    if (queries.length) {
+      // City/suburb search: the nearest ring's place-named queries.
+    } else if (preferPlaces) {
       queries = compactGeoSearchQueries({
         keywords: keywords.length ? keywords : [primaryKeyword],
         locations: targetLocations,
@@ -620,9 +746,11 @@ export async function runCompetitorSearch(
     }
     setProgress(job, {
       stage: "searching_ads",
-      message: `Searching ${platform} Ad Library with ${queries.length} ${
-        preferPlaces ? "location" : ""
-      } queries…`.replace("  ", " "),
+      message: localMode
+        ? `Searching ${platform} Ad Library ${rings[0].label} (${queries.length} local queries)…`
+        : `Searching ${platform} Ad Library with ${queries.length} ${
+            preferPlaces ? "location" : ""
+          } queries…`.replace("  ", " "),
     });
 
     let pageBudget = 0;
@@ -635,21 +763,59 @@ export async function runCompetitorSearch(
     outer: for (let qi = 0; ; qi += 1) {
       if (qi >= queryQueue.length) {
         if (
-          widened ||
           accepted.length >= TARGET_COMPETITORS ||
           isSearchJobSuppressed(job.id) ||
           pageBudget >= MAX_SEARCH_PAGES
         ) {
           break;
         }
+        // City/suburb search: widen to the next ring before going country-wide.
+        let nextRingQueries: string[] = [];
+        while (!nextRingQueries.length && localMode && !widened && ringLevel < rings.length - 1) {
+          ringLevel += 1;
+          activeTargets = placesUpToRing(rings, ringLevel);
+          job.targetLocations = activeTargets;
+          for (const id of strictRejected) {
+            rejectedPages.delete(id);
+            analyzedPages.delete(id);
+          }
+          strictRejected.clear();
+          setProgress(job, {
+            stage: "expanding_queries",
+            message: `Found ${accepted.length} of ${TARGET_COMPETITORS} so far. Widening the search ${rings[ringLevel].label}…`,
+          });
+          await releaseHeldLocals();
+          if (accepted.length >= TARGET_COMPETITORS) break outer;
+          nextRingQueries = ringSearchQueries({
+            anchors,
+            ring: rings[ringLevel],
+            maxQueries: 8,
+          }).filter((q) => !ranQueries.has(q.toLowerCase()));
+        }
+        if (nextRingQueries.length) {
+          queryQueue.push(...nextRingQueries);
+          setProgress(job, {
+            stage: "searching_ads",
+            message: `Searching ${rings[ringLevel].label} (${nextRingQueries.length} queries)…`,
+          });
+          qi -= 1;
+          continue;
+        }
+        if (widened) break;
         widened = true;
+        if (localMode) {
+          await releaseHeldLocals({ addressUnknown: true });
+          if (accepted.length >= TARGET_COMPETITORS) break;
+        }
         for (const id of strictRejected) {
           rejectedPages.delete(id);
           analyzedPages.delete(id);
         }
         setProgress(job, {
           stage: "expanding_queries",
-          message: `Found ${accepted.length} of ${TARGET_COMPETITORS} so far. Widening the search…`,
+          message: localMode
+            ? `Found ${accepted.length} of ${TARGET_COMPETITORS} in the local area. Searching country-wide…`
+            : `Found ${accepted.length} of ${TARGET_COMPETITORS} so far. Widening the search…`,
         });
         const more = (await widenSearchQueries())
           .filter((q) => !ranQueries.has(q.toLowerCase()))
@@ -665,7 +831,7 @@ export async function runCompetitorSearch(
       ranQueries.add(query.toLowerCase());
       // Widened queries are not shared between places, so each may fill any slot.
       const querySlot = qi < planned ? acceptSlot : TARGET_COMPETITORS;
-      const queryPageCap = qi < planned ? pageCap : MAX_PAGES_PER_QUERY;
+      const queryPageCap = qi < planned || (localMode && !widened) ? pageCap : MAX_PAGES_PER_QUERY;
       const acceptedAtStart = accepted.length;
           for (const country of countries as SearchCountry[]) {
         let cursor: string | null = null;
@@ -720,7 +886,7 @@ export async function runCompetitorSearch(
             break;
           }
 
-          const thresholds = currentThresholds(accepted.length, platform, widened);
+          const thresholds = thresholdsNow();
           const byPage = new Map<string, AdCandidate[]>();
 
           for (const raw of ads) {
@@ -785,7 +951,7 @@ export async function runCompetitorSearch(
                   pageName: pageAds[0]?.pageName,
                   adText: blob,
                   landingUrl: pageAds[0]?.landingPageUrl,
-                  targets: targetLocations,
+                  targets: activeTargets,
                   geoMode,
                 }).locationStatus,
               );
@@ -825,7 +991,7 @@ export async function runCompetitorSearch(
             );
           const prefetchReviews = (fromIndex: number) => {
             if (accepted.length >= TARGET_COMPETITORS || isSearchJobSuppressed(job.id)) return;
-            const thrNow = currentThresholds(accepted.length, platform, widened);
+            const thrNow = thresholdsNow();
             for (
               let j = fromIndex + 1;
               j < pageEntries.length && j <= fromIndex + REVIEW_AHEAD;
@@ -835,11 +1001,12 @@ export async function runCompetitorSearch(
               if (reviews.has(nextId)) continue;
               if (seen.has(nextId) || rejectedPages.has(nextId) || analyzedPages.has(nextId)) continue;
               if (!precheckPage(nextId, nextAds).ok) continue;
+              if (isOwnPage(nextAds)) continue;
               const nextPrimary =
                 pickSampleAd(nextAds, {
                   requireLanding: thrNow.requireLanding,
                   signalOptions,
-                  targets: targetLocations,
+                  targets: activeTargets,
                   geoMode,
                 }) || (!thrNow.requireLanding ? richestAd(nextAds) : null);
               if (!nextPrimary) continue;
@@ -876,12 +1043,21 @@ export async function runCompetitorSearch(
             }
 
             analyzedPages.add(pageId);
-            const thr = currentThresholds(accepted.length, platform, widened);
+            // The client's own page shows up in its own keyword searches.
+            if (isOwnPage(pageAds)) {
+              rejectedPages.add(pageId);
+              bumpReason("guardrailReject");
+              setProgress(job, {
+                message: `Skipped ${pageAds[0]?.pageName || "a page"}: this is your client's own business`,
+              });
+              continue;
+            }
+            const thr = thresholdsNow();
             const primary =
               pickSampleAd(pageAds, {
                 requireLanding: thr.requireLanding,
                 signalOptions,
-                targets: targetLocations,
+                targets: activeTargets,
                 geoMode,
               }) ||
               (!thr.requireLanding ? richestAd(pageAds) : null);
@@ -997,12 +1173,50 @@ export async function runCompetitorSearch(
               pageName: primary.pageName,
               adText: pageText,
               landingUrl: primary.landingPageUrl,
-              targets: targetLocations,
+              targets: activeTargets,
               geoMode,
             });
 
+            // City/suburb search: an ad rarely names its suburb and the Ad
+            // Library is not location-filtered, so the business's real address
+            // decides. Only a business inside the current rings is taken now.
+            let knownPlace: ResolvedCompetitorLocation | null = null;
+            if (localMode && !widened) {
+              setProgress(job, { message: `Checking where ${primary.pageName} is located…` });
+              const looked = await lookupCompetitorPlace({
+                pageName: primary.pageName,
+                facebookUrl: primary.pageProfileUri,
+                website: primary.landingPageUrl,
+                landingPageUrl: primary.landingPageUrl,
+                countryHint: country,
+              });
+              const place = looked ? matchPlaceToTargets(looked, activeTargets, geoMode) : cheapGeo;
+              if (place.locationStatus !== "matched") {
+                nearMisses.push({
+                  pageId,
+                  primary,
+                  extras,
+                  filter,
+                  activeCount: 0,
+                  // No address found: possibly local, so ahead of known far-away ones.
+                  score: filter.relevanceScore + (looked ? 0 : 0.5),
+                  reason: "geoMismatch",
+                  place: looked,
+                });
+                setProgress(job, {
+                  message: `Holding ${primary.pageName}: ${
+                    looked
+                      ? `based in ${looked.locationLabel || looked.locationCity}`
+                      : "address not found"
+                  }, not ${rings[ringLevel].label}`,
+                });
+                continue;
+              }
+              knownPlace = looked;
+            }
+
             // Prefer locals: hold clear geo mismatches until the fill pass
-            if (preferLocalGeo && cheapGeo.locationStatus === "mismatch") {
+            if (preferLocalGeo && !widened && !localMode && cheapGeo.locationStatus === "mismatch") {
               nearMisses.push({
                 pageId,
                 primary,
@@ -1071,6 +1285,7 @@ export async function runCompetitorSearch(
               activeCount,
               undefined,
               country,
+              knownPlace,
             );
           }
 
@@ -1083,12 +1298,12 @@ export async function runCompetitorSearch(
     if (accepted.length < TARGET_COMPETITORS && nearMisses.length > 0) {
       setProgress(job, {
         stage: "filling_quota",
-        message: `Filling remaining slots from ${nearMisses.length} held candidates (prefer geo-local, ≥${currentThresholds(accepted.length, platform, widened).minActiveAds} ads)…`,
+        message: `Filling remaining slots from ${nearMisses.length} held candidates (prefer geo-local, ≥${thresholdsNow().minActiveAds} ads)…`,
       });
 
       const fillFrom = async (pool: NearMiss[], minActiveAds?: number) => {
         const ranked = [...pool].sort((a, b) => b.score - a.score);
-        const floor = minActiveAds ?? currentThresholds(accepted.length, platform, widened).minActiveAds;
+        const floor = minActiveAds ?? thresholdsNow().minActiveAds;
         for (const miss of ranked) {
           if (accepted.length >= TARGET_COMPETITORS) break;
           if (seen.has(miss.pageId) || rejectedPages.has(miss.pageId)) continue;
@@ -1118,6 +1333,7 @@ export async function runCompetitorSearch(
             activeCount,
             undefined,
             miss.primary.country as SearchCountry | undefined,
+            miss.place,
           );
         }
       };
@@ -1144,8 +1360,11 @@ export async function runCompetitorSearch(
           ? "partial"
           : "failed";
     if (!isSearchJobSuppressed(jobId)) {
-      const geoNote =
-        preferLocalGeo && matchedLocalCount()
+      const geoNote = localMode
+        ? ` (${matchedLocalCount()} local; searched ${
+            widened ? "nearby areas, then country-wide" : rings[ringLevel].label
+          })`
+        : preferLocalGeo && matchedLocalCount()
           ? ` (${matchedLocalCount()} geo-matched)`
           : "";
       updateJob(job, {

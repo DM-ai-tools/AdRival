@@ -151,10 +151,19 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
               ? "product"
               : "service") as BusinessCategory["type"],
           }));
+      // Start from the scope the analysis suggests for this kind of business.
+      const suggestedMode: SearchGeoMode =
+        next.recommendedGeoScope === "countrywide"
+          ? "countrywide"
+          : next.recommendedGeoScope === "local"
+            ? "company_locations"
+            : geoMode;
+      setGeoMode(suggestedMode);
+
       const first = cats[0] || null;
       setSelectedCategoryId(first?.id || null);
       if (first) {
-        applyCategoryKeywords(next, first, geoMode);
+        applyCategoryKeywords(next, first, suggestedMode);
       } else {
         setKeywordsText((next.competitorKeywords || []).join("\n"));
       }
@@ -238,6 +247,22 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
   }
 
   const meta = PLATFORM_META[platform];
+  const suggestedScope = profile?.recommendedGeoScope || null;
+  const hasPlace = Boolean(profile?.locations?.length);
+  const area = profile?.serviceArea || null;
+  const homePlace = profile?.locations?.find((l) => l.isPrimary) || profile?.locations?.[0] || null;
+  const homeName = homePlace ? homePlace.suburb || homePlace.city : null;
+  const areaSteps = area && homeName
+    ? [
+        `within ~${area.radiusKm} km of ${homeName}${
+          area.nearbyAreas.length ? ` (${area.nearbyAreas.slice(0, 4).join(", ")}${area.nearbyAreas.length > 4 ? "…" : ""})` : ""
+        }`,
+        area.widerRadiusKm ? `~${area.widerRadiusKm} km${area.metro ? ` / ${area.metro}` : ""}` : null,
+        area.outerRadiusKm && area.outerAreas?.length ? `~${area.outerRadiusKm} km` : null,
+        area.region ? `${area.region}` : null,
+        "country-wide",
+      ].filter(Boolean)
+    : [];
   const deliveryLabel =
     profile?.serviceDelivery === "onsite"
       ? "Customers visit their locations"
@@ -465,7 +490,10 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
               onChange={() => onGeoModeChange("company_locations")}
               disabled={disabled || loading}
             />
-            <span>Company locations (city/suburb)</span>
+            <span>
+              City / suburb (near the business)
+              {suggestedScope === "local" ? " · suggested" : ""}
+            </span>
           </label>
           <label className="geo-radio">
             <input
@@ -475,14 +503,40 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
               onChange={() => onGeoModeChange("countrywide")}
               disabled={disabled || loading}
             />
-            <span>Country-wide</span>
+            <span>
+              Country-wide{suggestedScope === "countrywide" ? " · suggested" : ""}
+            </span>
           </label>
         </div>
-        <p className="form-hint">
-          Prefers your cities — still shows other relevant advertisers if needed.
-          If a keyword already names a city/suburb, search prioritizes that
-          location (mismatches are flagged, not dropped).
-        </p>
+        {profile?.geoScopeReason ? (
+          <p className="form-hint">
+            Suggested {suggestedScope === "local" ? "city / suburb" : "country-wide"} for{" "}
+            {profile.industry}: {profile.geoScopeReason}
+          </p>
+        ) : null}
+        {geoMode !== "countrywide" && profile && !hasPlace ? (
+          <p className="form-hint">
+            No business location was found for this website, so the search will run
+            country-wide.
+          </p>
+        ) : geoMode !== "countrywide" && areaSteps.length ? (
+          <p className="form-hint">
+            Searches {areaSteps.join(" → ")}, widening only until 10
+            competitors are found. Local searches accept advertisers with fewer
+            ads.
+          </p>
+        ) : geoMode === "countrywide" ? (
+          <p className="form-hint">
+            Searches the whole country. If a keyword names one of the business&apos;s
+            cities or suburbs, that place is searched first.
+          </p>
+        ) : (
+          <p className="form-hint">
+            Prefers your cities — still shows other relevant advertisers if needed.
+            If a keyword already names a city/suburb, search prioritizes that
+            location (mismatches are flagged, not dropped).
+          </p>
+        )}
       </fieldset>
 
       <fieldset className="geo-fieldset">
@@ -504,6 +558,11 @@ export function SearchForm({ platform, onStarted, disabled }: SearchFormProps) {
             </label>
           ))}
         </div>
+        {platform === "google" || platform === "youtube" ? (
+          <p className="form-hint">
+            Only advertisers whose Google ads are shown in this country are kept.
+          </p>
+        ) : null}
       </fieldset>
 
       <label htmlFor="keywords" className="search-label">

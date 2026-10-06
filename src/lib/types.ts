@@ -69,6 +69,26 @@ export interface BusinessLocation {
   isPrimary?: boolean;
 }
 
+/** Where the business's customers come from, set by the AI during URL analysis. */
+export interface ServiceArea {
+  /** Core radius customers travel to (or are served within), in km. */
+  radiusKm: number;
+  /** Suburbs / towns inside radiusKm, searched first. */
+  nearbyAreas: string[];
+  /** Next ring out, used when the nearby areas run short of competitors. */
+  widerRadiusKm?: number | null;
+  widerAreas: string[];
+  /** Third ring: larger suburbs/towns further out, before the whole state. */
+  outerRadiusKm?: number | null;
+  outerAreas?: string[] | null;
+  /** Metro / city the business sits in, when different from its suburb. */
+  metro?: string | null;
+  /** State / province, the last local ring before going country-wide. */
+  region?: string | null;
+  /** Short phrases local rivals advertise with, e.g. "dentist", "dental clinic". */
+  searchTerms?: string[] | null;
+}
+
 export type CompetitorLocationStatus = "matched" | "unknown" | "mismatch";
 export type CompetitorLocationSource = "sociavault" | "perplexity" | "firecrawl" | "none";
 
@@ -93,6 +113,11 @@ export interface BusinessProfile {
   locations?: BusinessLocation[] | null;
   /** ISO country code for default Ad Library market */
   primaryMarketCountry?: string | null;
+  /** Suggested competitor geography for this kind of business. */
+  recommendedGeoScope?: "local" | "countrywide" | null;
+  geoScopeReason?: string | null;
+  /** Search rings around the business, used by city/suburb searches. */
+  serviceArea?: ServiceArea | null;
   /** Brand palette extracted from the site HTML/CSS */
   brandColors?: BrandColors | null;
   /**
