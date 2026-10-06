@@ -21,6 +21,7 @@ import {
   SEARCH_COUNTRIES,
   type BusinessProfile,
   type LookupAdRecord,
+  type LookupIdentity,
   type LookupJob,
   type LookupJobProgress,
   type LookupPageCandidate,
@@ -83,9 +84,12 @@ export async function runCompetitorLookup(
   options?: {
     businessUrl?: string | null;
     businessProfile?: BusinessProfile | null;
+    /** The competitor's name, website and pages, when the lookup resolved them. */
+    identity?: LookupIdentity | null;
   },
 ) {
   const now = new Date().toISOString();
+  const identity = options?.identity || null;
   const businessUrl = (options?.businessUrl || "").trim() || null;
   const job: LookupJob = {
     id: lookupId,
@@ -121,6 +125,21 @@ export async function runCompetitorLookup(
     const companyRes = await searchCompanies(queryName);
     if (haltIfStopped(job)) return;
     const rawCompanies = extractCompanies(companyRes);
+    // The competitor's own page, known from its link or website: search by its
+    // handle too when the name search did not return it.
+    const handle = (identity?.facebookHandle || "").toLowerCase();
+    const igHandle = (identity?.instagramHandle || "").toLowerCase();
+    const isOwnPage = (c: Record<string, unknown>) =>
+      (handle && (String(c.page_alias || "").toLowerCase() === handle || String(c.page_id || "") === handle)) ||
+      (igHandle && String(c.ig_username || "").toLowerCase() === igHandle);
+    if ((handle || igHandle) && !rawCompanies.some((c) => isOwnPage(c as Record<string, unknown>))) {
+      try {
+        rawCompanies.push(...extractCompanies(await searchCompanies(handle || igHandle)));
+      } catch (err) {
+        if (isCreditError(err)) throw err;
+      }
+      if (haltIfStopped(job)) return;
+    }
     const candidates = rawCompanies
       .map((c) => toCandidate(c as Record<string, unknown>))
       .filter((c): c is LookupPageCandidate => Boolean(c));
@@ -169,9 +188,14 @@ export async function runCompetitorLookup(
         forcedCandidate;
       pickReason = `User selected alternate match "${selected.name}"`;
       pickConfidence = 1;
+    } else if (unique.find((c) => isOwnPage(c.raw as Record<string, unknown>))) {
+      selected = unique.find((c) => isOwnPage(c.raw as Record<string, unknown>))!;
+      pickReason = `Matched ${identity?.name || queryName}'s own ${handle ? "Facebook" : "Instagram"} page (${handle || igHandle}).`;
+      pickConfidence = 0.98;
     } else {
       const pick = await pickCompanyPageMatch(
-        queryName,
+        // The website tells same-name pages apart.
+        identity?.domain ? `${queryName} (website ${identity.domain})` : queryName,
         unique.map((c) => ({
           pageId: c.pageId,
           name: c.name,

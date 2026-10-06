@@ -566,6 +566,23 @@ export async function runLinkedInSearch(
   }
 }
 
+/** "WebFX, Inc." and "WebFX" are one company; "Smile Dental" and "Smile Dental Studio Sydney" may not be. */
+export function sameCompany(a: string, b: string): boolean {
+  const key = (t: string) =>
+    t
+      .toLowerCase()
+      .replace(/&/g, " and ")
+      .replace(/\b(pty|ltd|limited|inc|llc|co|corp|corporation|the|group|australia|au)\b/g, " ")
+      .replace(/[^a-z0-9]+/g, "");
+  const x = key(a);
+  const y = key(b);
+  if (!x || !y) return false;
+  if (x === y) return true;
+  const [short, long] = x.length <= y.length ? [x, y] : [y, x];
+  // A longer name that starts with the whole shorter one ("WebFX" → "WebFX Marketing").
+  return short.length >= 4 && long.startsWith(short) && short.length / long.length >= 0.35;
+}
+
 export async function runLinkedInLookup(
   lookupId: string,
   queryName: string,
@@ -627,6 +644,9 @@ export async function runLinkedInLookup(
     let pages = 0;
     const stored: LookupAdRecord[] = [];
     const seen = new Set<string>();
+    // LinkedIn's company filter is loose: a short or common name also returns
+    // other companies' ads. Only the looked-up company's ads are kept.
+    const others = new Map<string, number>();
 
     do {
       if (isLookupJobSuppressed(job.id)) return;
@@ -647,6 +667,10 @@ export async function runLinkedInLookup(
         if (!id || seen.has(id)) continue;
         seen.add(id);
         const mapped = mapLinkedInAdToCandidate(ad);
+        if (mapped.pageName && mapped.pageName !== "Unknown" && !sameCompany(mapped.pageName, name)) {
+          others.set(mapped.pageName, (others.get(mapped.pageName) || 0) + 1);
+          continue;
+        }
         const sample = sampleAdFromLinkedInCandidate(mapped);
         const record: LookupAdRecord = {
           id: uuidv4(),
@@ -713,7 +737,10 @@ export async function runLinkedInLookup(
     } else {
       job.status = "partial";
       job.progress.stage = "done";
-      job.progress.message = `No LinkedIn ads found for "${name}".`;
+      const elsewhere = [...others.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([n]) => n);
+      job.progress.message = elsewhere.length
+        ? `No LinkedIn ads from "${name}". LinkedIn returned ads from other companies (${elsewhere.join(", ")}); try the company's exact LinkedIn name or its LinkedIn page link.`
+        : `No LinkedIn ads found for "${name}".`;
     }
     saveLookupJob(job);
   } catch (err) {

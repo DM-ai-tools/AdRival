@@ -525,9 +525,30 @@ export interface LookupJobProgress {
   offersPct?: number;
 }
 
+/** Who a looked-up competitor is, worked out from a name, website or page link. */
+export interface LookupIdentity {
+  input: string;
+  inputKind: "name" | "website" | "facebook" | "instagram" | "linkedin";
+  /** Business name to show and to search by name. */
+  name: string;
+  /** Website host without www, e.g. "pushmobility.com.au". */
+  domain: string | null;
+  facebookUrl: string | null;
+  /** Facebook page handle from its link ("PushMobility"), to pick the exact page. */
+  facebookHandle: string | null;
+  instagramHandle: string | null;
+  linkedinUrl: string | null;
+  /** Company name as LinkedIn shows it. */
+  linkedinName: string | null;
+  /** How each part was found, for the lookup's progress line. */
+  notes: string[];
+}
+
 export interface LookupJob {
   id: string;
   queryName: string;
+  /** What the typed name, website or link resolved to before searching. */
+  resolvedIdentity?: LookupIdentity | null;
   platform?: import("./platforms").AdPlatform | string;
   status: JobStatus;
   progress: LookupJobProgress;

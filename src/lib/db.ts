@@ -1188,6 +1188,7 @@ function writeLookupJob(job: LookupJob): boolean {
         ownerUserId:
           job.ownerUserId !== undefined ? job.ownerUserId : existing.ownerUserId,
         spaceId: job.spaceId !== undefined ? job.spaceId : existing.spaceId,
+        resolvedIdentity: job.resolvedIdentity !== undefined ? job.resolvedIdentity : existing.resolvedIdentity,
         archivedAt:
           job.archivedAt !== undefined ? job.archivedAt : existing.archivedAt,
       };

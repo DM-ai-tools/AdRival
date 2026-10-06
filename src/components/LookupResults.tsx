@@ -786,6 +786,21 @@ export function LookupResults({
               }
             />
             <Field label="Why this page" value={job.llmReason} />
+            <Field
+              label="Looked up as"
+              value={
+                job.resolvedIdentity
+                  ? [
+                      job.resolvedIdentity.name,
+                      job.resolvedIdentity.domain,
+                      job.resolvedIdentity.facebookHandle ? `Facebook: ${job.resolvedIdentity.facebookHandle}` : null,
+                      job.resolvedIdentity.linkedinName ? `LinkedIn: ${job.resolvedIdentity.linkedinName}` : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")
+                  : null
+              }
+            />
           </dl>
 
           {others.length > 0 && (

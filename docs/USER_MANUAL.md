@@ -308,12 +308,22 @@ One strip per competitor with every offer they run, cheapest first (entry → co
 
 ## 8. Competitor lookup, step by step
 
-Use this when you already know the competitor’s name.
+Use this when you already know the competitor.
 
 1. Select the client space and platform.
 2. Open **Competitor lookup**.
-3. Type the competitor’s name. You can also paste their website to help find the right match.
+3. Type the competitor’s name, their website (for example `pushmobility.com.au`), or a link to their Facebook, Instagram or LinkedIn page.
 4. Start the lookup.
+
+The lookup first works out who the competitor is: their name, website and social pages. Then each platform is searched with what it matches best:
+
+| Platform | Searched by |
+| --- | --- |
+| Facebook / Instagram | Their own Facebook or Instagram page when it can be found; otherwise the name, with the website used to tell same-name pages apart |
+| Google / YouTube | Their website domain (Google often lists advertisers under a legal company name) |
+| LinkedIn | Their exact LinkedIn company name; ads from other companies with similar names are left out |
+
+**Looked up as** in the results shows what your text was matched to.
 
 If several names are close, you will see **other name matches considered**. You can fetch ads for one of those instead of the first guess.
 

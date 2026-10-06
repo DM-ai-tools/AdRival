@@ -77,7 +77,7 @@ export function LookupForm({ platform, onStarted, disabled }: LookupFormProps) {
   return (
     <form onSubmit={handleSubmit} className="search-form">
       <label htmlFor="competitor-name" className="search-label">
-        Competitor name — {meta.label}
+        Competitor name, website or page link — {meta.label}
       </label>
       <div className="search-row">
         <input
@@ -85,13 +85,7 @@ export function LookupForm({ platform, onStarted, disabled }: LookupFormProps) {
           type="text"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          placeholder={
-            platform === "linkedin"
-              ? 'e.g. "WebFX" or "HubSpot"'
-              : platform === "google" || platform === "youtube"
-                ? 'e.g. "Nike" or "lululemon"'
-                : 'e.g. "Single Grain"'
-          }
+          placeholder='e.g. "Push Mobility", pushmobility.com.au or a Facebook / LinkedIn page link'
           className="search-input"
           disabled={disabled || loading}
           required
@@ -121,8 +115,9 @@ export function LookupForm({ platform, onStarted, disabled }: LookupFormProps) {
         disabled={disabled || loading}
       />
       <p className="form-hint">
-        Resolves the advertiser on {meta.source}, verifies the match when names
-        collide, then pulls creatives. Add your website to unlock Content + Design
+        Works out the competitor&apos;s website and pages first, then searches {meta.source} with
+        what it matches best (the exact Facebook page, the website domain on Google, the exact
+        company name on LinkedIn), then pulls creatives. Add your website to unlock Content + Design
         recreation for their landing pages.
       </p>
       {credits.data?.credits.unlimited ? (
