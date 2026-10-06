@@ -6,6 +6,7 @@ import type {
   SearchGeoMode,
   SearchJob,
 } from "@/lib/types";
+import { externalUrl } from "@/lib/externalUrl";
 
 function deliveryLabel(
   profile: BusinessProfile,
@@ -67,7 +68,7 @@ export function BusinessProfileSummary({
         </div>
         <p className="muted">
           URL saved:{" "}
-          <a href={url!} target="_blank" rel="noreferrer">
+          <a href={externalUrl(url)} target="_blank" rel="noreferrer">
             {shortUrl(url!)}
           </a>
         </p>

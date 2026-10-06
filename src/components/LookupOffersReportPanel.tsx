@@ -14,6 +14,7 @@ import type {
 } from "@/lib/types";
 import { splitLaddersByOffer } from "./OfferLadderFlow";
 import { OfferWorkspace } from "./OfferWorkspace";
+import { externalUrl } from "@/lib/externalUrl";
 
 const DASH_SECTIONS = ["overview", "creatives", "pages", "services", "ladder"] as const;
 type DashSection = (typeof DASH_SECTIONS)[number];
@@ -76,7 +77,7 @@ function AdLeafCard({ ad }: { ad: LookupOfferAdLeaf }) {
       {ad.landingPageUrl ? (
         <a
           className="offers-card-link"
-          href={ad.landingPageUrl}
+          href={externalUrl(ad.landingPageUrl)}
           target="_blank"
           rel="noreferrer"
         >
@@ -563,7 +564,7 @@ export function LookupOffersDashboard({
                       </div>
                       {o.urls?.[0] ? (
                         <p className="muted offers-pill-sub">
-                          <a href={o.urls[0]} target="_blank" rel="noreferrer">
+                          <a href={externalUrl(o.urls[0])} target="_blank" rel="noreferrer">
                             {shortUrl(o.urls[0]).slice(0, 64)}
                           </a>
                         </p>
@@ -653,7 +654,7 @@ export function LookupOffersDashboard({
                     {c.landingPageUrl ? (
                       <a
                         className="offers-card-link"
-                        href={c.landingPageUrl}
+                        href={externalUrl(c.landingPageUrl)}
                         target="_blank"
                         rel="noreferrer"
                       >
@@ -741,7 +742,7 @@ export function LookupOffersDashboard({
                   <div>
                     <h2>Page offer</h2>
                     <a
-                      href={selectedPage.url}
+                      href={externalUrl(selectedPage.url)}
                       target="_blank"
                       rel="noreferrer"
                     >
@@ -909,7 +910,7 @@ export function LookupOffersDashboard({
                       >
                         <div className="offers-meta-row">
                           <a
-                            href={lp.url}
+                            href={externalUrl(lp.url)}
                             target="_blank"
                             rel="noreferrer"
                           >

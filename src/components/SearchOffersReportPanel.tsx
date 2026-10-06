@@ -22,6 +22,7 @@ import {
   offerFitsSearchedService,
   searchedServiceFocus,
 } from "@/lib/pipeline/offerServiceFocus";
+import { externalUrl } from "@/lib/externalUrl";
 
 function shortUrl(url: string): string {
   return url.replace(/^https?:\/\//i, "").replace(/\/$/, "");
@@ -155,7 +156,7 @@ function AdCopyBlock({
       <div className="offers-meta-row">
         {cta ? <span>CTA: {cta}</span> : null}
         {landingPageUrl ? (
-          <a href={landingPageUrl} target="_blank" rel="noreferrer">
+          <a href={externalUrl(landingPageUrl)} target="_blank" rel="noreferrer">
             {shortUrl(landingPageUrl)}
           </a>
         ) : null}
@@ -1052,7 +1053,7 @@ export function SearchOffersDashboard({
                     <div>
                       <h2>Page offer</h2>
                       <a
-                        href={selectedPage.url}
+                        href={externalUrl(selectedPage.url)}
                         target="_blank"
                         rel="noreferrer"
                       >
@@ -1466,7 +1467,7 @@ export function SearchOffersDashboard({
                     {c.landingPageUrl ? (
                       <a
                         className="offers-card-link"
-                        href={c.landingPageUrl}
+                        href={externalUrl(c.landingPageUrl)}
                         target="_blank"
                         rel="noreferrer"
                       >

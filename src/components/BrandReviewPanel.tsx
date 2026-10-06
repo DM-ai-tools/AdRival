@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { BrandReview, CompetitorRecord, JobProgress, SocialPlatform } from "@/lib/types";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { externalUrl } from "@/lib/externalUrl";
 
 function fmtMetric(present: boolean, n?: number | null): string {
   if (!present) return "Not present";
@@ -43,7 +44,7 @@ function MetricCell({ b, platform, present, n }: { b: BrandReview; platform: Soc
   return (
     <td>
       {url ? (
-        <a href={url} target="_blank" rel="noreferrer" title="Open the profile">
+        <a href={externalUrl(url)} target="_blank" rel="noreferrer" title="Open the profile">
           {text}
         </a>
       ) : (

@@ -1,6 +1,7 @@
 import type { LinkedInAd, GoogleAdCreative } from "../sociavault/client";
 import type { AdCandidate, CompetitorRecord } from "../types";
 import { daysFromDateRange, linkedInDaysRunning } from "../platforms";
+import { externalUrl } from "../externalUrl";
 
 type SampleAd = CompetitorRecord["sampleAd"];
 
@@ -33,7 +34,7 @@ export function mapLinkedInAdToCandidate(ad: LinkedInAd): AdCandidate {
     adDuration: ad.adDuration,
   });
   const cta = cleanStr(ad.cta);
-  const landing = cleanStr(ad.destinationUrl);
+  const landing = externalUrl(cleanStr(ad.destinationUrl)) || null;
   const pageId = cleanStr(ad.advertiserLinkedinPage) ||
     cleanStr(ad.advertiser) ||
     cleanStr(ad.poster) ||
@@ -100,7 +101,7 @@ export function mapGoogleCreativeToCandidate(
   const first = details?.firstShown || ad.firstShown || null;
   const last = details?.lastShown || ad.lastShown || null;
   const daysRunning = daysFromDateRange(first, last);
-  const landing = cleanStr(details?.landing);
+  const landing = externalUrl(cleanStr(details?.landing)) || null;
   const youtubeUrl = cleanStr(details?.youtubeUrl);
 
   return {

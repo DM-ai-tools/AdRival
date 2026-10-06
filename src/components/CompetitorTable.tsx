@@ -13,6 +13,7 @@ import {
 } from "@/lib/pipeline/linkGuards";
 import { PageAnalysisPanel } from "@/components/PageAnalysisPanel";
 import { ReturnLink } from "@/components/ReturnLink";
+import { externalUrl } from "@/lib/externalUrl";
 
 function countryLabel(c?: string | null) {
   if (!c) return "—";
@@ -97,7 +98,7 @@ function shortUrl(url?: string | null) {
 function LinkCell({ href, label }: { href?: string | null; label: string }) {
   if (!href) return null;
   return (
-    <a href={href} target="_blank" rel="noreferrer">
+    <a href={externalUrl(href)} target="_blank" rel="noreferrer">
       {label}
     </a>
   );
@@ -556,7 +557,7 @@ export function CompetitorTable({
                         !isGoogleAdsTransparencyUrl(ad.landingPageUrl) &&
                         !isFacebookUrl(ad.landingPageUrl) ? (
                         <a
-                          href={ad.landingPageUrl}
+                          href={externalUrl(ad.landingPageUrl)}
                           target="_blank"
                           rel="noreferrer"
                           title={ad.landingPageUrl}

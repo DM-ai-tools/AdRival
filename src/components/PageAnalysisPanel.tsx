@@ -2,6 +2,7 @@
 
 import type { ReactNode } from "react";
 import type { LandingPageOfferAnalysis } from "@/lib/types";
+import { externalUrl } from "@/lib/externalUrl";
 
 function Field({ label, value }: { label: string; value?: ReactNode }) {
   if (value == null || value === "") return null;
@@ -48,7 +49,7 @@ export function PageAnalysisPanel({
     <div className="page-analysis-panel">
       <div className="page-analysis-head">
         <h4>Offer & page details</h4>
-        <a href={analysis.analyzedUrl} target="_blank" rel="noreferrer">
+        <a href={externalUrl(analysis.analyzedUrl)} target="_blank" rel="noreferrer">
           Open page
         </a>
       </div>

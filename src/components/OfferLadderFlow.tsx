@@ -5,6 +5,7 @@ import type {
   SearchCompetitorAdRecord,
 } from "@/lib/types";
 import { offerFitsSearchedService, type ServiceFocus } from "@/lib/pipeline/offerServiceFocus";
+import { externalUrl } from "@/lib/externalUrl";
 
 function shortUrl(url: string): string {
   return url.replace(/^https?:\/\//i, "").replace(/\/$/, "");
@@ -231,7 +232,7 @@ export function OfferLadderFlow({ ladder }: { ladder: LookupCoreOfferLadder }) {
               <p className="muted">{step.competitors.join(", ")}</p>
             ) : null}
             {step.landingPageUrl ? (
-              <a href={step.landingPageUrl} target="_blank" rel="noreferrer">
+              <a href={externalUrl(step.landingPageUrl)} target="_blank" rel="noreferrer">
                 {shortUrl(step.landingPageUrl)}
               </a>
             ) : null}

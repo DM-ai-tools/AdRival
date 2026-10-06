@@ -17,6 +17,7 @@ import {
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { currentReturnPath, withReturn } from "@/lib/returnTo";
 import { readUrlParam, writeUrlParams } from "@/lib/urlState";
+import { externalUrl } from "@/lib/externalUrl";
 
 interface LookupResultsProps {
   job: LookupJob;
@@ -257,7 +258,7 @@ function AdCard({
           value={
             ad.youtubeUrl || ad.landingPageUrl ? (
               <a
-                href={ad.youtubeUrl || ad.landingPageUrl || undefined}
+                href={externalUrl(ad.youtubeUrl || ad.landingPageUrl)}
                 target="_blank"
                 rel="noreferrer"
               >
@@ -273,7 +274,7 @@ function AdCard({
             label="Advertiser page"
             value={
               ad.advertiserPageUrl ? (
-                <a href={ad.advertiserPageUrl} target="_blank" rel="noreferrer">
+                <a href={externalUrl(ad.advertiserPageUrl)} target="_blank" rel="noreferrer">
                   {ad.advertiserPageUrl}
                 </a>
               ) : null

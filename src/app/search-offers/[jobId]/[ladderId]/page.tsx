@@ -18,6 +18,7 @@ import {
 } from "@/components/OfferLadderFlow";
 import { searchedServiceFocus } from "@/lib/pipeline/offerServiceFocus";
 import { readReturnPath, returnLabel, withReturn } from "@/lib/returnTo";
+import { externalUrl } from "@/lib/externalUrl";
 
 function shortUrl(url: string): string {
   return url.replace(/^https?:\/\//i, "").replace(/\/$/, "");
@@ -157,7 +158,7 @@ export default function SearchOfferLadderPage() {
               {ladder.cta ? <p>CTA: {ladder.cta}</p> : null}
               {ladder.pricing ? <p>Pricing: {ladder.pricing}</p> : null}
               {ladder.landingPageUrl ? (
-                <a href={ladder.landingPageUrl} target="_blank" rel="noreferrer">
+                <a href={externalUrl(ladder.landingPageUrl)} target="_blank" rel="noreferrer">
                   {shortUrl(ladder.landingPageUrl)}
                 </a>
               ) : null}
@@ -193,7 +194,7 @@ export default function SearchOfferLadderPage() {
                       <div className="offers-meta-row">
                         {ad.cta ? <span>CTA: {ad.cta}</span> : null}
                         {ad.landingPageUrl ? (
-                          <a href={ad.landingPageUrl} target="_blank" rel="noreferrer">
+                          <a href={externalUrl(ad.landingPageUrl)} target="_blank" rel="noreferrer">
                             {shortUrl(ad.landingPageUrl)}
                           </a>
                         ) : null}
@@ -217,7 +218,7 @@ export default function SearchOfferLadderPage() {
                       <div className="offers-meta-row">
                         {ad.ctaText ? <span>CTA: {ad.ctaText}</span> : null}
                         {ad.landingPageUrl ? (
-                          <a href={ad.landingPageUrl} target="_blank" rel="noreferrer">
+                          <a href={externalUrl(ad.landingPageUrl)} target="_blank" rel="noreferrer">
                             {shortUrl(ad.landingPageUrl)}
                           </a>
                         ) : null}
@@ -243,7 +244,7 @@ export default function SearchOfferLadderPage() {
                       <div className="offers-meta-row">
                         {r.ctaText ? <span>CTA: {r.ctaText}</span> : null}
                         {r.landingPageUrl ? (
-                          <a href={r.landingPageUrl} target="_blank" rel="noreferrer">
+                          <a href={externalUrl(r.landingPageUrl)} target="_blank" rel="noreferrer">
                             {shortUrl(r.landingPageUrl)}
                           </a>
                         ) : null}

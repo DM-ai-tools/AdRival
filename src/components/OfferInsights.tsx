@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import type { LookupCoreOfferLadder, SearchCompetitorAdRecord } from "@/lib/types";
 import { adDays, competitorLadder, marketSnapshot, rankOffers, type OfferInsight } from "@/lib/offerInsights";
 import { tierName } from "./OfferLadderFlow";
+import { externalUrl } from "@/lib/externalUrl";
 
 const TOP = 5;
 
@@ -142,7 +143,7 @@ export function OfferInsights({
                     <dt>Business website</dt>
                     <dd>
                       {row.website ? (
-                        <a href={row.website} target="_blank" rel="noopener noreferrer">
+                        <a href={externalUrl(row.website)} target="_blank" rel="noopener noreferrer">
                           {host(row.website)}
                         </a>
                       ) : (
@@ -154,7 +155,7 @@ export function OfferInsights({
                     <dt>Landing page</dt>
                     <dd>
                       {row.landingPage ? (
-                        <a href={row.landingPage} target="_blank" rel="noopener noreferrer" title={row.landingPage}>
+                        <a href={externalUrl(row.landingPage)} target="_blank" rel="noopener noreferrer" title={row.landingPage}>
                           {clip(host(row.landingPage), 48)}
                         </a>
                       ) : (

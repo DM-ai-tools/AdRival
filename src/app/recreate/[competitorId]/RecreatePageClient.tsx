@@ -14,6 +14,7 @@ import { synthesizeDocumentFromBlocks } from "@/lib/pipeline/synthesizeDocumentF
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ContentReviewWorkspace } from "./ContentReviewWorkspace";
 import { readReturnPath, returnLabel } from "@/lib/returnTo";
+import { externalUrl } from "@/lib/externalUrl";
 
 type Brand = { businessUrl: string | null; businessName: string | null };
 
@@ -839,7 +840,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
                 <>
                   {" "}
                   · for{" "}
-                  <a href={page.businessUrl} target="_blank" rel="noreferrer">
+                  <a href={externalUrl(page.businessUrl)} target="_blank" rel="noreferrer">
                     {page.businessName || page.businessUrl}
                   </a>
                 </>
@@ -1024,7 +1025,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
                 <>
                   {" "}
                   (
-                  <a href={competitor.pageAnalysis.analyzedUrl} target="_blank" rel="noreferrer">
+                  <a href={externalUrl(competitor.pageAnalysis.analyzedUrl)} target="_blank" rel="noreferrer">
                     {hostOf(competitor.pageAnalysis.analyzedUrl)}
                   </a>
                   )
@@ -1034,7 +1035,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
             <li>
               <strong>New copy</strong> written for{" "}
               {brand?.businessUrl ? (
-                <a href={brand.businessUrl} target="_blank" rel="noreferrer">
+                <a href={externalUrl(brand.businessUrl)} target="_blank" rel="noreferrer">
                   {brand.businessName || hostOf(brand.businessUrl)}
                 </a>
               ) : (

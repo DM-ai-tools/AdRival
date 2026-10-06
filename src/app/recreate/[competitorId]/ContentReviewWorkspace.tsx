@@ -9,6 +9,7 @@ import type {
   StructuredItem,
 } from "@/lib/pipeline/content/model";
 import { isExtractedSource, isPurposeSummary } from "@/lib/pipeline/content/pageIntent";
+import { externalUrl } from "@/lib/externalUrl";
 
 type SaveState = "unsaved" | "saving" | "saved" | "failed";
 
@@ -462,7 +463,7 @@ function SectionPair(props: {
           </ul>
         ) : props.sourceText ? <p>{props.sourceText}</p> : <p>No rendered text was captured for this section.</p>}
         {props.sourceGaps.map((gap) => <p key={gap} className="muted">{gap}</p>)}
-        <a href={props.sourceUrl} target="_blank" rel="noreferrer">Source page</a>
+        <a href={externalUrl(props.sourceUrl)} target="_blank" rel="noreferrer">Source page</a>
       </article>
       <article className="review-card review-ours">
         <p className="review-kicker">

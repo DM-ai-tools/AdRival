@@ -13,6 +13,7 @@ import {
   ladderSteps,
   tierName,
 } from "./OfferLadderFlow";
+import { externalUrl } from "@/lib/externalUrl";
 
 const ADS_SHOWN = 6;
 const OTHER = "Other advertisers";
@@ -278,7 +279,7 @@ export function OfferWorkspace({
                 <div>
                   <dt>Landing page</dt>
                   <dd>
-                    <a href={offer.landingPageUrl} target="_blank" rel="noreferrer">
+                    <a href={externalUrl(offer.landingPageUrl)} target="_blank" rel="noreferrer">
                       {shortUrl(offer.landingPageUrl)}
                     </a>
                   </dd>
