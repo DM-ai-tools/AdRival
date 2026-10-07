@@ -86,7 +86,7 @@ test("the full report has a sheet per section of the run, from the website analy
     origin: "https://app.example",
   });
   const wb = new ExcelJS.Workbook();
-  await wb.xlsx.load(buf);
+  await wb.xlsx.load(buf as unknown as ArrayBuffer);
   const names = wb.worksheets.map((s) => s.name);
   // No offers dashboard yet: its sheets are left out.
   assert.deepEqual(names, ["Summary", "Your website", "Search", "Competitors", "Landing page analysis", "Recreated pages"]);
