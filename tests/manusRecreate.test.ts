@@ -22,13 +22,15 @@ function fakeManus() {
   const sent: Array<{ method: string; body: Record<string, unknown> }> = [];
   let clock = 1_000;
   let polls = 0;
-  let stage: "build" | "asked" | "answered" | "delivered" | "editing" | "edited" = "build";
+  let stage: "build" | "asked" | "answered" | "fixing" | "delivered" | "editing" | "edited" = "build";
   const push = (type: string, data: Record<string, unknown>, id = `e${clock}`) => {
     clock += 1;
     events.push({ id, type, timestamp: clock, ...data });
   };
-  const html = (label: string) =>
-    `<!doctype html><html><head><title>${label}</title></head><body><header><img src="hero.png" alt="Bright Dental logo"></header><h1>${label}</h1><p>Rival Clinic</p></body></html>`;
+  // The first delivery uses one photo twice; the fixed one does not.
+  const photo = `data:image/jpeg;base64,${"P".repeat(6000)}`;
+  const html = (label: string, repeat = false) =>
+    `<!doctype html><html><head><title>${label}</title></head><body><header><img src="hero.png" alt="Bright Dental logo"></header><h1>${label}</h1><p>Rival Clinic</p><img src="${photo}" alt="Smiling patient">${repeat ? `<section><h2>Why us</h2><img src="${photo}" alt="Smiling patient again"></section>` : ""}</body></html>`;
 
   const advance = () => {
     polls += 1;
@@ -64,6 +66,18 @@ function fakeManus() {
         },
       });
       stage = "delivered";
+    } else if (stage === "fixing") {
+      push("assistant_message", {
+        assistant_message: {
+          content: "Replaced the repeated photo.",
+          attachments: [
+            { type: "file", filename: "index.html", url: "https://files.test/v1fixed/index.html", content_type: "text/html" },
+            { type: "image", filename: "hero.png", path: "/home/ubuntu/site/hero.png", url: "https://files.test/hero.png", content_type: "image/png" },
+          ],
+        },
+      });
+      push("status_update", { status_update: { agent_status: "stopped" } });
+      stage = "delivered";
     } else if (stage === "editing") {
       push("status_update", { status_update: { agent_status: "running" } });
       push("assistant_message", {
@@ -83,7 +97,7 @@ function fakeManus() {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
     if (url.hostname === "files.test") {
       if (url.pathname === "/hero.png") return new Response(Buffer.from([0x89, 0x50, 0x4e, 0x47]), { status: 200 });
-      return new Response(html(url.pathname.includes("v2") ? "Version two" : "Version one"), { status: 200 });
+      return new Response(html(url.pathname.includes("v2") ? "Version two" : "Version one", url.pathname === "/v1/index.html"), { status: 200 });
     }
     assert.equal(url.hostname, "api.manus.ai");
     const method = url.pathname.replace("/v2/", "");
@@ -101,6 +115,7 @@ function fakeManus() {
         const text = String((body.message as { content: string }).content);
         push("user_message", { user_message: { content: text } });
         if (stage === "asked") stage = "answered";
+        else if (/appear more than once/.test(text)) stage = "fixing";
         else if (stage === "delivered") stage = "editing";
         return json({ ok: true });
       }
@@ -175,6 +190,10 @@ test("the design agent builds the page, its question is answered, and a change r
     assert.equal(page.status, "completed", page.error || "");
     assert.equal(page.pipelineVersion, "manus-1");
     assert.match(page.html || "", /Version one/);
+    // The first delivery used a photo twice: it went back to the agent once, and the fixed page was kept.
+    assert.equal(fake.sent.filter((s) => s.method === "task.sendMessage" && /appear more than once/.test(JSON.stringify(s.body))).length, 1);
+    assert.equal((page.html || "").split("Smiling patient").length - 1, 1);
+    assert.ok(!page.publishBlockers?.some((b) => /same image/.test(b)));
     // The sibling image the page referred to by a relative path is now inside the page.
     assert.match(page.html || "", /src="data:image\/png;base64,/);
     // The competitor's name was left in the page: flagged, not published as ready.
@@ -290,4 +309,22 @@ test("the page stays on the searched service: the brief names it and a hero abou
   const onTopic = `<html><body><h1>Climb Google's rankings with SEO built to last</h1><p>Claim your free SEO review.</p></body></html>`;
   assert.equal(heroMissesService(offTopic, service), "SEO");
   assert.equal(heroMissesService(onTopic, service), null);
+});
+
+test("a photo used twice is caught, while the logo, icons and SVGs may repeat", async () => {
+  const { repeatedImages } = await import("../src/lib/pipeline/manus/imageCheck");
+  const photo = `data:image/jpeg;base64,${"A".repeat(6000)}`;
+  const other = `data:image/jpeg;base64,${"B".repeat(6000)}`;
+  const icon = `data:image/png;base64,${"C".repeat(200)}`;
+  const page = `<html><head><style>.hero{background:url('${other}')} .site-logo{background:url(https://client.example/logo.png)} .x-logo{background:url(https://client.example/logo.png)}</style></head><body>
+    <header><img class="logo" src="https://client.example/logo.png" alt="Client logo"></header>
+    <section><h2>Our work</h2><img src="${photo}" alt="Team at work"><img src="${icon}" alt=""><img src="https://cdn.client.example/a.jpg?w=800" alt="Office"></section>
+    <section><h2>Why us</h2><img src="${photo}" alt="Team at work again"><img src="${icon}" alt=""><img src="https://cdn.client.example/a.jpg?w=400" alt="Office small"><img src="https://client.example/badge.svg" alt=""><img src="https://client.example/badge.svg" alt=""></section>
+    <footer><img src="https://client.example/logo.png" alt="Client logo"></footer>
+  </body></html>`;
+  const repeats = repeatedImages(page);
+  assert.equal(repeats.length, 2);
+  assert.ok(repeats.some((r) => r.places.some((p) => p.includes('"Team at work"') && p.includes('"Our work"'))));
+  assert.ok(repeats.some((r) => r.places.some((p) => p.includes('"Office small"'))));
+  assert.equal(repeatedImages(page.replace(/<section><h2>Why us[\s\S]*?<\/section>/, "")).length, 0);
 });

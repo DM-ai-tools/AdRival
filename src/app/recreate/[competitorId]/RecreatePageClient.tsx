@@ -495,7 +495,8 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
               , in their brand, logo, colours and fonts
             </li>
             <li>
-              <strong>Up to 6 images</strong> made to match
+              <strong>Images</strong> you add or from your client&apos;s own website, each used once; new ones are made
+              only where none fit
             </li>
             <li>
               <strong>A finished page</strong>, checked against the competitor, to preview and download as HTML

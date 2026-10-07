@@ -73,13 +73,27 @@ export const MANUS_RESULT_SCHEMA = {
       required: ["desktop_compared", "mobile_compared", "notes"],
       additionalProperties: false,
     },
+    images: {
+      type: "array",
+      description: "Every photo or illustration on the page (not logos or icons)",
+      items: {
+        type: "object",
+        properties: {
+          section: { type: "string" },
+          source: { type: "string", enum: ["user_supplied", "client_website", "generated"] },
+          description: { type: "string" },
+        },
+        required: ["section", "source", "description"],
+        additionalProperties: false,
+      },
+    },
     unresolved: {
       type: "array",
       items: { type: "string" },
       description: "Anything the client must still supply or check (missing proof, facts, contact details)",
     },
   },
-  required: ["html_filename", "summary", "sections", "brand", "verification", "unresolved"],
+  required: ["html_filename", "summary", "sections", "brand", "verification", "images", "unresolved"],
   additionalProperties: false,
 } as const;
 
@@ -89,6 +103,7 @@ export type ManusResult = {
   sections: Array<{ competitor_section: string; rebuilt_as: string; layout_matches: boolean }>;
   brand: { logo_source: string; colours: string[]; fonts: string[] };
   verification: { desktop_compared: boolean; mobile_compared: boolean; notes: string };
+  images?: Array<{ section: string; source: "user_supplied" | "client_website" | "generated"; description: string }>;
   unresolved: string[];
 };
 
@@ -242,7 +257,7 @@ Deliver ONE self-contained HTML file named \`${MANUS_HTML_FILENAME}\`, attached 
 
 ## Tools to use
 - Firecrawl connector: use it to scrape the client's website whenever your browser misses something: the logo files, the client/partner logos shown on the site, social links, photos and contact details. Scrape the home page and the client's other relevant pages too (about, clients, case studies, portfolio, partners, contact; map the site to find them).
-- OpenAI connector: create new photos with the gpt-image-2 model (rules under "Images" below) and embed them in the page as data URIs.
+- OpenAI connector: only for an image spot the user's images and the client's website cannot fill, create a new photo with the gpt-image-2 model (rules under "Images" below) and embed it as a data URI. Many pages need no generated images at all.
 
 ${input.userFeedback ? `## The user's requests (follow these first, within the hard rules)\n${input.userFeedback}\n\n` : ""}${userAssetsSection(input)}${focusSection(input)}
 
@@ -293,9 +308,15 @@ ${clientSection(input)}
 - If the client's site has fewer logos than the competitor, show the ones it has in the same layout. Only if it has none at all, use the platform or accreditation badges it shows (for example Google Partner, Meta Business Partner); if it has none of those either, keep the strip's position with the client's real service areas or platforms as text badges. Never use the competitor's logos or logos the client does not show.
 
 ## Images
-- Where the competitor shows photography or illustrations, use the client's own suitable photos first. Otherwise create new realistic images with the OpenAI connector (model gpt-image-2): at most ${IMAGE_BUDGET} for the page, the competitor's aspect ratio for each spot, a scene that fits the client's industry and the section's message.
-- Images must not contain text, logos, brand names, UI screenshots or watermarks, and no recognisable real people.
-- Embed every created image as a data URI (compress to JPEG or WebP, about 1600px on the long side) so the page is self-contained.
+For every spot where the competitor shows a photo, product shot or illustration, take the image from the first source that has a suitable one:
+1. Images the user supplied (see "Images the user supplied", when present).
+2. The client's own website: photos, product shots, team, office, project and portfolio images on the home page and its other pages (services, about, products, gallery, case studies, blog). Find them with the browser and the Firecrawl connector, including lazy-loaded images (data-src, srcset) and CSS backgrounds, and use the largest version. Skip icons, logos, tiny thumbnails, stock-looking banners with text baked in, and anything that does not fit the section's message.
+3. Only when neither has a suitable image for that spot: create a new one with the OpenAI connector (model gpt-image-2), in the competitor's aspect ratio, a realistic scene that fits the client's industry and the section's message. At most ${IMAGE_BUDGET} generated images per page; generating none is fine when the first two sources cover the page.
+Rules for every image:
+- Each photo appears ONCE on the page. Never reuse the same image in two sections or two cards, even resized or cropped differently. If you run out of suitable images, generate a distinct one for that spot (within the limit), or else build that spot the way the competitor would look without a photo (for example a solid brand-colour panel) rather than repeating an image. Only the client's logo may appear more than once (header and footer).
+- Generated images must not contain text, logos, brand names, UI screenshots or watermarks, and no recognisable real people.
+- Embed every image as a data URI (compress photos to JPEG or WebP, about 1600px on the long side) so the page is self-contained.
+- Report every image in "images" with its section and source.
 
 ## Hard rules
 - Never name the competitor or reuse their brand, product or people names anywhere (text, alt text, file names, comments, meta tags).
@@ -347,6 +368,7 @@ Open your finished ${MANUS_HTML_FILENAME} in the browser at 1440px and 390px, ta
 - The client's logo shows, is readable, and is sharp at 200% zoom. No competitor logo, name or photo appears anywhere: search the HTML source for the competitor's name and domain and remove any hit.
 - Each heading and lead says the same thing as the competitor's counterpart, in different words, about the same service. The hero headline (or the line under it) names the page's service, and every call to action makes the competitor's offer for that service.
 - Only the client's colours and fonts are used; headings, body text and buttons are aligned the way the competitor's are.
+- Every photo appears once: no image is repeated in another section or card (only the logo may repeat).
 - No overlapping or clipped text at 1440, 1280, 1024, 768 and 390px (check the hero headline especially). No broken images, no placeholder text, no dead links, no horizontal scrolling on mobile, readable contrast everywhere.
 - The form works: required fields validate and the success message shows.
 Fix every problem and check again until both widths match the competitor.
@@ -371,7 +393,7 @@ The attached brief.md has every rule. Read it completely before you start and fo
 - make the page as identical to the competitor as possible: every section in order, the same layout, measured sizes and spacing, card counts, alignment, background types and logo strips
 - every heading and paragraph says the same thing as the competitor's, in different words and the client's brand voice
 - use the client's sharpest logo, its own client/partner logos, colours, fonts, links and contact details (use the Firecrawl connector when the browser misses something)
-- create any new photos with the OpenAI connector (gpt-image-2) and embed them
+- images: the user's images first, then the client website's own photos; create new ones with the OpenAI connector (gpt-image-2) only for spots those cannot fill. Never use the same image twice
 - never copy the competitor's wording, names or images, and never invent facts, reviews or numbers
 - compare your page with the competitor at 1440px and 390px (no overlapping text at any width) and fix every difference before delivering
 - do not deploy or publish anything
@@ -395,7 +417,7 @@ export function buildAnswerContext(input: ManusBriefInput): string {
   return `Job: rebuild the competitor landing page ${input.competitorUrl} for the client ${input.clientName} (${input.clientUrl}).
 The page sells ${focus.service} (the user's search: ${focus.searchKeywords.join(", ")}). Headline, CTA and every section stay on ${focus.service}, making the same promise and offer as the competitor's (headline "${focus.competitorHeadline || "n/a"}", CTA "${focus.competitorCta || "n/a"}"), never the client's other services.
 Goal: the page as identical to the competitor as possible. Keep: every section in order, each section's layout, columns, card counts, media side, alignment, background type, measured font sizes and spacing, header arrangement, footer shape, logo strips, form position and step count, offer type and CTA concept, and the same message in every heading and paragraph (rephrased, in the client's brand voice, keeping the client's USPs).
-Replace with the client's: the wording, colours and fonts, its sharpest real logo (SVG or largest file, never upscaled), its own client/partner logos for any logo strip (scraped with the Firecrawl connector), images (client photos, or new ones made with the OpenAI connector's gpt-image-2 model, without text, at most ${IMAGE_BUDGET}, embedded as data URIs), links, phone, email and address.
+Replace with the client's: the wording, colours and fonts, its sharpest real logo (SVG or largest file, never upscaled), its own client/partner logos for any logo strip (scraped with the Firecrawl connector), images (the user's images first, then the client website's own photos, and only for spots those cannot fill new ones made with the OpenAI connector's gpt-image-2 model, without text, at most ${IMAGE_BUDGET}; each image used once; embedded as data URIs), links, phone, email and address.
 Never: name the competitor, copy 4+ consecutive words of its copy, reuse its images, invent statistics/testimonials/awards/reviews/people/contact details, use placeholders, deploy or publish anything.
 Form: client-side validation and a success message only, with a CRM comment where submission would be wired.
 Deliverable: one self-contained ${MANUS_HTML_FILENAME} attached to the final message (inline CSS/JS; images as data URIs or absolute https URLs from the client's site).

@@ -1096,6 +1096,10 @@ export type ManusRecreationState = {
   handledEventIds: string[];
   /** Times the agent was asked to attach the HTML file after finishing without it. */
   nudges: number;
+  /** Times the agent was asked to replace images it used more than once (per turn). */
+  imageFixes?: number;
+  /** The agent's structured report from earlier in this turn, used when a follow-up round sends none. */
+  report?: Record<string, unknown> | null;
   creditUsage?: number | null;
   /** The edit request, for an edit turn. */
   editRequest?: string | null;

@@ -43,6 +43,7 @@ import {
 } from "./brief";
 import { answerAgentQuestion } from "./answer";
 import { loadAssets, saveAssets, type UserAsset } from "./assets";
+import { describeRepeats, repeatedImages } from "./imageCheck";
 
 /**
  * Landing page recreation by the Manus agent. (The earlier built-in
@@ -64,6 +65,16 @@ const RESERVATION_TOUCH_MS = 5 * 60_000;
 const MAX_MODEL_ANSWERS = 8;
 /** Times a finished run without an HTML file is asked to attach one. */
 const MAX_NUDGES = 2;
+/** Times a delivered page that repeats an image goes back to the agent before it is shown with a note. */
+const MAX_IMAGE_FIXES = 1;
+
+function repeatFixMessage(lines: string[]): string {
+  return `Some images appear more than once on the page you delivered:
+${lines.map((l) => `- ${l}`).join("\n")}
+
+Replace every repeat so each photo appears only once. For each repeated spot use another suitable image: the user's images or the client's website first; create a new one with the OpenAI connector (gpt-image-2) only if none fits, or build that spot without a photo the way the competitor would look. Keep everything else exactly as it is, re-check the page, and attach the complete updated ${MANUS_HTML_FILENAME}. Do not deploy or publish anything.`;
+}
+
 const NUDGE_MESSAGE = `Please attach the complete final page as a single self-contained ${MANUS_HTML_FILENAME} file (inline CSS and JS, images as data URIs or absolute https URLs) to your reply. Do not deploy or publish it.`;
 
 function timeoutMs(): number {
@@ -663,6 +674,8 @@ export async function editManusRecreation(
       mode: "edit",
       editRequest: request,
       nudges: 0,
+      imageFixes: 0,
+      report: null,
       turnStartedAt: await anchorTurn(taskId, editMessage, sentAt, signal),
     });
     return await follow(competitorId, signal);
@@ -839,6 +852,25 @@ async function follow(competitorId: string, signal: AbortSignal): Promise<Compet
       // The structured report follows the stop by a moment.
       await sleep(5_000, signal);
       const done = await collectResult(competitorId, state, task?.credit_usage ?? null);
+      if (done && "fixMessage" in done) {
+        // The page repeats an image: one round back to the agent before it is shown.
+        savePage(competitorId, {
+          progress: progress("check", "Replacing images used more than once…", Math.max(shownPct, 93), { activity }),
+        });
+        const sentAt = Date.now();
+        await sendManusMessage(
+          state.taskId,
+          { content: done.fixMessage },
+          MANUS_RESULT_SCHEMA as unknown as Record<string, unknown>,
+        );
+        saveState(competitorId, {
+          imageFixes: (state.imageFixes || 0) + 1,
+          nudges: 0,
+          report: (done.report as unknown as Record<string, unknown> | null) ?? null,
+          turnStartedAt: await anchorTurn(state.taskId, done.fixMessage, sentAt, signal),
+        });
+        continue;
+      }
       if (done) return done;
       // Finished without the file: ask once or twice for it.
       if (state.nudges >= MAX_NUDGES) {
@@ -1060,11 +1092,14 @@ async function collectResult(
   competitorId: string,
   state: ManusRecreationState,
   creditUsage: number | null,
-): Promise<CompetitorRecord | null> {
+): Promise<CompetitorRecord | { fixMessage: string; report: ManusResult | null } | null> {
   const events = await manusEventsSince(state.taskId, state.turnStartedAt);
   const attachments = events.flatMap((e) => e.assistant_message?.attachments || []);
   const structured = [...events].reverse().find((e) => e.type === "structured_output_result")?.structured_output_result;
-  const result = structured?.success ? (structured.value as unknown as ManusResult) : null;
+  // A fix round may end without a new report: the one from earlier in this turn still applies.
+  const result = structured?.success
+    ? (structured.value as unknown as ManusResult)
+    : ((state.report as unknown as ManusResult | null) ?? null);
 
   const htmlFiles = attachments.filter((a) => a.url && isHtmlAttachment(a));
   const wanted = (result?.html_filename || "").split("/").pop()?.toLowerCase() || "";
@@ -1087,6 +1122,11 @@ async function collectResult(
   }
 
   const page = latestPage(competitorId);
+  const repeats = repeatedImages(html);
+  if (repeats.length && (state.imageFixes || 0) < MAX_IMAGE_FIXES) {
+    console.info(`[manus] task ${state.taskId}: ${repeats.length} image(s) used more than once; asking for a fix`);
+    return { fixMessage: repeatFixMessage(describeRepeats(repeats)), report: result };
+  }
   const leaks = competitorLeaks(html, page);
   const unresolved = (result?.unresolved || []).map((s) => s.trim()).filter(Boolean);
   const notMatched = (result?.sections || []).filter((s) => !s.layout_matches).map((s) => s.competitor_section);
@@ -1095,6 +1135,9 @@ async function collectResult(
     ...(offService
       ? [`The hero does not name ${offService}, the service searched for. Ask for a change so the headline and call to action match the competitor's ${offService} offer.`]
       : []),
+    ...(repeats.length
+      ? [`The same image is used in more than one place (${describeRepeats(repeats).slice(0, 3).join(" | ")}). Ask for a change to replace the repeats.`]
+      : []),
     ...(leaks.length ? [`The page still mentions the competitor (${leaks.join(", ")}). Ask for a change to remove it.`] : []),
     ...(notMatched.length ? [`Sections the agent could not match exactly: ${notMatched.slice(0, 5).join(", ")}.`] : []),
     ...(result && !(result.verification.desktop_compared && result.verification.mobile_compared)
@@ -1102,7 +1145,17 @@ async function collectResult(
       : []),
     ...unresolved.slice(0, 6),
   ];
-  const summary = [result?.summary, result?.verification?.notes].filter(Boolean).join(" ");
+  const imageCount = (source: string) => (result?.images || []).filter((i) => i.source === source).length;
+  const imageNote = result?.images?.length
+    ? `Images: ${[
+        imageCount("user_supplied") ? `${imageCount("user_supplied")} you supplied` : "",
+        imageCount("client_website") ? `${imageCount("client_website")} from the client's website` : "",
+        imageCount("generated") ? `${imageCount("generated")} generated` : "",
+      ]
+        .filter(Boolean)
+        .join(", ")}.`
+    : "";
+  const summary = [result?.summary, result?.verification?.notes, imageNote].filter(Boolean).join(" ");
   const editing = state.mode === "edit";
 
   savePage(competitorId, {
