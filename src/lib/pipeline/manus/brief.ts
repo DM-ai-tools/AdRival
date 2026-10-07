@@ -253,7 +253,8 @@ export function buildManusBrief(input: ManusBriefInput): string {
 ## The job
 Rebuild the COMPETITOR's landing page for a different business, the CLIENT.
 The result should look as identical to the competitor's page as possible: the same sections, layout, sizes, spacing, visual design language and the same message in every heading and paragraph. Only the brand changes: the client's logo, colours, fonts, wording (same meaning, different words, in the client's brand voice), images, proof logos, links and contact details.
-Deliver ONE self-contained HTML file named \`${MANUS_HTML_FILENAME}\`, attached to your final message.
+The page should also FEEL like the competitor's: its animations, interactions and distinctive visual effects are part of the design to recreate (see "Motion and distinctive design").
+Deliver ONE self-contained HTML file named \`${MANUS_HTML_FILENAME}\`, attached to your final message. "Self-contained" means one file, not a static-looking page: it can carry all the CSS and JavaScript the effects need.
 
 ## Tools to use
 - Firecrawl connector: use it to scrape the client's website whenever your browser misses something: the logo files, the client/partner logos shown on the site, social links, photos and contact details. Scrape the home page and the client's other relevant pages too (about, clients, case studies, portfolio, partners, contact; map the site to find them).
@@ -302,6 +303,15 @@ ${clientSection(input)}
 - It must read on its background: use the variant made for that background (light/dark), or the header band colour the client's own site uses behind it.
 - In the visual check, zoom to 200%: if the logo looks soft or pixelated, find a better file.
 
+## Motion and distinctive design
+- While studying the competitor, watch how it moves: load it fresh, scroll slowly top to bottom, hover buttons, cards, images and menu items, open menus, tabs and FAQs, and wait on carousels. Record every animation and interaction: entrance and scroll-reveal effects, counters that count up, sliders, carousels, marquee/ticker logo strips, parallax, sticky or shrinking headers, hover lifts, zooms and colour shifts, animated gradients or backgrounds, background videos, typing or rotating words, progress bars, accordions, tabs, modals, and any other effect that makes the page feel unique.
+- Read their timing from the page: durations, delays, easing, stagger, scroll trigger points (computed styles, CSS animations and transitions, and the scripts that drive them).
+- Recreate each one in the same section, with the same trigger, direction, timing and feel, in the client's colours. Distinctive visual design (unusual shapes, layered or angled sections, glass or blur effects, decorative patterns or SVG graphics, 3D tilts, custom cursors, gradient meshes) is recreated the same way: the same look and feel, drawn fresh in the client's colours, never copied artwork, logos or illustrations.
+- Write the effects in vanilla CSS and JavaScript inside the file. If an effect really needs a library (for example a slider or a complex timeline animation), load it from a public CDN (cdnjs, jsDelivr or unpkg) with a pinned version.
+- Content never depends on motion: every element is visible if JavaScript fails, and everything still works with prefers-reduced-motion (show the end state instead of animating). Keep animations smooth: transform and opacity, no layout jank.
+- Loops that duplicate items for a seamless marquee or carousel mark the copies aria-hidden="true".
+- Add no motion or effects the competitor does not have.
+
 ## Proof logo strip
 - If the competitor shows logos of its clients, partners, platforms, accreditations or media mentions, the rebuild has that section too, in the same place, with the same layout (row, grid or carousel), a similar count, the same size and the same treatment (greyscale or colour, on a band or plain).
 - Fill it with the logos the client shows on its own website: scrape the home page and its clients, case studies, portfolio, about and partners pages with Firecrawl, including carousels, lazy-loaded images (data-src) and CSS background images. Use the original files, embedded as data URIs, each with alt "<brand> logo".
@@ -325,7 +335,7 @@ Rules for every image:
 - Finish every sentence. No placeholders, no lorem ipsum, no "[Client Name]", no "coming soon".
 - No emoji, no exclamation spam.
 - The form submits with client-side validation and a success message only (no external service). Put the HTML comment \`<!-- CRM: connect form submission here -->\` where submission would be wired.
-- Do not deploy, publish or create a hosted website or web app. Build a static HTML file only.
+- Do not deploy, publish or create a hosted website or web app. Deliver the page as one HTML file (it can include all the CSS and JavaScript its effects need).
 
 ## Quality floor
 - Body text at least 16px; nothing under 14px except fine print. Paragraph lines 45-75 characters wide.
@@ -333,12 +343,12 @@ Rules for every image:
 - Primary call-to-action labels fit on one line at desktop (2-5 words). One label per intent across the page: the primary action says the same thing in the header, hero and closing section.
 - One h1 (the hero), then h2 per section and h3 inside cards, in order. Lists are ul/ol. FAQs use details/summary unless the competitor's FAQ is clearly always open.
 - Meaningful alt text written for the client; decorative images alt="". The logo's alt is "<client name> logo". Icon-only controls get aria-label.
-- One corner-radius system, one accent colour, no cards inside cards, no new animations (transform/opacity only if the competitor clearly animates, and respect prefers-reduced-motion).
+- One corner-radius system, one accent colour, no cards inside cards. Motion matches the competitor's (see "Motion and distinctive design"); respect prefers-reduced-motion.
 - The hero reads at a glance: headline at most 2 lines at desktop, one supporting line, calls to action visible without scrolling.
 - No overlapping text, ever: headline line-height at least 1.1 (1.15 or more for large display sizes), no negative margins, transforms or absolute positioning on text, letter-spacing no tighter than the competitor's, and long words wrap instead of spilling. Large headings use clamp() so they shrink on narrower screens.
 - Fully responsive: no horizontal scrolling at 390px, columns stack in a sensible order, tap targets at least 44px.
 
-## Do not look AI-generated (unless the competitor clearly does the same thing in the same place)
+## Do not look AI-generated (unless the competitor clearly does the same thing in the same place: then recreate it, as "Motion and distinctive design" says)
 - No gradient text, no thick coloured stripe on one side of cards, no glowing shadows or neon outlines, no purple-to-cyan washes.
 - No fake product UI built from divs (fake dashboards, chat windows, terminals). No hand-drawn decorative SVG illustrations.
 - Eyebrow labels at most in one of every three sections, and only where the competitor has one. Step numbers only for real sequences.
@@ -371,10 +381,11 @@ Open your finished ${MANUS_HTML_FILENAME} in the browser at 1440px and 390px, ta
 - Every photo appears once: no image is repeated in another section or card (only the logo may repeat).
 - No overlapping or clipped text at 1440, 1280, 1024, 768 and 390px (check the hero headline especially). No broken images, no placeholder text, no dead links, no horizontal scrolling on mobile, readable contrast everywhere.
 - The form works: required fields validate and the success message shows.
+- Motion matches: scroll, hover and wait on your page next to the competitor's; each animation and interaction runs in the same section with the same feel, without jank or console errors, and the page still reads fully with reduced motion.
 Fix every problem and check again until both widths match the competitor.
 
 ## Delivery
-- One file, \`${MANUS_HTML_FILENAME}\`: complete HTML document with inline CSS and JS. Images either embedded as data URIs or as absolute https URLs from the client's own website. Google Fonts links are fine. No relative paths to other files.
+- One file, \`${MANUS_HTML_FILENAME}\`: complete HTML document with inline CSS and JS. Images either embedded as data URIs or as absolute https URLs from the client's own website. Google Fonts links and pinned CDN libraries (cdnjs, jsDelivr, unpkg) for effects are fine. No relative paths to other files.
 - Attach it to your final message. Report the sections, brand sources, what you checked and anything unresolved.
 - If something is unclear, decide yourself by following this brief. Ask a question only if you are truly blocked; an assistant answers for the user.`;
 }
@@ -395,6 +406,7 @@ The attached brief.md has every rule. Read it completely before you start and fo
 - use the client's sharpest logo, its own client/partner logos, colours, fonts, links and contact details (use the Firecrawl connector when the browser misses something)
 - images: the user's images first, then the client website's own photos; create new ones with the OpenAI connector (gpt-image-2) only for spots those cannot fill. Never use the same image twice
 - never copy the competitor's wording, names or images, and never invent facts, reviews or numbers
+- recreate the competitor's animations, interactions and distinctive effects the same way (scroll, hover and wait on its page to find them)
 - compare your page with the competitor at 1440px and 390px (no overlapping text at any width) and fix every difference before delivering
 - do not deploy or publish anything
 
@@ -420,6 +432,7 @@ Goal: the page as identical to the competitor as possible. Keep: every section i
 Replace with the client's: the wording, colours and fonts, its sharpest real logo (SVG or largest file, never upscaled), its own client/partner logos for any logo strip (scraped with the Firecrawl connector), images (the user's images first, then the client website's own photos, and only for spots those cannot fill new ones made with the OpenAI connector's gpt-image-2 model, without text, at most ${IMAGE_BUDGET}; each image used once; embedded as data URIs), links, phone, email and address.
 Never: name the competitor, copy 4+ consecutive words of its copy, reuse its images, invent statistics/testimonials/awards/reviews/people/contact details, use placeholders, deploy or publish anything.
 Form: client-side validation and a success message only, with a CRM comment where submission would be wired.
+Motion: recreate the competitor's animations, interactions and distinctive effects (scroll reveals, counters, sliders, marquees, hover effects, sticky header, parallax and so on) with the same trigger, timing and feel, in vanilla CSS/JS or a pinned CDN library; content visible without JavaScript; prefers-reduced-motion respected; add no effects the competitor lacks.
 Deliverable: one self-contained ${MANUS_HTML_FILENAME} attached to the final message (inline CSS/JS; images as data URIs or absolute https URLs from the client's site).
 Verification: compare with the competitor at 1440px and 390px and fix differences before delivering.
 Style direction: ${STYLE_DIRECTION_LABEL[input.styleDirection]}.

@@ -48,6 +48,9 @@ export function repeatedImages(html: string): RepeatedImage[] {
     const heading = $(el).closest("section, header, footer, main > div").find("h1, h2, h3").first().text().replace(/\s+/g, " ").trim();
     return heading ? ` (in "${heading.slice(0, 60)}")` : "";
   };
+  // A looping marquee or carousel repeats its items on purpose (copies are aria-hidden or marked as clones).
+  const isLoopCopy = (el: Parameters<typeof $>[0]) =>
+    $(el).closest('[aria-hidden="true"], .swiper-slide-duplicate, .slick-cloned, .splide__slide--clone, [class*="clone"], [class*="marquee"], [class*="ticker"]').length > 0;
   const isLogo = (el: Parameters<typeof $>[0]) => {
     const node = $(el);
     const text = [node.attr("alt"), node.attr("class"), node.attr("id"), node.parent().attr("class"), node.attr("data-logo-role")]
@@ -57,18 +60,18 @@ export function repeatedImages(html: string): RepeatedImage[] {
   };
 
   $("img").each((_, el) => {
-    if (isLogo(el)) return;
+    if (isLogo(el) || isLoopCopy(el)) return;
     const src = $(el).attr("src") || ($(el).attr("srcset") || "").split(/\s+/)[0] || "";
     const alt = ($(el).attr("alt") || "").trim();
     add(src, `${alt ? `"${alt.slice(0, 60)}"` : "an image"}${sectionOf(el)}`);
   });
   $("picture source[srcset]").each((_, el) => {
     // A <source> repeats its own <img>; count it only when the picture has no img.
-    if ($(el).parent().find("img").length) return;
+    if ($(el).parent().find("img").length || isLoopCopy(el)) return;
     add(($(el).attr("srcset") || "").split(/\s+/)[0] || "", `an image${sectionOf(el)}`);
   });
   $("[style]").each((_, el) => {
-    if (isLogo(el)) return;
+    if (isLogo(el) || isLoopCopy(el)) return;
     for (const url of cssUrls($(el).attr("style") || "")) add(url, `a background${sectionOf(el)}`);
   });
   $("style").each((_, el) => {

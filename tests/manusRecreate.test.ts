@@ -216,6 +216,9 @@ test("the design agent builds the page, its question is answered, and a change r
     const brief = Buffer.from(String(parts.find((p) => p.filename === "brief.md")?.file_data).split(",")[1], "base64").toString("utf8");
     assert.match(brief, /https:\/\/rivalclinic\.example\/offer/);
     assert.match(brief, /Visual check before delivering/);
+    // The competitor's motion and distinctive effects are part of what is recreated.
+    assert.match(brief, /## Motion and distinctive design/);
+    assert.doesNotMatch(brief, /static HTML file only|no new animations/);
     // The user's image goes with the task as a file, and the brief says to use it.
     assert.ok(parts.some((p) => p.filename === "asset-1.png" && p.file_data === png));
     assert.match(brief, /Images the user supplied \(must be used\)/);
@@ -330,4 +333,7 @@ test("a photo used twice is caught, while the logo, icons and SVGs may repeat", 
   assert.ok(repeats.some((r) => r.places.some((p) => p.includes('"Team at work"') && p.includes('"Our work"'))));
   assert.ok(repeats.some((r) => r.places.some((p) => p.includes('"Office small"'))));
   assert.equal(repeatedImages(page.replace(/<section><h2>Why us[\s\S]*?<\/section>/, "")).length, 0);
+  // A looping carousel's copies are not repeats.
+  const carousel = `<html><body><section><h2>Projects</h2><div class="track"><img src="${photo}" alt="Project"><img src="${other}" alt="Project 2"></div><div class="track" aria-hidden="true"><img src="${photo}" alt=""><img src="${other}" alt=""></div><div class="swiper-slide swiper-slide-duplicate"><img src="${photo}" alt=""></div></section></body></html>`;
+  assert.equal(repeatedImages(carousel).length, 0);
 });

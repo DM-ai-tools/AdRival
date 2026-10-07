@@ -408,6 +408,7 @@ If an earlier attempt failed, the same button says **Try again**.
 ### What the page is built to do
 
 - Same sections, layout, sizes and spacing as the competitor's page, and the same message in every heading and paragraph, in different words and your client's brand voice.
+- The same feel: the competitor's animations and interactions (scroll effects, counters, sliders, moving logo strips, hover effects, sticky header and so on) and distinctive design touches are recreated in your client's colours.
 - It stays on the service you searched for (for example SEO), with the competitor's headline promise and call to action rewritten for your client.
 - Your client's sharpest logo, their own client/partner logos where the competitor shows a logo strip, their colours, fonts, links and contact details.
 - Images come from what you add first, then your client's own website. New images are made only for spots neither can fill, so many pages need none. Each photo is used once; if the finished page repeats one, it goes back to the agent once to replace the repeat, and any repeat left is listed in the review notes.
