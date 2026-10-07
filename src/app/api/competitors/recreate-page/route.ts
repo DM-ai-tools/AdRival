@@ -15,6 +15,7 @@ import {
   stopManusRecreation,
   undoManusChange,
 } from "@/lib/pipeline/manus/run";
+import { cleanAssets } from "@/lib/pipeline/manus/assets";
 
 export const runtime = "nodejs";
 /** A design-agent build runs well past 10 minutes; it continues after the reply. */
@@ -170,6 +171,8 @@ export async function POST(request: Request) {
         : "";
     // Screenshots pasted with the feedback, sent to the design agent as images.
     const screenshots = cleanScreenshots(body.screenshots);
+    // Images the page must use (stats, product photos…), given before a build.
+    const assets = cleanAssets(body.assets);
 
     const action = String(body.action || "generate_page").trim();
     // Look for the page: match the brand (default), minimal, soft or brutalist.
@@ -260,6 +263,7 @@ export async function POST(request: Request) {
       Boolean(body.force) ||
       Boolean(userFeedback) ||
       screenshots.length > 0 ||
+      assets.length > 0 ||
       styleChanged ||
       action !== "generate_page" && action !== "generate_content";
     // A running build is followed; a finished page is returned unless a rebuild is asked for.
@@ -275,6 +279,7 @@ export async function POST(request: Request) {
           userFeedback: userFeedback || null,
           styleDirection,
           screenshots,
+          assets,
         }),
       ),
     );

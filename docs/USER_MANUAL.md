@@ -392,7 +392,7 @@ The page first explains what will be made:
 **Nothing is charged until you press Create my page.**
 
 1. If the search was run without your client’s website, enter it here and press **Save website**. It is saved on the search, so you only enter it once.
-2. Optionally, type instructions in **Anything to change?**, such as “lead with the free consultation, softer tone”.
+2. Optionally, fill in **Instructions and images for the page**: type instructions (such as “feature these products in the hero, lead with the free consultation”) and add images the page must use, such as stats, product photos, team or certificate images (up to 10; paste, drop or press **Add images**). A short note under each image (“2024 results”, “best-selling serum”) helps the agent put it in the right section. The images are kept, so **Regenerate page** uses them again.
 3. Pick the **Look of the page**:
    - **Match the brand** (recommended): the client's own look on the competitor's layout.
    - **Minimal**: flat, airy, thin borders, colour used sparingly.

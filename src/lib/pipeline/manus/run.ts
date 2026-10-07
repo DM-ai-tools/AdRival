@@ -42,6 +42,7 @@ import {
   type ManusResult,
 } from "./brief";
 import { answerAgentQuestion } from "./answer";
+import { loadAssets, saveAssets, type UserAsset } from "./assets";
 
 /**
  * Landing page recreation by the Manus agent. (The earlier built-in
@@ -485,6 +486,8 @@ export async function runManusRecreation(
     userFeedback?: string | null;
     styleDirection?: StyleDirection | null;
     screenshots?: FeedbackScreenshot[];
+    /** Images the page must use. New ones replace the saved set; none given reuses the saved set. */
+    assets?: UserAsset[];
   } = {},
 ): Promise<CompetitorRecord> {
   if (!hasManusKey()) throw new Error("The design agent is not set up yet: add MANUS_API_KEY to the environment.");
@@ -509,8 +512,14 @@ export async function runManusRecreation(
     await stopManusTask(previous.manus.taskId).catch(() => undefined);
   }
 
+  if (options.assets?.length) saveAssets(competitorId, options.assets);
+  const assets = options.assets?.length ? options.assets : loadAssets(competitorId);
+
   const signal = beginRun(competitorId);
-  const input = briefInput(competitor, job, businessUrl, styleDirection, feedback);
+  const input = {
+    ...briefInput(competitor, job, businessUrl, styleDirection, feedback),
+    userAssets: assets.map((a) => ({ name: a.name, caption: a.caption })),
+  };
   const existing = competitor.recreatedPage;
   const now = new Date().toISOString();
   const base: RecreatedLandingPage = {
@@ -569,6 +578,12 @@ export async function runManusRecreation(
             mime_type: "text/markdown",
             file_data: `data:text/markdown;base64,${Buffer.from(brief, "utf8").toString("base64")}`,
           },
+          ...assets.map((a) => ({
+            type: "file" as const,
+            filename: a.name,
+            mime_type: a.dataUrl.slice(5, a.dataUrl.indexOf(";")),
+            file_data: a.dataUrl,
+          })),
           ...screenshotParts(shots),
         ],
       },

@@ -161,7 +161,16 @@ test("the design agent builds the page, its question is answered, and a change r
       },
     });
 
-    const built = await runManusRecreation(competitor.id, { styleDirection: "brand" });
+    const { cleanAssets, loadAssets } = await import("../src/lib/pipeline/manus/assets");
+    const png = `data:image/png;base64,${Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]).toString("base64")}`;
+    const assets = cleanAssets([
+      { dataUrl: png, caption: "Q3 results stat" },
+      { dataUrl: "data:image/svg+xml;base64,PHN2Zz4=", caption: "dropped: not a photo format" },
+    ]);
+    assert.equal(assets.length, 1);
+    const built = await runManusRecreation(competitor.id, { styleDirection: "brand", assets });
+    // The images are kept, so a later rebuild without new ones still uses them.
+    assert.deepEqual(loadAssets(competitor.id).map((a) => [a.name, a.caption, a.dataUrl]), [["asset-1.png", "Q3 results stat", png]]);
     const page = built.recreatedPage!;
     assert.equal(page.status, "completed", page.error || "");
     assert.equal(page.pipelineVersion, "manus-1");
@@ -185,6 +194,10 @@ test("the design agent builds the page, its question is answered, and a change r
     const brief = Buffer.from(String(parts.find((p) => p.filename === "brief.md")?.file_data).split(",")[1], "base64").toString("utf8");
     assert.match(brief, /https:\/\/rivalclinic\.example\/offer/);
     assert.match(brief, /Visual check before delivering/);
+    // The user's image goes with the task as a file, and the brief says to use it.
+    assert.ok(parts.some((p) => p.filename === "asset-1.png" && p.file_data === png));
+    assert.match(brief, /Images the user supplied \(must be used\)/);
+    assert.match(brief, /- asset-1\.png: Q3 results stat/);
 
     // The question was answered once, with the default answer (no model key here).
     assert.equal(page.manus?.questions.length, 1);

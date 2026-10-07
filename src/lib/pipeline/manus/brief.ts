@@ -23,6 +23,8 @@ export type ManusBriefInput = {
   pageAnalysis: LandingPageOfferAnalysis | null;
   styleDirection: StyleDirection;
   userFeedback: string | null;
+  /** Images the user attached that the page must use (sent with the task as files). */
+  userAssets?: Array<{ name: string; caption: string }>;
 };
 
 /** The file the agent must attach. */
@@ -190,6 +192,26 @@ ${f.competitorPromises.length ? `- Promises: ${f.competitorPromises.map((p) => `
 Your hero headline makes the same promise about ${f.service}; your call to action makes the same offer (for example, a free ${f.service} audit becomes the client's free ${f.service} audit, a strategy call stays a strategy call). Before building, write a short table for yourself: competitor line → your line, and check each pair names the same service and makes the same point.`;
 }
 
+function assetLines(input: ManusBriefInput): string {
+  return (input.userAssets || [])
+    .map((a) => `- ${a.name}${a.caption ? `: ${a.caption}` : " (no note: judge from the image what it shows)"}`)
+    .join("\n");
+}
+
+/** The user's own images: they replace generated or competitor-style imagery wherever they fit. */
+function userAssetsSection(input: ManusBriefInput): string {
+  if (!input.userAssets?.length) return "";
+  return `## Images the user supplied (must be used)
+The user attached ${input.userAssets.length} image${input.userAssets.length === 1 ? "" : "s"} for this page:
+${assetLines(input)}
+- Use every one of them in the page, in the section where it fits best by its note and content: stats or results graphics in the results/proof section, product photos where the competitor shows products or in the hero, team photos in the about/team section, certificates or badges in the trust section. If no section fits, place it where the competitor shows a comparable image.
+- Use them instead of generated images. Do not change what they show; you may crop and resize them to the competitor's frame and aspect ratio. Keep product photos sharp and uncropped where possible.
+- Write the copy around them truthfully: figures in a stats image may be quoted in the text, and product names in the notes may be used.
+- Embed each as a data URI in ${MANUS_HTML_FILENAME}. List any image you could not place under "unresolved" with the reason.
+
+`;
+}
+
 function competitorSection(input: ManusBriefInput): string {
   const a = input.pageAnalysis;
   const offer = a?.offer;
@@ -222,7 +244,7 @@ Deliver ONE self-contained HTML file named \`${MANUS_HTML_FILENAME}\`, attached 
 - Firecrawl connector: use it to scrape the client's website whenever your browser misses something: the logo files, the client/partner logos shown on the site, social links, photos and contact details. Scrape the home page and the client's other relevant pages too (about, clients, case studies, portfolio, partners, contact; map the site to find them).
 - OpenAI connector: create new photos with the gpt-image-2 model (rules under "Images" below) and embed them in the page as data URIs.
 
-${input.userFeedback ? `## The user's requests (follow these first, within the hard rules)\n${input.userFeedback}\n\n` : ""}${focusSection(input)}
+${input.userFeedback ? `## The user's requests (follow these first, within the hard rules)\n${input.userFeedback}\n\n` : ""}${userAssetsSection(input)}${focusSection(input)}
 
 ${competitorSection(input)}
 
@@ -344,7 +366,7 @@ Client website (use its logo, colours, fonts, facts, links and contact details):
 Client: ${input.clientName}
 The page sells: ${pageServiceFocus(input).service} (what the user searched for: ${pageServiceFocus(input).searchKeywords.join(", ")}). Headline, call to action and content stay on this service, matching the competitor's.
 Style: ${STYLE_DIRECTION_LABEL[input.styleDirection]}
-${input.userFeedback ? `User's requests: ${input.userFeedback.slice(0, 1500)}\n` : ""}
+${input.userFeedback ? `User's requests: ${input.userFeedback.slice(0, 1500)}\n` : ""}${input.userAssets?.length ? `The user attached ${input.userAssets.length} image${input.userAssets.length === 1 ? "" : "s"} the page must use (${input.userAssets.map((a) => a.name).join(", ")}); see "Images the user supplied" in brief.md.\n` : ""}
 The attached brief.md has every rule. Read it completely before you start and follow it exactly:
 - make the page as identical to the competitor as possible: every section in order, the same layout, measured sizes and spacing, card counts, alignment, background types and logo strips
 - every heading and paragraph says the same thing as the competitor's, in different words and the client's brand voice
@@ -382,5 +404,6 @@ Style direction: ${STYLE_DIRECTION_LABEL[input.styleDirection]}.
 Client industry: ${input.profile?.industry || "unknown"}. Services: ${(input.profile?.offerings || []).slice(0, 8).join(", ") || "see website"}.
 Known palette: ${c ? `primary ${c.primary}, secondary ${c.secondary}, accent ${c.accent}, background ${c.background}, text ${c.text}` : "unknown, sample from the client's site"}.
 Known logo: ${input.profile?.brandAssets?.logoUrl || "take it from the client's site header"}.
-${input.userFeedback ? `User's requests: ${input.userFeedback}` : ""}`.trim();
+${input.userFeedback ? `User's requests: ${input.userFeedback}` : ""}
+${input.userAssets?.length ? `The user supplied images the page must use (embedded as data URIs, in the best-fitting sections, instead of generated images):\n${assetLines(input)}` : ""}`.trim();
 }

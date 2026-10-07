@@ -66,6 +66,8 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
   /** One box for content and design: everything goes to the design agent. */
   const [feedback, setFeedback] = useState("");
   const [screenshots, setScreenshots] = useState<Screenshot[]>([]);
+  /** Before a build: images the page must use (stats, product photos…), each with a note. */
+  const [assets, setAssets] = useState<Screenshot[]>([]);
   const [canEdit, setCanEdit] = useState(true);
   const [stopping, setStopping] = useState(false);
   const [brand, setBrand] = useState<Brand | null>(null);
@@ -142,6 +144,10 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
             styleDirection,
             userFeedback: feedback.trim() || undefined,
             screenshots: screenshots.length ? screenshots.map((s) => ({ dataUrl: s.dataUrl })) : undefined,
+            assets:
+              mode === "generate" && assets.length
+                ? assets.map((a) => ({ dataUrl: a.dataUrl, caption: a.caption || "" }))
+                : undefined,
             ...body,
           }),
         });
@@ -150,6 +156,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
         if (running || res.ok) {
           setFeedback("");
           setScreenshots([]);
+          if (mode === "generate") setAssets([]);
         }
         if (running) return;
         if (!res.ok) throw new Error(data.error || failMessage);
@@ -165,7 +172,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
         }
       }
     },
-    [competitorId, feedback, followBuild, screenshots, styleDirection, syncFromPage],
+    [assets, competitorId, feedback, followBuild, screenshots, styleDirection, syncFromPage],
   );
 
   const generatePage = useCallback(
@@ -527,18 +534,19 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
           ) : (
             <FeedbackComposer
               id="recreate-start-notes"
+              kind="assets"
               label={
                 <>
-                  Anything to change? <span className="muted">(optional)</span>
+                  Instructions and images for the page <span className="muted">(optional)</span>
                 </>
               }
-              rows={2}
+              rows={3}
               value={feedback}
               onChange={setFeedback}
-              screenshots={screenshots}
-              onScreenshotsChange={setScreenshots}
+              screenshots={assets}
+              onScreenshotsChange={setAssets}
               disabled={!canEdit}
-              placeholder="e.g. Lead with the free consultation, mention Melbourne, keep the competitor's FAQ order…"
+              placeholder="e.g. Feature the attached products in the hero, use the stats image in the results section, lead with the free consultation, mention Melbourne…"
             />
           )}
 
@@ -618,7 +626,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
               <>
                 <p className="muted recreate-feedback-hint">
                   Apply changes edits only what you describe and keeps the rest as built. Regenerate page builds the whole
-                  page again with this feedback.
+                  page again with this feedback, and uses the images you added before the first build again.
                 </p>
                 {page.lastEdit ? (
                   <p className="muted recreate-feedback-hint" role="status">
