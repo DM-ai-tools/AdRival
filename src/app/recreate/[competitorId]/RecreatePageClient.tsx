@@ -203,7 +203,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     }
     if (nextPage?.status === "completed" && nextPage.html) {
       setView("design");
-    } else if (nextPage?.pipelineVersion?.startsWith("unified")) {
+    } else if (nextPage?.pipelineVersion?.match(/^(unified|manus)/)) {
       setView("design");
     } else if (
       nextPage?.status === "content_ready" ||
@@ -590,7 +590,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
         const rp = data.recreatedPage;
         const hasHtml = Boolean(rp?.html);
         const unifiedDone =
-          rp?.pipelineVersion?.startsWith("unified") &&
+          rp?.pipelineVersion?.match(/^(unified|manus)/) &&
           rp.status === "completed" &&
           hasHtml;
         const inFlight =
@@ -777,7 +777,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     loading ||
     refreshingColors ||
     regeneratingImageId !== null;
-  const isUnified = Boolean(page?.pipelineVersion?.startsWith("unified"));
+  const isUnified = Boolean(page?.pipelineVersion?.match(/^(unified|manus)/));
   const canRegenerateDesign =
     Boolean(page?.html) ||
     page?.status === "completed" ||
@@ -1418,6 +1418,32 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
           </div>
           {progressMessage ? (
             <p className="muted recreate-progress-msg">{progressMessage}</p>
+          ) : null}
+          {details?.activity?.length ? (
+            // Live feed from the design agent: what it says and the actions it runs.
+            <ol
+              aria-label="What the design agent is doing"
+              style={{
+                listStyle: "none",
+                margin: "4px 0 12px",
+                padding: "10px 12px",
+                maxHeight: 240,
+                overflowY: "auto",
+                display: "flex",
+                flexDirection: "column-reverse",
+                gap: 6,
+                borderRadius: 8,
+                background: "rgba(15, 23, 42, 0.04)",
+                fontSize: 13,
+                lineHeight: 1.45,
+              }}
+            >
+              {[...details.activity].reverse().slice(0, 14).map((item) => (
+                <li key={item.id} className={item.kind === "action" ? "muted" : undefined}>
+                  {item.kind === "action" ? `› ${item.text}` : item.text}
+                </li>
+              ))}
+            </ol>
           ) : null}
           {canEdit && (generating || page?.status === "pending" || page?.status === "design_pending") ? (
             <button

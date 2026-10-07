@@ -34,7 +34,16 @@ import { draftIsCurrent } from "@/lib/pipeline/content/pageIntent";
 import type { CanonicalContent } from "@/lib/pipeline/content/model";
 import { ContentRevisionError } from "@/lib/pipeline/content/revisions";
 import { sanitizeClientFacingText, maskRecreatedPage, maskPageAnalysis } from "@/lib/clientFacing";
-import { isStyleDirection } from "@/lib/pipeline/skills/playbook";
+import { isStyleDirection, type StyleDirection } from "@/lib/pipeline/skills/playbook";
+import {
+  editManusRecreation,
+  isManusPage,
+  isManusRunActive,
+  recreatePipeline,
+  resumeManusRecreation,
+  runManusRecreation,
+  stopManusRecreation,
+} from "@/lib/pipeline/manus/run";
 
 export const runtime = "nodejs";
 /** Landing HTML streams can take well past 10 minutes. */
@@ -117,7 +126,26 @@ async function startBuild(
 function pageForClient<T extends { previousHtml?: string | null } | null | undefined>(page: T): T {
   if (!page) return page;
   const { previousHtml, ...rest } = page;
+  // The design agent's task state (ids, answer context) stays on the server.
+  delete (rest as { manus?: unknown }).manus;
   return { ...rest, canUndo: Boolean(previousHtml) } as unknown as T;
+}
+
+/**
+ * A full page build with the pipeline RECREATE_PIPELINE selects: the design
+ * agent ("manus") or the built-in pipeline (default).
+ */
+function buildPage(
+  competitorId: string,
+  options: { force?: boolean; userFeedback?: string; styleDirection?: StyleDirection },
+): Promise<CompetitorRecord> {
+  if (recreatePipeline() === "manus") {
+    return runManusRecreation(competitorId, {
+      userFeedback: options.userFeedback || null,
+      styleDirection: options.styleDirection || null,
+    });
+  }
+  return runUnifiedRecreation(competitorId, options);
 }
 
 function maskCompetitor<T extends {
@@ -196,7 +224,9 @@ export async function POST(request: Request) {
     }
 
     if (action === "stop") {
-      const competitor = stopUnifiedRecreation(competitorId);
+      const competitor = isManusPage(existing.recreatedPage)
+        ? await stopManusRecreation(competitorId)
+        : stopUnifiedRecreation(competitorId);
       return NextResponse.json({ competitor: maskCompetitor(competitor), stopped: true });
     }
 
@@ -219,6 +249,23 @@ export async function POST(request: Request) {
       body.document && typeof body.document === "object"
         ? (body.document as LandingContentDocument)
         : undefined;
+
+    const useManus = recreatePipeline() === "manus";
+    // Design agent: a finished page is returned unless a rebuild is asked for, a running one is followed.
+    if (useManus && (action === "generate_content" || action === "generate_page") && !body.force) {
+      if (isManusRunActive(existing.recreatedPage)) {
+        return NextResponse.json({ competitor: maskCompetitor(existing), cached: true, inFlight: true });
+      }
+      if (
+        !userFeedback &&
+        !styleChanged &&
+        isManusPage(existing.recreatedPage) &&
+        existing.recreatedPage?.status === "completed" &&
+        existing.recreatedPage.html
+      ) {
+        return NextResponse.json({ competitor: maskCompetitor(existing), cached: true });
+      }
+    }
 
     // Cached completed unified page
     if (
@@ -384,11 +431,17 @@ export async function POST(request: Request) {
       if (!existing.recreatedPage?.html) {
         return NextResponse.json({ error: "There is no finished page to change yet. Create the page first." }, { status: 400 });
       }
+      // A design-agent page: the same agent task makes the change.
+      if (useManus && isManusPage(existing.recreatedPage)) {
+        return startBuild(competitorId, () =>
+          billed("recreate.edit_page", () => editManusRecreation(competitorId, request)),
+        );
+      }
       return startBuild(competitorId, () =>
         billed("recreate.edit_page", async () => {
           const outcome = await editRecreatedPage(competitorId, request);
           if (!outcome.full) return outcome.competitor;
-          return runUnifiedRecreation(competitorId, { force: true, userFeedback: outcome.feedback, styleDirection });
+          return buildPage(competitorId, { force: true, userFeedback: outcome.feedback, styleDirection });
         }),
       );
     }
@@ -417,7 +470,7 @@ export async function POST(request: Request) {
       }
       return startBuild(competitorId, () =>
         billed("recreate.generate_page", () =>
-          runUnifiedRecreation(competitorId, {
+          buildPage(competitorId, {
             force: true,
             userFeedback: userFeedback || undefined,
             styleDirection,
@@ -429,7 +482,7 @@ export async function POST(request: Request) {
     // Default / regenerate_content / generate_content / generate_page → unified
     return startBuild(competitorId, () =>
       billed("recreate.generate_page", () =>
-        runUnifiedRecreation(competitorId, {
+        buildPage(competitorId, {
           force:
             Boolean(body.force) ||
             Boolean(userFeedback) ||
@@ -485,6 +538,13 @@ export async function GET(request: Request) {
       );
     }
     const access = resolveProjectAccess("search", competitor.runId, user, "view");
+    // A design-agent run outlives a restart on the agent's side: follow it again.
+    if (
+      isManusPage(competitor.recreatedPage) &&
+      (competitor.recreatedPage?.status === "pending" || competitor.recreatedPage?.status === "design_pending")
+    ) {
+      resumeManusRecreation(competitorId);
+    }
     // Pages built before the image fix can show broken images: put them back.
     const builtPage = competitor.recreatedPage;
     if (builtPage?.html && builtPage.status === "completed" && hasBrokenImages(builtPage.html)) {

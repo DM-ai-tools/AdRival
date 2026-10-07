@@ -1066,6 +1066,8 @@ export type RecreationProgressDetails = {
   screenshotWarnings?: string[];
   /** What the brand colour check on the client's website changed, and why. */
   colorCheckNotes?: string | null;
+  /** Live feed from the design agent: its notes and the actions it runs, oldest first. */
+  activity?: Array<{ id: string; at: number; kind: "note" | "action"; text: string }> | null;
 };
 
 export type RecreationProgressStage = {
@@ -1074,6 +1076,29 @@ export type RecreationProgressStage = {
   status: "pending" | "active" | "done" | "skipped" | "blocked" | "indeterminate";
   detail?: string | null;
   weight?: number;
+};
+
+/** A design-agent (Manus) build, kept on the page so a restart can pick the task up again. */
+export type ManusRecreationState = {
+  taskId: string;
+  taskUrl: string | null;
+  /** "build" = a new page; "edit" = a change request on the delivered page. */
+  mode: "build" | "edit";
+  /** Events before this time belong to earlier turns of the task. */
+  turnStartedAt: number;
+  startedAt: string;
+  /** The context the question answerer uses. */
+  answerContext: string;
+  /** The service the page sells (searched keywords + competitor page), checked on delivery. */
+  service?: { label: string; families: string[]; keywords: string[] } | null;
+  questions: Array<{ eventId: string; question: string; answer: string; byModel: boolean; at: string }>;
+  /** Waiting events already handled, so one is never answered twice. */
+  handledEventIds: string[];
+  /** Times the agent was asked to attach the HTML file after finishing without it. */
+  nudges: number;
+  creditUsage?: number | null;
+  /** The edit request, for an edit turn. */
+  editRequest?: string | null;
 };
 
 /** Generated HTML landing page for the user's brand, inspired by a competitor. */
@@ -1172,6 +1197,8 @@ export interface RecreatedLandingPage {
   } | null;
   /** Style direction chosen for this recreation (see skills/recreate). */
   styleDirection?: "brand" | "minimal" | "soft" | "brutalist" | null;
+  /** Design-agent (Manus) build: the remote task and what happened in it. Server-side only. */
+  manus?: ManusRecreationState | null;
   /** Live progress while content/design is running (polled by UI) */
   progress?: {
     phase: string;

@@ -20,6 +20,8 @@ const VENDOR_REPLACEMENTS: Array<[RegExp, string]> = [
   [/SociaVault/gi, "ad library"],
   [/Sociavault/gi, "ad library"],
   [/Playwright/gi, "page capture"],
+  [/MANUS_API_KEY/gi, "design agent API key"],
+  [/\bManus\b/gi, "design agent"],
   [/OPENROUTER_API_KEY/gi, "analysis API key"],
   [/OPENAI_API_KEY/gi, "content API key"],
   [/ANTHROPIC_API_KEY/gi, "content API key"],
