@@ -302,7 +302,8 @@ One strip per competitor with every offer they run, cheapest first (entry → co
 ### Downloading the dashboard
 
 - **Download … (Excel)** saves the tab you are on.
-- **Download full report (Excel)** saves everything: all ads by competitor, creatives, unique offers, offer ladders and landing pages.
+- **Download offers report (Excel)** saves the offers dashboard: all ads by competitor, creatives, unique offers, offer ladders and landing pages.
+- **Download full report (Excel)** saves the whole run in one file, one sheet per section: your website analysis, the search (and why advertisers were rejected), competitors, landing page analyses, the offers dashboard sheets and recreated pages. The same button sits at the top of every run's results.
 
 ---
 

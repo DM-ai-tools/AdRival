@@ -498,7 +498,7 @@ export function SearchOffersTeaser({
 
 /** Tab → name used on its download button. */
 const SECTION_EXPORT_LABEL: Record<"insights" | "ads" | "pages" | "creatives" | "ladders", string> = {
-  insights: "insights (full report)",
+  insights: "insights (offers report)",
   ads: "ads by competitor",
   pages: "landing pages",
   creatives: "creatives & offers",
@@ -968,9 +968,19 @@ export function SearchOffersDashboard({
           href={`/api/search/offers-report/export?jobId=${encodeURIComponent(job.id)}&part=all`}
           download
         >
+          Download offers report (Excel)
+        </a>
+        <a
+          className="ghost-btn"
+          href={`/api/export/full?jobId=${encodeURIComponent(job.id)}`}
+          download
+        >
           Download full report (Excel)
         </a>
-        <span className="muted">Every ad analysed, creatives, unique offers, ladders and landing pages — one sheet each.</span>
+        <span className="muted">
+          Offers report: every ad analysed, creatives, unique offers, ladders and landing pages. Full report: also your
+          website, the search, competitors and recreated pages. One sheet each.
+        </span>
       </div>
 
       {section === "pages" ? (

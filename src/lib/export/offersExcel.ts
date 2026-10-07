@@ -52,7 +52,7 @@ export type OffersExportInput = {
   part: OffersExportPart;
 };
 
-const BRAND = "FF0F7A6C";
+export const BRAND = "FF0F7A6C";
 const HEADER_FILL: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: BRAND } };
 const BAND_FILL: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEFF6F4" } };
 
@@ -60,13 +60,13 @@ function fits(text: string, focus: ServiceFocus | null, requireMatch = true): bo
   return !focus || offerFitsSearchedService(text, focus, { requireMatch });
 }
 
-function clean(value: unknown): string {
+export function clean(value: unknown): string {
   return String(value ?? "")
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "")
     .trim();
 }
 
-function date(value?: string | null): string {
+export function date(value?: string | null): string {
   if (!value) return "";
   const t = Date.parse(value);
   return Number.isFinite(t) ? new Date(t).toISOString().slice(0, 10) : clean(value);
@@ -79,14 +79,14 @@ function funnel(stage?: string | null): string {
   return "";
 }
 
-function link(url?: string | null, text?: string): ExcelJS.CellValue {
+export function link(url?: string | null, text?: string): ExcelJS.CellValue {
   const u = clean(url);
   if (!/^https?:\/\//i.test(u)) return u;
   return { text: text || u, hyperlink: u };
 }
 
 /** Header style, filters, frozen header, wrapped long text, banded rows. */
-function styleSheet(sheet: ExcelJS.Worksheet, wrapKeys: string[]) {
+export function styleSheet(sheet: ExcelJS.Worksheet, wrapKeys: string[]) {
   const header = sheet.getRow(1);
   header.font = { bold: true, color: { argb: "FFFFFFFF" } };
   header.fill = HEADER_FILL;
@@ -350,17 +350,16 @@ function addPagesSheet(wb: ExcelJS.Workbook, report: LookupOffersReport, focus: 
   return { pages: pages.length };
 }
 
-export async function buildOffersWorkbook(input: OffersExportInput): Promise<Buffer> {
-  const wb = new ExcelJS.Workbook();
-  wb.creator = "AdRival";
-  wb.created = new Date();
-  const part = input.part;
-  const summary = wb.addWorksheet("Summary");
-  summary.columns = [
-    { header: "", key: "k", width: 26 },
-    { header: "", key: "v", width: 90 },
-  ];
-
+/**
+ * The offers dashboard's data sheets (ads, creatives, unique offers, ladders,
+ * landing pages) added to a workbook; returns what each holds. The full run
+ * report reuses this.
+ */
+export function addOffersSheets(
+  wb: ExcelJS.Workbook,
+  input: Pick<OffersExportInput, "report" | "ads" | "focus">,
+  part: OffersExportPart = "all",
+): Array<[string, string | number]> {
   const counts: Array<[string, string | number]> = [];
   if (part === "all" || part === "ads") {
     const r = addAdsSheet(wb, input.ads);
@@ -378,6 +377,21 @@ export async function buildOffersWorkbook(input: OffersExportInput): Promise<Buf
     const r = addPagesSheet(wb, input.report, input.focus);
     counts.push(["Landing pages", r.pages]);
   }
+  return counts;
+}
+
+export async function buildOffersWorkbook(input: OffersExportInput): Promise<Buffer> {
+  const wb = new ExcelJS.Workbook();
+  wb.creator = "AdRival";
+  wb.created = new Date();
+  const part = input.part;
+  const summary = wb.addWorksheet("Summary");
+  summary.columns = [
+    { header: "", key: "k", width: 26 },
+    { header: "", key: "v", width: 90 },
+  ];
+
+  const counts = addOffersSheets(wb, input, part);
 
   const title = summary.addRow({ k: input.title });
   title.font = { bold: true, size: 16, color: { argb: BRAND } };
