@@ -1,55 +1,53 @@
 import { NextResponse } from "next/server";
 import { getCompetitor, getJob, getLookupJob, updateCompetitor, updateJob, updateLookupJob } from "@/lib/db";
-import { repairPackEvidence } from "@/lib/pipeline/content/evidenceIds";
 import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
 import { runBillable } from "@/lib/accounting/run";
 import { isCreditError } from "@/lib/accounting/errors";
-import type {
-  CompetitorRecord,
-  LandingContentBlock,
-  LandingContentDocument,
-} from "@/lib/types";
-import {
-  acceptContentProposal,
-  approveRecreationContent,
-  confirmContentClaim,
-  discardContentProposal,
-  refreshBrandColorsForRecreation,
-  regenerateContentSection,
-  regenerateGeneratedImageForRecreation,
-  saveRecreationContentEdits,
-  undoContentRevision,
-  updateRecreationIntent,
-} from "@/lib/pipeline/recreateLandingPage";
-import {
-  generateMissingUnifiedImages,
-  isUnifiedRunActive,
-  runUnifiedRecreation,
-  stopUnifiedRecreation,
-} from "@/lib/pipeline/unified/run";
-import { recreationActionPermission } from "@/lib/pipeline/content/permissions";
-import { editRecreatedPage, undoLastEdit } from "@/lib/pipeline/unified/editPage";
-import { hasBrokenImages, repairPageImages } from "@/lib/pipeline/unified/integrity";
-import { draftIsCurrent } from "@/lib/pipeline/content/pageIntent";
-import type { CanonicalContent } from "@/lib/pipeline/content/model";
-import { ContentRevisionError } from "@/lib/pipeline/content/revisions";
+import type { CompetitorRecord } from "@/lib/types";
 import { sanitizeClientFacingText, maskRecreatedPage, maskPageAnalysis } from "@/lib/clientFacing";
-import { isStyleDirection, type StyleDirection } from "@/lib/pipeline/skills/playbook";
+import { isStyleDirection } from "@/lib/pipeline/skills/playbook";
 import {
+  cleanScreenshots,
   editManusRecreation,
-  isManusPage,
   isManusRunActive,
-  recreatePipeline,
   resumeManusRecreation,
   runManusRecreation,
   stopManusRecreation,
+  undoManusChange,
 } from "@/lib/pipeline/manus/run";
 
 export const runtime = "nodejs";
-/** Landing HTML streams can take well past 10 minutes. */
+/** A design-agent build runs well past 10 minutes; it continues after the reply. */
 export const maxDuration = 1800;
 
 const LOOKUP_RECREATE_PREFIX = "lookup-recreate-";
+
+/** Actions of the earlier built-in pipeline (content review, image slots, colour refresh). */
+const RETIRED_ACTIONS = new Set([
+  "save_content",
+  "update_intent",
+  "approve_content",
+  "accept_proposal",
+  "discard_proposal",
+  "undo_content",
+  "confirm_fact",
+  "regenerate_section",
+  "refresh_brand_colors",
+  "regenerate_image",
+  "generate_missing_images",
+]);
+
+/** Every action that builds the whole page. */
+const BUILD_ACTIONS = new Set([
+  "generate_page",
+  "generate_content",
+  "regenerate_page",
+  "regenerate_content",
+  "approve_and_build",
+  "build_design",
+  "regenerate_design",
+  "revise_page",
+]);
 
 /** "acme.com.au/" → "https://acme.com.au", or null when it is not a website. */
 function normalizeWebsite(raw: unknown): string | null {
@@ -75,7 +73,7 @@ function brandFor(runId: string): { businessUrl: string | null; businessName: st
 }
 
 /**
- * A page build takes 8-10 minutes, longer than the hosting proxy keeps a
+ * A page build takes many minutes, longer than the hosting proxy keeps a
  * request open (it answers "upstream error" and the build result is lost).
  * The build runs on after the response; the page follows it by polling.
  * Errors that happen straight away (credits, missing analysis) still come
@@ -131,23 +129,6 @@ function pageForClient<T extends { previousHtml?: string | null } | null | undef
   return { ...rest, canUndo: Boolean(previousHtml) } as unknown as T;
 }
 
-/**
- * A full page build with the pipeline RECREATE_PIPELINE selects: the design
- * agent ("manus") or the built-in pipeline (default).
- */
-function buildPage(
-  competitorId: string,
-  options: { force?: boolean; userFeedback?: string; styleDirection?: StyleDirection },
-): Promise<CompetitorRecord> {
-  if (recreatePipeline() === "manus") {
-    return runManusRecreation(competitorId, {
-      userFeedback: options.userFeedback || null,
-      styleDirection: options.styleDirection || null,
-    });
-  }
-  return runUnifiedRecreation(competitorId, options);
-}
-
 function maskCompetitor<T extends {
   recreatedPage?: unknown;
   pageAnalysis?: unknown;
@@ -187,18 +168,28 @@ export async function POST(request: Request) {
       typeof body.userFeedback === "string"
         ? body.userFeedback.trim().slice(0, 4000)
         : "";
+    // Screenshots pasted with the feedback, sent to the design agent as images.
+    const screenshots = cleanScreenshots(body.screenshots);
 
-    const action = String(body.action || "generate_content").trim();
+    const action = String(body.action || "generate_page").trim();
     // Look for the page: match the brand (default), minimal, soft or brutalist.
     const styleDirection = isStyleDirection(body.styleDirection) ? body.styleDirection : undefined;
     const styleChanged = Boolean(styleDirection && styleDirection !== (existing.recreatedPage?.styleDirection || "brand"));
 
-    // save_content only rewrites stored copy, so it needs edit rather than run.
+    if (RETIRED_ACTIONS.has(action)) {
+      resolveProjectAccess("search", existing.runId, user, "view");
+      return NextResponse.json(
+        { error: "This option is no longer available. Describe the change in the feedback box and press Apply changes." },
+        { status: 410 },
+      );
+    }
+
+    // Saving the website and going back to the earlier page spend nothing; the rest are runs.
     resolveProjectAccess(
       "search",
       existing.runId,
       user,
-      recreationActionPermission(action),
+      action === "set_business_url" || action === "undo_edit" ? "edit" : "run",
     );
 
     // A search run without the client's website: save it so recreation can
@@ -224,13 +215,15 @@ export async function POST(request: Request) {
     }
 
     if (action === "stop") {
-      const competitor = isManusPage(existing.recreatedPage)
-        ? await stopManusRecreation(competitorId)
-        : stopUnifiedRecreation(competitorId);
+      const competitor = await stopManusRecreation(competitorId);
       return NextResponse.json({ competitor: maskCompetitor(competitor), stopped: true });
     }
 
-    // Every remaining branch reaches an LLM, Firecrawl, Brandfetch or Runway.
+    if (action === "undo_edit") {
+      return NextResponse.json({ competitor: maskCompetitor(undoManusChange(competitorId)), cached: false });
+    }
+
+    // Every remaining action reaches the design agent and the AI that answers its questions.
     const billed = <T>(operation: string, fn: () => Promise<T>) =>
       runBillable(
         {
@@ -242,255 +235,46 @@ export async function POST(request: Request) {
         },
         fn,
       );
-    const blocks = Array.isArray(body.blocks)
-      ? (body.blocks as LandingContentBlock[])
-      : undefined;
-    const document =
-      body.document && typeof body.document === "object"
-        ? (body.document as LandingContentDocument)
-        : undefined;
 
-    const useManus = recreatePipeline() === "manus";
-    // Design agent: a finished page is returned unless a rebuild is asked for, a running one is followed.
-    if (useManus && (action === "generate_content" || action === "generate_page") && !body.force) {
-      if (isManusRunActive(existing.recreatedPage)) {
-        return NextResponse.json({ competitor: maskCompetitor(existing), cached: true, inFlight: true });
-      }
-      if (
-        !userFeedback &&
-        !styleChanged &&
-        isManusPage(existing.recreatedPage) &&
-        existing.recreatedPage?.status === "completed" &&
-        existing.recreatedPage.html
-      ) {
-        return NextResponse.json({ competitor: maskCompetitor(existing), cached: true });
-      }
-    }
-
-    // Cached completed unified page
-    if (
-      (action === "generate_content" || action === "generate_page") &&
-      !body.force &&
-      !userFeedback &&
-      !styleChanged &&
-      existing.recreatedPage?.pipelineVersion?.startsWith("unified") &&
-      existing.recreatedPage.status === "completed" &&
-      existing.recreatedPage.html
-    ) {
-      return NextResponse.json({ competitor: maskCompetitor(existing), cached: true });
-    }
-    if (
-      (action === "generate_content" || action === "generate_page") &&
-      !body.force &&
-      isUnifiedRunActive(existing.recreatedPage) &&
-      existing.recreatedPage?.pipelineVersion?.startsWith("unified")
-    ) {
-      return NextResponse.json({ competitor: maskCompetitor(existing), cached: true, inFlight: true });
-    }
-
-    // Cached completed page with approved content (legacy)
-    if (
-      action === "generate_content" &&
-      !body.force &&
-      !userFeedback &&
-      existing.recreatedPage?.contentPack &&
-      !existing.recreatedPage.contentPack.legacy &&
-      existing.recreatedPage.contentPack.canonical.sections.length > 0 &&
-      !existing.recreatedPage.pipelineVersion?.startsWith("unified") &&
-      draftIsCurrent(existing.recreatedPage.contentPack)
-    ) {
-      return NextResponse.json({ competitor: maskCompetitor(existing), cached: true });
-    }
-
-    if (action === "save_content") {
-      const canonical =
-        body.canonical && typeof body.canonical === "object"
-          ? (body.canonical as CanonicalContent)
-          : null;
-      const expectedRevision =
-        typeof body.expectedRevision === "number" ? body.expectedRevision : null;
-      if (!canonical && !blocks?.length && !document?.sections?.length) {
-        return NextResponse.json(
-          { error: "document or blocks are required to save content edits" },
-          { status: 400 },
-        );
-      }
-      const competitor = saveRecreationContentEdits(
-        competitorId,
-        blocks || existing.recreatedPage?.contentDraft?.blocks || [],
-        document,
-        canonical,
-        expectedRevision,
-      );
-      return NextResponse.json({ competitor: maskCompetitor(competitor), cached: false });
-    }
-
-    if (action === "update_intent") {
-      const confirmed = Array.isArray(body.confirmedTerms)
-        ? body.confirmedTerms.map((item: unknown) => String(item)).filter(Boolean)
-        : undefined;
-      const competitor = updateRecreationIntent(
-        competitorId,
-        {
-          primaryService: typeof body.primaryService === "string" ? body.primaryService : undefined,
-          offerConcept: typeof body.offerConcept === "string" ? body.offerConcept : undefined,
-          confirmedTerms: confirmed,
-        },
-        Number(body.expectedRevision),
-      );
-      return NextResponse.json({ competitor: maskCompetitor(competitor), cached: false });
-    }
-
-    if (action === "approve_content") {
-      const expectedRevision = Number(body.expectedRevision);
-      if (!Number.isFinite(expectedRevision)) {
-        return NextResponse.json({ error: "expectedRevision is required" }, { status: 400 });
-      }
-      const competitor = approveRecreationContent(competitorId, expectedRevision);
-      return NextResponse.json({ competitor: maskCompetitor(competitor), cached: false });
-    }
-
-    if (action === "accept_proposal") {
-      return NextResponse.json({ competitor: maskCompetitor(acceptContentProposal(competitorId)), cached: false });
-    }
-    if (action === "discard_proposal") {
-      return NextResponse.json({ competitor: maskCompetitor(discardContentProposal(competitorId)), cached: false });
-    }
-    if (action === "undo_content") {
-      const expectedRevision = Number(body.expectedRevision);
-      return NextResponse.json({
-        competitor: undoContentRevision(competitorId, expectedRevision),
-        cached: false,
-      });
-    }
-    if (action === "confirm_fact") {
-      const competitor = confirmContentClaim(
-        competitorId,
-        String(body.sectionId || ""),
-        String(body.value || ""),
-        user.username,
-      );
-      return NextResponse.json({ competitor: maskCompetitor(competitor), cached: false });
-    }
-
-    if (action === "regenerate_section") {
-      const competitor = await billed("recreate.generate_content", () =>
-        regenerateContentSection(
-          competitorId,
-          String(body.sectionId || ""),
-          userFeedback,
-          Number(body.expectedRevision),
-        ),
-      );
-      return NextResponse.json({ competitor: maskCompetitor(competitor), cached: false });
-    }
-
-    if (action === "refresh_brand_colors") {
-      const result = await billed("recreate.refresh_brand_colors", () =>
-        refreshBrandColorsForRecreation(competitorId),
-      );
-      return NextResponse.json({
-        competitor: result.competitor,
-        warnings: result.warnings,
-        cached: false,
-      });
-    }
-
-    if (action === "regenerate_image") {
-      const imageId = String(body.imageId ?? "").trim();
-      if (!imageId) {
-        return NextResponse.json(
-          { error: "imageId is required" },
-          { status: 400 },
-        );
-      }
-      const competitor = await billed("recreate.regenerate_image", () =>
-        regenerateGeneratedImageForRecreation(
-          competitorId,
-          imageId,
-          typeof body.feedback === "string" ? body.feedback : userFeedback,
-        ),
-      );
-      return NextResponse.json({ competitor: maskCompetitor(competitor), cached: false });
-    }
-
-    if (action === "generate_missing_images") {
-      const competitor = await billed("recreate.regenerate_image", () =>
-        generateMissingUnifiedImages(competitorId),
-      );
-      return NextResponse.json({ competitor: maskCompetitor(competitor), cached: false });
-    }
-
-    // Targeted changes: only the parts the request mentions are rewritten;
-    // the whole page is rebuilt only when the request asks for that.
+    // Targeted changes: the same agent task makes them on the page it built.
     if (action === "edit_page") {
-      const request = userFeedback || (typeof body.request === "string" ? body.request.trim().slice(0, 4000) : "");
-      if (!request) {
+      const change = userFeedback || (typeof body.request === "string" ? body.request.trim().slice(0, 4000) : "");
+      if (!change && !screenshots.length) {
         return NextResponse.json({ error: "Describe the changes you want." }, { status: 400 });
       }
       if (!existing.recreatedPage?.html) {
         return NextResponse.json({ error: "There is no finished page to change yet. Create the page first." }, { status: 400 });
       }
-      // A design-agent page: the same agent task makes the change.
-      if (useManus && isManusPage(existing.recreatedPage)) {
-        return startBuild(competitorId, () =>
-          billed("recreate.edit_page", () => editManusRecreation(competitorId, request)),
-        );
-      }
       return startBuild(competitorId, () =>
-        billed("recreate.edit_page", async () => {
-          const outcome = await editRecreatedPage(competitorId, request);
-          if (!outcome.full) return outcome.competitor;
-          return buildPage(competitorId, { force: true, userFeedback: outcome.feedback, styleDirection });
-        }),
-      );
-    }
-
-    if (action === "undo_edit") {
-      return NextResponse.json({ competitor: maskCompetitor(undoLastEdit(competitorId)), cached: false });
-    }
-
-    if (
-      action === "approve_and_build" ||
-      action === "build_design" ||
-      action === "regenerate_design" ||
-      action === "revise_page"
-    ) {
-      // A finished page that only failed validation should be returned, not rebuilt.
-      const prior = existing.recreatedPage;
-      const priorHtml = prior?.html || "";
-      const validationLeftover = Boolean(
-        priorHtml &&
-          /<\/html>/i.test(priorHtml) &&
-          (prior?.error || (prior?.publishBlockers || []).length) &&
-          prior?.status !== "pending",
-      );
-      if (!userFeedback && validationLeftover && (action === "regenerate_design" || action === "revise_page")) {
-        return NextResponse.json({ competitor: maskCompetitor(existing), cached: true });
-      }
-      return startBuild(competitorId, () =>
-        billed("recreate.generate_page", () =>
-          buildPage(competitorId, {
-            force: true,
-            userFeedback: userFeedback || undefined,
-            styleDirection,
-          }),
+        billed("recreate.edit_page", () =>
+          editManusRecreation(competitorId, change || "Make the changes shown in the attached screenshots.", screenshots),
         ),
       );
     }
 
-    // Default / regenerate_content / generate_content / generate_page → unified
+    if (!BUILD_ACTIONS.has(action)) {
+      return NextResponse.json({ error: `Unknown action "${action}"` }, { status: 400 });
+    }
+
+    const force =
+      Boolean(body.force) ||
+      Boolean(userFeedback) ||
+      screenshots.length > 0 ||
+      styleChanged ||
+      action !== "generate_page" && action !== "generate_content";
+    // A running build is followed; a finished page is returned unless a rebuild is asked for.
+    if (!force && isManusRunActive(existing.recreatedPage)) {
+      return NextResponse.json({ competitor: maskCompetitor(existing), cached: true, inFlight: true });
+    }
+    if (!force && existing.recreatedPage?.status === "completed" && existing.recreatedPage.html) {
+      return NextResponse.json({ competitor: maskCompetitor(existing), cached: true });
+    }
     return startBuild(competitorId, () =>
       billed("recreate.generate_page", () =>
-        buildPage(competitorId, {
-          force:
-            Boolean(body.force) ||
-            Boolean(userFeedback) ||
-            styleChanged ||
-            action === "regenerate_content" ||
-            action === "regenerate_page",
-          userFeedback: userFeedback || undefined,
+        runManusRecreation(competitorId, {
+          userFeedback: userFeedback || null,
           styleDirection,
+          screenshots,
         }),
       ),
     );
@@ -500,9 +284,6 @@ export async function POST(request: Request) {
         { error: (err as Error).message, code: (err as { code?: string }).code },
         { status: 402 },
       );
-    }
-    if (err instanceof ContentRevisionError) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status: 409 });
     }
     if (err instanceof Error && err.name === "HttpError") {
       return errorResponse(err);
@@ -530,7 +311,7 @@ export async function GET(request: Request) {
         { status: 400 },
       );
     }
-    let competitor = getCompetitor(competitorId);
+    const competitor = getCompetitor(competitorId);
     if (!competitor) {
       return NextResponse.json(
         { error: "Competitor not found" },
@@ -539,45 +320,9 @@ export async function GET(request: Request) {
     }
     const access = resolveProjectAccess("search", competitor.runId, user, "view");
     // A design-agent run outlives a restart on the agent's side: follow it again.
-    if (
-      isManusPage(competitor.recreatedPage) &&
-      (competitor.recreatedPage?.status === "pending" || competitor.recreatedPage?.status === "design_pending")
-    ) {
+    const page = competitor.recreatedPage;
+    if (page?.manus?.taskId && (page.status === "pending" || page.status === "design_pending")) {
       resumeManusRecreation(competitorId);
-    }
-    // Pages built before the image fix can show broken images: put them back.
-    const builtPage = competitor.recreatedPage;
-    if (builtPage?.html && builtPage.status === "completed" && hasBrokenImages(builtPage.html)) {
-      const restored = await repairPageImages(builtPage.html, builtPage.generatedImages, builtPage.brandColors);
-      if (restored.fixed.length) {
-        // A spot that got a placeholder can be filled with "Generate missing images".
-        const note = "Page ready with image placeholders. Generate missing images when credits allow.";
-        const blockers = builtPage.publishBlockers || [];
-        const needsImages = restored.fixed.some((id) => id.startsWith("img-fix-"));
-        const fixedPage = {
-          ...builtPage,
-          html: restored.html,
-          ...(needsImages && !blockers.includes(note) ? { publishBlockers: [...blockers, note], publishReady: false } : {}),
-        };
-        competitor =
-          access.role !== "viewer"
-            ? updateCompetitor(competitorId, { recreatedPage: fixedPage }) || competitor
-            : { ...competitor, recreatedPage: fixedPage };
-      }
-    }
-    const pack = competitor.recreatedPage?.contentPack;
-    if (pack) {
-      const repaired = repairPackEvidence(pack);
-      if (repaired && access.role !== "viewer") {
-        competitor = updateCompetitor(competitorId, {
-          recreatedPage: { ...competitor.recreatedPage!, contentPack: repaired },
-        }) || competitor;
-      } else if (repaired) {
-        competitor = {
-          ...competitor,
-          recreatedPage: { ...competitor.recreatedPage!, contentPack: repaired },
-        };
-      }
     }
     return NextResponse.json({
       competitor: maskCompetitor(competitor),

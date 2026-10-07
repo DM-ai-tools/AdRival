@@ -9,7 +9,6 @@ test("cross-user and viewer mutation attempts are rejected", async () => {
   const { makeUser, makeSearchProject } = await import("./helpers/factories");
   const { HttpError, resolveProjectAccess } = await import("../src/lib/authz");
   const { upsertSpaceMembership, createProjectSpace, transaction } = await import("../src/lib/db");
-  const { recreationActionPermission } = await import("../src/lib/pipeline/content/permissions");
   const owner = await makeUser();
   const other = await makeUser();
   const viewer = await makeUser();
@@ -24,7 +23,7 @@ test("cross-user and viewer mutation attempts are rejected", async () => {
   assert.throws(() => resolveProjectAccess("search", project.id, other, "view"), HttpError);
   const access = resolveProjectAccess("search", project.id, viewer, "view");
   assert.equal(access.role, "viewer");
-  assert.throws(() => resolveProjectAccess("search", project.id, viewer, recreationActionPermission("save_content")), HttpError);
-  assert.throws(() => resolveProjectAccess("search", project.id, viewer, recreationActionPermission("generate_content")), HttpError);
-  assert.throws(() => resolveProjectAccess("search", project.id, viewer, recreationActionPermission("approve_content")), HttpError);
+  // Saving the website / undo need edit; building or changing the page needs run.
+  assert.throws(() => resolveProjectAccess("search", project.id, viewer, "edit"), HttpError);
+  assert.throws(() => resolveProjectAccess("search", project.id, viewer, "run"), HttpError);
 });

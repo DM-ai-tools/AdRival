@@ -9,7 +9,6 @@ after(() => store.cleanup());
 // and with no OpenAI/OpenRouter key the question gets the default answer.
 process.env.MANUS_API_KEY = "test-key";
 process.env.MANUS_POLL_MS = "10";
-process.env.RECREATE_PIPELINE = "manus";
 process.env.MANUS_PROJECT_NAME = "redeisgn pipeline";
 delete process.env.MANUS_PROJECT_ID;
 delete process.env.OPENROUTER_API_KEY;
@@ -132,8 +131,7 @@ test("the design agent builds the page, its question is answered, and a change r
   try {
     const { saveJob, updateCompetitor, getCompetitor } = await import("../src/lib/db");
     const { makeSearchProject, makeCompetitor } = await import("./helpers/factories");
-    const { runManusRecreation, editManusRecreation, recreatePipeline } = await import("../src/lib/pipeline/manus/run");
-    assert.equal(recreatePipeline(), "manus");
+    const { runManusRecreation, editManusRecreation } = await import("../src/lib/pipeline/manus/run");
 
     const job = makeSearchProject({ keyword: "dentist" });
     saveJob({

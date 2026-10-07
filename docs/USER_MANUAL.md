@@ -400,31 +400,26 @@ The page first explains what will be made:
    - **Bold / brutalist**: square corners, solid lines, heavy headlines.
 
    The layout still follows the competitor and the colours stay the client's; the style changes spacing, corners, shadows and type.
-4. Press **Create my page**. It takes a few minutes. A progress bar shows each step, and **Stop** halts it.
+4. Press **Create my page**. A design agent builds the page; this takes a while (often 20-40 minutes). The progress bar shows each step, and a live feed under it shows what the agent is doing right now (for example "Browsing the competitor page", "Building the page", "Checking it against the competitor"). **Stop** halts it. You can leave the page and come back; the build keeps going.
 
 If an earlier attempt failed, the same button says **Try again**.
+
+### What the page is built to do
+
+- Same sections, layout, sizes and spacing as the competitor's page, and the same message in every heading and paragraph, in different words and your client's brand voice.
+- It stays on the service you searched for (for example SEO), with the competitor's headline promise and call to action rewritten for your client.
+- Your client's sharpest logo, their own client/partner logos where the competitor shows a logo strip, their colours, fonts, links and contact details. New photos are made to match where needed.
+- Before handing the page over, the agent compares it with the competitor at desktop and phone size and fixes differences.
 
 ### When the page is ready
 
 - **Download HTML** (the main button) saves the page. **Copy HTML** copies it.
-- **Changing the page.** Type your requests in **Feedback for content** and **Feedback for design**, then choose:
-  - **Request design changes** (or **Apply design feedback**) rebuilds the layout and keeps the current words.
-  - **Regenerate page** writes the whole page again.
-
-  Both replace the current version, so the app asks you to confirm first.
-- **Before you publish.** The notes above the preview say whether the page is ready to publish, or list what to check first. **Match with the competitor page** shows how closely each section follows the original.
-- **Design check.** Every page is checked against 61 design-quality rules (contrast, text size, labels, generated-looking patterns) and web accessibility guidelines. Small problems are fixed automatically; up to three sections with bigger problems are polished once more, and kept only if they come out cleaner and still match the competitor. **Design check** under the preview lists what was fixed, what is left to review, and what comes from the client's brand (for example a very common font), which is left as it is.
-- **Changing the look.** **Look of the page** above the feedback boxes switches the style; press **Regenerate page** to rebuild in it.
-- **Colours.** The colour row shows the palette taken from your client’s site. **Re-analyze brand colors** reads the site again, and **Apply colors to design** rebuilds the page with the new colours.
-- **Advanced: the brand style file used for this page** lists the colours, fonts, spacing and components the page was built with, as a DESIGN.md file. **Download DESIGN.md** saves it for a developer or another design tool.
-
-### Generated images
-
-Under the preview, each image card shows where the image goes and its shape.
-
-- To remake one image, type notes (for example “brighter room, fewer people”) and regenerate it. The rest of the page stays as it is.
-- **Download** saves one image; **Download all** saves them all.
-- **Generate missing images** appears if some images could not be made.
+- **Changing the page.** Write what you want in the **Feedback** box. To show the exact part you mean, paste a screenshot into the box (Ctrl+V), drop one on it, or press **Add screenshot** (up to 6). Then choose:
+  - **Apply changes** changes only what you describe and keeps the rest as built.
+  - **Regenerate page** builds the whole page again, using your feedback and screenshots.
+- **Undo last change** goes back to the page as it was before the last change or rebuild.
+- **Before you publish.** The notes above the preview say whether the page is ready, or list what to check first (for example a hero that does not name the searched service, or proof the client still has to supply).
+- **Changing the look.** **Look of the page** above the feedback box switches the style; press **Regenerate page** to rebuild in it.
 
 ### A sensible order
 

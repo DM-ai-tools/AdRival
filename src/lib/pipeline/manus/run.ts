@@ -26,6 +26,7 @@ import {
   sendManusMessage,
   stopManusTask,
   type ManusAttachment,
+  type ManusContentPart,
   type ManusEvent,
   type ManusStatusDetail,
 } from "../../manus/client";
@@ -43,9 +44,8 @@ import {
 import { answerAgentQuestion } from "./answer";
 
 /**
- * Landing page recreation by the Manus agent, alongside the built-in
- * pipeline (src/lib/pipeline/unified). RECREATE_PIPELINE=manus switches the
- * recreate page to this one; anything else keeps the built-in pipeline.
+ * Landing page recreation by the Manus agent. (The earlier built-in
+ * pipeline is kept on the git branch backup/both-recreate-pipelines-2026-10-07.)
  *
  * The agent runs on Manus's servers: we send the brief, poll the task, answer
  * its questions with the fast OpenAI model, handle confirmations, then
@@ -139,6 +139,9 @@ async function manusConnectors(): Promise<string[] | undefined> {
   return ids.length ? Array.from(new Set(ids)) : undefined;
 }
 
+/** The Manus project (cloud folder) recreate tasks go into unless MANUS_PROJECT_NAME/ID says otherwise. */
+const DEFAULT_PROJECT_NAME = "redeisgn pipeline";
+
 let projectCache: { key: string; id: string; name: string } | null = null;
 
 /**
@@ -149,7 +152,8 @@ let projectCache: { key: string; id: string; name: string } | null = null;
 async function manusProject(): Promise<{ id: string; name: string } | null> {
   const id = process.env.MANUS_PROJECT_ID?.trim();
   if (id) return { id, name: id };
-  const name = process.env.MANUS_PROJECT_NAME?.trim();
+  // Empty MANUS_PROJECT_NAME= turns the folder off; unset uses the team's folder.
+  const name = (process.env.MANUS_PROJECT_NAME ?? DEFAULT_PROJECT_NAME).trim();
   if (!name) return null;
   if (projectCache?.key === name) return { id: projectCache.id, name: projectCache.name };
   const projects = await listManusProjects();
@@ -160,11 +164,6 @@ async function manusProject(): Promise<{ id: string; name: string } | null> {
   }
   projectCache = { key: name, id: hit.id, name: hit.name };
   return { id: hit.id, name: hit.name };
-}
-
-/** Which recreate pipeline the app uses: "manus" or the built-in "unified". */
-export function recreatePipeline(): "manus" | "unified" {
-  return process.env.RECREATE_PIPELINE?.trim().toLowerCase() === "manus" ? "manus" : "unified";
 }
 
 export function isManusPage(page: RecreatedLandingPage | null | undefined): boolean {
@@ -435,12 +434,58 @@ async function anchorTurn(taskId: string, sentText: string, sentAfter: number, s
   return sentAfter;
 }
 
+// ── Screenshots the user pastes with feedback ───────────────────────────
+
+/** An image the user pasted to show which part of the page they mean. */
+export type FeedbackScreenshot = { name: string; dataUrl: string };
+
+export const MAX_SCREENSHOTS = 6;
+const MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Keeps only real PNG/JPEG/WebP data URLs within the size limit, at most
+ * MAX_SCREENSHOTS. Anything else is dropped.
+ */
+export function cleanScreenshots(raw: unknown): FeedbackScreenshot[] {
+  if (!Array.isArray(raw)) return [];
+  const out: FeedbackScreenshot[] = [];
+  for (const item of raw) {
+    const dataUrl = String((item as { dataUrl?: unknown })?.dataUrl || "");
+    const m = /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
+    if (!m) continue;
+    if (Math.floor((m[2].length * 3) / 4) > MAX_SCREENSHOT_BYTES) continue;
+    const ext = m[1] === "jpeg" ? "jpg" : m[1];
+    out.push({ name: `screenshot-${out.length + 1}.${ext}`, dataUrl });
+    if (out.length >= MAX_SCREENSHOTS) break;
+  }
+  return out;
+}
+
+function screenshotParts(shots: FeedbackScreenshot[]): ManusContentPart[] {
+  return shots.map((s) => ({
+    type: "file" as const,
+    filename: s.name,
+    mime_type: s.dataUrl.slice(5, s.dataUrl.indexOf(";")),
+    file_data: s.dataUrl,
+  }));
+}
+
+function screenshotNote(shots: FeedbackScreenshot[]): string {
+  return shots.length
+    ? `\n\nThe user attached ${shots.length} screenshot${shots.length === 1 ? "" : "s"} (${shots.map((s) => s.name).join(", ")}) showing the parts they mean. Look at them carefully.`
+    : "";
+}
+
 // ── Start, edit, stop, resume ───────────────────────────────────────────
 
 /** Builds the page with the design agent. Returns when the page is ready or the run failed. */
 export async function runManusRecreation(
   competitorId: string,
-  options: { userFeedback?: string | null; styleDirection?: StyleDirection | null } = {},
+  options: {
+    userFeedback?: string | null;
+    styleDirection?: StyleDirection | null;
+    screenshots?: FeedbackScreenshot[];
+  } = {},
 ): Promise<CompetitorRecord> {
   if (!hasManusKey()) throw new Error("The design agent is not set up yet: add MANUS_API_KEY to the environment.");
   const competitor = getCompetitor(competitorId);
@@ -503,7 +548,8 @@ export async function runManusRecreation(
 
   try {
     const brief = buildManusBrief(input);
-    const taskMessage = buildManusTaskMessage(input);
+    const shots = options.screenshots || [];
+    const taskMessage = `${buildManusTaskMessage(input)}${screenshotNote(shots)}`;
     const project = await manusProject();
     const connectors = await manusConnectors();
     const sentAt = Date.now();
@@ -523,6 +569,7 @@ export async function runManusRecreation(
             mime_type: "text/markdown",
             file_data: `data:text/markdown;base64,${Buffer.from(brief, "utf8").toString("base64")}`,
           },
+          ...screenshotParts(shots),
         ],
       },
     });
@@ -561,12 +608,16 @@ export async function runManusRecreation(
  * the request, so the agent keeps everything it learned. Falls back to a new
  * build with the request when the task can no longer be continued.
  */
-export async function editManusRecreation(competitorId: string, request: string): Promise<CompetitorRecord> {
+export async function editManusRecreation(
+  competitorId: string,
+  request: string,
+  screenshots: FeedbackScreenshot[] = [],
+): Promise<CompetitorRecord> {
   const competitor = getCompetitor(competitorId);
   const page = competitor?.recreatedPage;
   if (!competitor || !page) throw new Error("Competitor not found");
   if (!page.manus?.taskId || !page.html) {
-    return runManusRecreation(competitorId, { userFeedback: request, styleDirection: page.styleDirection || null });
+    return runManusRecreation(competitorId, { userFeedback: request, styleDirection: page.styleDirection || null, screenshots });
   }
   const signal = beginRun(competitorId);
   const taskId = page.manus.taskId;
@@ -576,12 +627,12 @@ export async function editManusRecreation(competitorId: string, request: string)
     progress: progress("build", "The design agent is making your changes…", 10),
   });
   try {
-    const editMessage = buildManusEditMessage(request);
+    const editMessage = `${buildManusEditMessage(request)}${screenshotNote(screenshots)}`;
     const sentAt = Date.now();
     try {
       await sendManusMessage(
         taskId,
-        { content: editMessage },
+        { content: screenshots.length ? [{ type: "text", text: editMessage }, ...screenshotParts(screenshots)] : editMessage },
         MANUS_RESULT_SCHEMA as unknown as Record<string, unknown>,
       );
     } catch (err) {
@@ -590,6 +641,7 @@ export async function editManusRecreation(competitorId: string, request: string)
       return runManusRecreation(competitorId, {
         userFeedback: [page.userFeedback, request].filter(Boolean).join("\n"),
         styleDirection: page.styleDirection || null,
+        screenshots,
       });
     }
     saveState(competitorId, {
@@ -604,6 +656,21 @@ export async function editManusRecreation(competitorId: string, request: string)
   } finally {
     endRun(competitorId, signal);
   }
+}
+
+/** Puts back the page from before the last change or rebuild (and makes that one the Undo). */
+export function undoManusChange(competitorId: string): CompetitorRecord {
+  const page = latestPage(competitorId);
+  if (!page.previousHtml) throw new Error("There is no earlier version to go back to.");
+  savePage(competitorId, {
+    html: page.previousHtml,
+    previousHtml: page.html || null,
+    lastEdit: page.lastEdit ? { ...page.lastEdit, summary: `Undone: ${page.lastEdit.summary}` } : null,
+    progress: progress("deliver", "The last change was undone.", 100, { done: true }),
+  });
+  const latest = getCompetitor(competitorId);
+  if (!latest) throw new Error("Competitor not found");
+  return latest;
 }
 
 /** Stops the agent's task and marks the page stopped. */
@@ -997,7 +1064,7 @@ async function collectResult(
   if (!/<html[\s>]/i.test(html)) html = `<!doctype html>\n<html lang="en">\n${html}\n</html>`;
 
   html = await inlineSiblingFiles(html, attachments, pick.filename || MANUS_HTML_FILENAME);
-  // Same as the built-in pipeline: the stored page carries its own images.
+  // The stored page carries its own images.
   try {
     html = (await embedRemoteImagesInHtml(html, { maxImages: 16 })).html;
   } catch {

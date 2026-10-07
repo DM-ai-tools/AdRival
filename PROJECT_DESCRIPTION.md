@@ -232,49 +232,12 @@ Produces a `BusinessProfile`: industry, offerings, audience, competitor keywords
 3. Prefer Claude for structured extraction; fall back to OpenAI / OpenRouter.
 4. Attach same-landing-page ads (hooks + offers) from the advertiser’s creative set when available.
 
-### 7.4 Content drafting (phase 1)
+### 7.4 Landing-page recreation
 
-**Entry:** recreate API `action: generate_content` / `regenerate_content`  
-**Key files:** `recreateLandingPage.ts`, `markdownContentDraft.ts`, `contentDraft.ts`, `extractPageTextSlots.ts`
+**Entry:** recreate API (`/api/competitors/recreate-page`)
+**Key files:** `src/lib/pipeline/manus/{brief,run,answer}.ts`, `src/lib/manus/client.ts`
 
-**Preferred path (Firecrawl + Claude):**
-
-1. Scrape competitor page markdown via Firecrawl.
-2. In parallel, extract real text placements (CID slots) from a captured/stamped page.
-3. Claude analyzes markdown into a **unified document** (meta, hero, features, FAQs, CTAs, links, logos) rewritten for the user’s brand.
-4. Also fills CID block texts so design paste remains placement-accurate.
-5. UI presents the document together (not only micro-block textareas). Edits sync back into blocks on save/approve.
-
-**Fallback path:** OpenAI slot-by-slot drafting from architecture or page text slots if Firecrawl/Anthropic is unavailable.
-
-### 7.5 Design build (phase 2)
-
-**Entry:** recreate API `action: approve_and_build` / `regenerate_design`  
-**Key files:** `archive/recreateFromArchive.ts`, `rewriteTextByCid.ts`, `mapApprovedContent.ts`, `applyBrandDeterministic.ts`, `generateLandingImages.ts`, `interactiveRuntime.ts`
-
-**Design choices that matter:**
-
-| Concern | Approach |
-|---------|----------|
-| Layout fidelity | Reuse Playwright archive instead of regenerating layout from scratch |
-| Copy placement | Stable `data-cid` IDs map approved text 1:1 into nodes |
-| Brand logos | Stamp `data-adrival-logo` **before** AI image inventory; logos win over AI |
-| Photos | Inventory large content/hero images → Runway GPT Image 2 → embed by `data-adrival-gen-id` |
-| SVG logos as AI refs | Skipped (Runway rejects SVG references); generation continues without logo ref |
-| Interactivity | Inject runtime for FAQ/accordion/tabs/scroll-reveal under `srcDoc` |
-| Failure fallback | Legacy `cloneLandingPage.ts` path if archive recreation fails (publish not ready) |
-
-### 7.6 Image generation
-
-**Key files:** `generateLandingImages.ts`, `runway/client.ts`
-
-1. Inventory photo slots (skip logos, icons, partner strips, tiny UI chrome).
-2. Ask OpenAI for per-slot creative briefs.
-3. Generate images with Runway; store under `public/generated/{competitorId}/`.
-4. Embed into stamped nodes; clear `<picture><source>` so `img src` actually shows.
-5. UI can regenerate a single image with optional feedback.
-
----
+Recreation is done by the Manus design agent; see `docs/RECREATE_PIPELINE.md`. The earlier two-phase built-in pipeline (sections 7.4-7.6 in older versions of this file) was removed on 2026-10-07 and is kept on the git branch `backup/both-recreate-pipelines-2026-10-07`.
 
 ## 8. Data model and storage
 

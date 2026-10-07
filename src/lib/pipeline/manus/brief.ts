@@ -28,7 +28,7 @@ export type ManusBriefInput = {
 /** The file the agent must attach. */
 export const MANUS_HTML_FILENAME = "index.html";
 
-/** Most generated photos per page, as in the built-in pipeline. */
+/** Most generated photos per page. */
 const IMAGE_BUDGET = 6;
 
 /** What the agent reports back once the task finishes (Manus structured output subset). */

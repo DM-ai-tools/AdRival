@@ -1,10 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { draftPrompt, writingBrief } from "../src/lib/pipeline/content/generate";
-import { fidelityIssues } from "../src/lib/pipeline/content/fidelity";
 import { inferPageIntent, isExtractedSource, isPurposeSummary, PROMPT_VERSION, withClientMatch } from "../src/lib/pipeline/content/pageIntent";
-import { planSections } from "../src/lib/pipeline/content/plan";
-import { selectResearchUrls } from "../src/lib/pipeline/content/research";
 import type { ClientEvidenceRecord, CompetitorReference, ContentSection } from "../src/lib/pipeline/content/model";
 
 function competitor(sections: CompetitorReference["sections"], name = "Reference"): CompetitorReference {
@@ -109,102 +105,6 @@ test("a genuine multi-service page is not forced into one service", () => {
   assert.match(intent.primaryService, /electrical rewiring/i);
 });
 
-test("homepage positioning cannot override the competitor service in the brief", () => {
-  const client = evidence([
-    fact("ev-name", "identity", "Click Trends"),
-    fact("ev-home", "service", "Click Trends is an AI-powered marketing agency covering SEO, Meta Ads, email, and web development."),
-    fact("ev-ads", "service", "Click Trends manages Google Ads for independent Australian firms."),
-  ]);
-  const intent = withClientMatch(inferPageIntent(googleAds), client);
-  const brief = JSON.stringify(writingBrief(client, intent));
-  assert.match(brief, /google ads/i);
-  assert.equal(/ai-powered marketing/i.test(brief), false);
-  assert.equal(brief.includes("$99"), false);
-  const prompt = draftPrompt({ evidence: client, competitor: googleAds, intent });
-  assert.match(prompt, /Sell Google Ads/i);
-  assert.equal(prompt.includes("Write original client copy from clientFacts only."), false);
-});
-
-test("research prefers a matching service page over the homepage", () => {
-  const urls = selectResearchUrls(
-    ["https://client.example/", "https://client.example/google-ads", "https://client.example/seo"],
-    "https://client.example/",
-    3,
-    ["google", "ads"],
-  );
-  assert.equal(urls[0], "https://client.example/");
-  assert.ok(urls.indexOf("https://client.example/google-ads") < urls.indexOf("https://client.example/seo"));
-});
-
-test("a homepage-style draft fails service fidelity and a focused draft does not invent the competitor price", () => {
-  const client = evidence([
-    fact("ev-name", "identity", "Click Trends"),
-    fact("ev-home", "positioning", "AI-powered marketing for every channel."),
-    fact("ev-ads", "service", "Click Trends manages Google Ads for independent Australian firms."),
-  ]);
-  const intent = withClientMatch(inferPageIntent(googleAds), client);
-  const drifted = fidelityIssues({
-    draftId: "d",
-    revision: 1,
-    evidenceVersion: 2,
-    clientUrl: "https://client.example",
-    clientName: "Click Trends",
-    competitorUrl: googleAds.sourceUrl,
-    competitorName: googleAds.name,
-    serviceContext: intent.primaryService,
-    audienceContext: null,
-    meta: { title: "Click Trends", description: "" },
-    sections: [
-      draftSection("sec-1", "Supercharge your growth with AI-powered marketing", ["We cover SEO, Meta Ads, email, and web development."]),
-      draftSection("sec-2", "Book your free AI marketing consultation", ["Talk to us about the whole marketing ecosystem."]),
-    ],
-    issues: [],
-    approved: false,
-    approvedAt: null,
-    approvedRevision: null,
-  }, client, googleAds, intent);
-  assert.ok(drifted.some((item) => item.field === "service-fidelity" || item.field === "topic-drift"));
-  const focused = fidelityIssues({
-    draftId: "d",
-    revision: 1,
-    evidenceVersion: 2,
-    clientUrl: "https://client.example",
-    clientName: "Click Trends",
-    competitorUrl: googleAds.sourceUrl,
-    competitorName: googleAds.name,
-    serviceContext: intent.primaryService,
-    audienceContext: null,
-    meta: { title: "Click Trends Google Ads", description: "" },
-    sections: [
-      draftSection("sec-1", "Google Ads management for independent firms", ["Click Trends manages Google Ads for independent Australian firms."]),
-      draftSection("sec-2", "Book a Google Ads activation call", ["Start a Google Ads conversation. The activation price is $99 this week only."]),
-    ],
-    issues: [],
-    approved: false,
-    approvedAt: null,
-    approvedRevision: null,
-  }, client, googleAds, intent);
-  assert.equal(focused.some((item) => item.field === "service-fidelity"), false);
-  assert.ok(focused.some((item) => item.field === "offer-terms"));
-});
-
-test("a missing client service is flagged instead of switching topics", () => {
-  const client = evidence([
-    fact("ev-name", "identity", "Harbour Dental"),
-    fact("ev-other", "service", "Harbour Dental provides teeth whitening and general checkups."),
-  ], "Harbour Dental");
-  const implants = inferPageIntent(competitor([
-    section("src-1", "Dental implants", "Dental implants for missing teeth.", "Present implants", 0),
-  ]));
-  const intent = withClientMatch(implants, client);
-  assert.equal(intent.clientMatch, "no");
-  const plans = planSections(competitor([
-    section("src-1", "Dental implants", "Dental implants for missing teeth.", "Present implants", 0),
-  ]), client, intent);
-  assert.equal(plans[0].decision, "needs_input");
-  assert.match(plans[0].reason, /not switched/i);
-});
-
 test("a purpose summary is not labeled as extracted page text", () => {
   assert.equal(isPurposeSummary("Encourages visitors to book an activation call."), true);
   assert.equal(isExtractedSource({ textKind: "summary", sourceText: "Promotes a special offer to new visitors." }), false);
@@ -212,16 +112,3 @@ test("a purpose summary is not labeled as extracted page text", () => {
   assert.equal(isExtractedSource({ textKind: "source", sourceText: "Book a free activation call today." }), true);
 });
 
-test("section regeneration prompt keeps the locked service brief", () => {
-  const client = evidence([fact("ev-ads", "service", "Click Trends manages Google Ads for independent Australian firms.")]);
-  const intent = withClientMatch(inferPageIntent(googleAds), client);
-  const prompt = draftPrompt({
-    evidence: client,
-    competitor: googleAds,
-    intent,
-    feedback: "Rewrite only competitor section src-2.",
-  });
-  assert.match(prompt, /google ads/i);
-  assert.match(prompt, /src-2/);
-  assert.equal(prompt.includes("untrustedSourceText"), false);
-});
