@@ -65,6 +65,15 @@ const RESERVATION_TOUCH_MS = 5 * 60_000;
 const MAX_MODEL_ANSWERS = 8;
 /** Times a finished run without an HTML file is asked to attach one. */
 const MAX_NUDGES = 2;
+/**
+ * After the agent stops, how long its structured report may lag behind the
+ * page. Manus prepares it as a background job; the page is taken without it
+ * after this.
+ */
+const REPORT_WAIT_MS = 60_000;
+/** After the agent stops without attaching a page, how long background jobs may still deliver one before it is asked for. */
+const FILE_WAIT_MS = 3 * 60_000;
+
 /** Times a delivered page that repeats an image goes back to the agent before it is shown with a note. */
 const MAX_IMAGE_FIXES = 1;
 
@@ -437,7 +446,7 @@ async function anchorTurn(taskId: string, sentText: string, sentAfter: number, s
           e.type === "user_message" &&
           String(e.user_message?.content || "").replace(/\s+/g, " ").includes(probe),
       );
-      if (sent) return sent.timestamp;
+      if (sent) return Number(sent.timestamp);
     } catch {
       /* try again */
     }
@@ -757,6 +766,8 @@ async function follow(competitorId: string, signal: AbortSignal): Promise<Compet
   let shownPct = latestPage(competitorId).progress?.pct || 6;
   let activity: Activity = latestPage(competitorId).progress?.details?.activity || [];
   let lastActivityId = "";
+  /** When this turn was first seen stopped; the page is collected from then on. */
+  let stoppedAt: number | null = null;
 
   for (;;) {
     if (signal.aborted) throw new StoppedError();
@@ -776,7 +787,9 @@ async function follow(competitorId: string, signal: AbortSignal): Promise<Compet
     if (!state) throw new Error("This page has no design agent task");
     let events: ManusEvent[];
     try {
-      events = (await latestManusEvents(state.taskId, 60, true)).filter((e) => e.timestamp >= state.turnStartedAt);
+      // Older runs saved the turn start as text; compare as numbers.
+      const turnStart = Number(state.turnStartedAt) || 0;
+      events = (await latestManusEvents(state.taskId, 60, true)).filter((e) => e.timestamp >= turnStart);
     } catch (err) {
       console.warn("[manus] poll failed; retrying", (err as Error).message);
       await sleep(POLL_MS, signal);
@@ -840,18 +853,26 @@ async function follow(competitorId: string, signal: AbortSignal): Promise<Compet
       continue;
     }
 
+    if (agentStatus !== "stopped") stoppedAt = null;
+
     if (agentStatus === "stopped") {
+      // The page is collected as soon as the agent stops. Background jobs
+      // (its report, follow-up suggestions) do not hold the page back.
+      if (stoppedAt == null) {
+        stoppedAt = Date.now();
+        savePage(competitorId, {
+          progress: progress("deliver", "Collecting the finished page…", Math.max(shownPct, 95), { activity }),
+        });
+      }
       const task = await getManusTask(state.taskId).catch(() => null);
-      if (task?.has_running_background_jobs === true) {
-        await sleep(POLL_MS, signal);
+      const stoppedFor = Date.now() - stoppedAt;
+      const done = await collectResult(competitorId, state, task?.credit_usage ?? null, {
+        waitForReport: task?.has_running_background_jobs !== false && stoppedFor < REPORT_WAIT_MS * timeScale(),
+      });
+      if (done && "waitForReport" in done) {
+        await sleep(POLL_MS / 2, signal);
         continue;
       }
-      savePage(competitorId, {
-        progress: progress("deliver", "Collecting the finished page…", Math.max(shownPct, 95), { activity }),
-      });
-      // The structured report follows the stop by a moment.
-      await sleep(5_000, signal);
-      const done = await collectResult(competitorId, state, task?.credit_usage ?? null);
       if (done && "fixMessage" in done) {
         // The page repeats an image: one round back to the agent before it is shown.
         savePage(competitorId, {
@@ -872,6 +893,12 @@ async function follow(competitorId: string, signal: AbortSignal): Promise<Compet
         continue;
       }
       if (done) return done;
+      // No page yet: background work may still attach it for a short while.
+      if (task?.has_running_background_jobs !== false && stoppedFor < FILE_WAIT_MS * timeScale()) {
+        await sleep(POLL_MS, signal);
+        continue;
+      }
+      stoppedAt = null;
       // Finished without the file: ask once or twice for it.
       if (state.nudges >= MAX_NUDGES) {
         throw new Error("The design agent finished without attaching the HTML page.");
@@ -1092,10 +1119,15 @@ async function collectResult(
   competitorId: string,
   state: ManusRecreationState,
   creditUsage: number | null,
-): Promise<CompetitorRecord | { fixMessage: string; report: ManusResult | null } | null> {
-  const events = await manusEventsSince(state.taskId, state.turnStartedAt);
+  opts: { waitForReport?: boolean } = {},
+): Promise<CompetitorRecord | { fixMessage: string; report: ManusResult | null } | { waitForReport: true } | null> {
+  const events = await manusEventsSince(state.taskId, Number(state.turnStartedAt) || 0);
   const attachments = events.flatMap((e) => e.assistant_message?.attachments || []);
   const structured = [...events].reverse().find((e) => e.type === "structured_output_result")?.structured_output_result;
+  // The page is there but its report is still being prepared: give it a moment, not more.
+  if (!structured && opts.waitForReport && attachments.some((a) => a.url && isHtmlAttachment(a))) {
+    return { waitForReport: true };
+  }
   // A fix round may end without a new report: the one from earlier in this turn still applies.
   const result = structured?.success
     ? (structured.value as unknown as ManusResult)

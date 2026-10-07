@@ -122,14 +122,17 @@ function fakeManus() {
       case "task.listMessages": {
         advance();
         const limit = Number(url.searchParams.get("limit") || 50);
-        return json({ ok: true, messages: [...events].sort((a, b) => b.timestamp - a.timestamp).slice(0, limit), has_more: false });
+        // Like the real API: times come as strings.
+        const page = [...events].sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
+        return json({ ok: true, messages: page.map((e) => ({ ...e, timestamp: String(e.timestamp) })), has_more: false });
       }
       case "connector.list":
         return json({ ok: true, data: [{ id: "C-fc", name: "Firecrawl" }, { id: "C-sl", name: "Slack" }, { id: "C-oa", name: "OpenAI" }] });
       case "project.list":
         return json({ ok: true, data: [{ id: "P0", name: "Research" }, { id: "P1", name: "Redesign Pipeline" }] });
       case "task.detail":
-        return json({ ok: true, task: { id: "T1", status: "stopped", has_running_background_jobs: false, credit_usage: 321 } });
+        // Like the real API after a finished task: background jobs (report, suggestions) still running.
+        return json({ ok: true, task: { id: "T1", status: "stopped", has_running_background_jobs: true, credit_usage: 321 } });
       case "task.stop":
         return json({ ok: true });
       default:

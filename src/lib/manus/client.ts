@@ -201,11 +201,16 @@ export async function stopManusTask(taskId: string): Promise<void> {
 }
 
 /** Newest events first (one page). `verbose` adds plan and tool events. */
+/** Manus sends event times as strings ("1791367222784"); everything here compares them as numbers. */
+function withNumericTime(events: ManusEvent[] | undefined): ManusEvent[] {
+  return (events || []).map((e) => ({ ...e, timestamp: Number(e.timestamp) || 0 }));
+}
+
 export async function latestManusEvents(taskId: string, limit = 50, verbose = true): Promise<ManusEvent[]> {
   const res = await call<{ messages?: ManusEvent[] }>("task.listMessages", {
     query: { task_id: taskId, order: "desc", limit, verbose },
   });
-  return res.messages || [];
+  return withNumericTime(res.messages);
 }
 
 /** Every event since `sinceMs`, oldest first, paging through the history. */
@@ -216,7 +221,7 @@ export async function manusEventsSince(taskId: string, sinceMs: number): Promise
     const res = await call<{ messages?: ManusEvent[]; has_more?: boolean; next_cursor?: string }>("task.listMessages", {
       query: { task_id: taskId, order: "desc", limit: 200, verbose: false, cursor },
     });
-    const batch = res.messages || [];
+    const batch = withNumericTime(res.messages);
     out.push(...batch);
     const reachedStart = batch.some((e) => e.timestamp < sinceMs);
     if (!res.has_more || !res.next_cursor || reachedStart) break;
