@@ -52,47 +52,55 @@ export { normalizeLinkedInCompanyUrl, parseYouTubeFromUrl } from "./socialParams
 /** Competitors brand-reviewed at the same time in a batch run. */
 const BRAND_REVIEW_CONCURRENCY = 3;
 
-/** Landing deep-links often hide footer socials — also scrape origin, apex, contact/about. */
-function scrapeUrlCandidates(website: string): string[] {
+/** Most pages read for social links per brand (it stops early once 4 platforms are found). */
+const MAX_SITE_PAGES = 8;
+/** Firecrawl scrapes per brand, used only for pages that block a direct read. */
+const MAX_FIRECRAWL_PAGES = 3;
+/** Readable pages in a row that add no new platform before reading stops. */
+const MAX_PAGES_WITHOUT_NEW = 3;
+
+/**
+ * Pages to read for a brand's social links, most likely first. Ads often
+ * point at a campaign subdomain or deep link (enquire.brand.com.au/about-us)
+ * whose page has no footer, or no longer exists: the brand's main site
+ * (brand.com.au) and its contact/about pages come right after it.
+ */
+export function scrapeUrlCandidates(website: string): string[] {
   const normalized = normalizeWebsiteUrl(website);
   if (!normalized) return [];
   const out: string[] = [];
   const push = (u: string | null | undefined) => {
     if (!u) return;
     const clean = u.replace(/\/$/, "");
-    if (!out.includes(clean)) out.push(clean);
+    if (!out.some((x) => x.toLowerCase() === clean.toLowerCase())) out.push(clean);
   };
-  const pushWithSocialPages = (origin: string) => {
-    push(origin);
-    for (const path of ["/contact", "/about", "/about-us", "/company"]) {
-      push(`${origin}${path}`);
-    }
+  const socialPages = (origin: string) => {
+    for (const path of ["/contact", "/contact-us", "/about", "/about-us"]) push(`${origin}${path}`);
   };
   try {
     const u = new URL(normalized);
-    push(`${u.origin}${u.pathname}`.replace(/\/$/, "") || u.origin);
-    pushWithSocialPages(u.origin);
-    const host = u.hostname.replace(/^www\./i, "");
+    const host = u.hostname.replace(/^www\./i, "").toLowerCase();
     const parts = host.split(".");
-    if (parts.length >= 3) {
-      let apexHost: string | null = null;
-      if (/\.(com|co|net|org|gov)\.[a-z]{2}$/i.test(host) || parts.length >= 4) {
-        apexHost = parts.slice(-3).join(".");
-      } else if (parts.length === 3) {
-        apexHost = parts.slice(-2).join(".");
-      }
-      if (apexHost && apexHost !== host) {
-        pushWithSocialPages(`${u.protocol}//${apexHost}`);
-      }
-      const parent = parts.slice(1).join(".");
-      if (parent && parent !== host && parent !== apexHost) {
-        pushWithSocialPages(`${u.protocol}//${parent}`);
-      }
+    // The registrable domain: brand.com.au / brand.co.uk / brand.com.
+    const apexHost =
+      /\.(com|co|net|org|gov|edu|asn|id)\.[a-z]{2}$/i.test(host) && parts.length >= 3
+        ? parts.slice(-3).join(".")
+        : parts.slice(-2).join(".");
+    const onSubdomain = apexHost !== host;
+    const apexOrigin = `${u.protocol}//${apexHost}`;
+
+    push(`${u.origin}${u.pathname}`.replace(/\/$/, "") || u.origin);
+    if (onSubdomain) {
+      push(apexOrigin);
+      socialPages(apexOrigin);
     }
+    push(u.origin);
+    socialPages(u.origin);
+    if (!onSubdomain) push(`${u.origin}/company`);
   } catch {
     push(normalized);
   }
-  return out.slice(0, 5);
+  return out.slice(0, MAX_SITE_PAGES);
 }
 
 function brandSlugFromHost(host: string): string | null {
@@ -198,7 +206,7 @@ const PLATFORMS: SocialPlatform[] = ["facebook", "instagram", "twitter", "youtub
  * search for it ran: a website without an Instagram link is not proof the
  * brand has no Instagram.
  */
-type Lookup = {
+export type Lookup = {
   searched: Set<SocialPlatform>;
   siteRead: boolean;
   issues: Set<string>;
@@ -206,7 +214,7 @@ type Lookup = {
   fromSearch: Set<SocialPlatform>;
 };
 
-function newLookup(): Lookup {
+export function newLookup(): Lookup {
   return { searched: new Set(), siteRead: false, issues: new Set(), fromSearch: new Set() };
 }
 
@@ -225,7 +233,7 @@ function paramsHave(params: SociavaultSocialParams, platform: SocialPlatform): b
 }
 
 /** The brand's own website, read without Firecrawl (footer and header social links). */
-async function fetchPageHtml(url: string): Promise<string | null> {
+async function fetchPageHtml(url: string): Promise<{ html: string; finalUrl: string } | { blocked: boolean } | null> {
   try {
     const res = await fetch(url, {
       headers: {
@@ -236,11 +244,14 @@ async function fetchPageHtml(url: string): Promise<string | null> {
       redirect: "follow",
       signal: AbortSignal.timeout(15_000),
     });
-    if (!res.ok) return null;
+    // A page that does not exist is not worth a Firecrawl call; a blocked one is.
+    if (res.status === 404 || res.status === 410) return null;
+    if (!res.ok) return { blocked: true };
     if (!/html/i.test(res.headers.get("content-type") || "")) return null;
-    return (await res.text()).slice(0, 2_000_000);
+    return { html: (await res.text()).slice(0, 2_000_000), finalUrl: res.url || url };
   } catch {
-    return null;
+    // Timeouts and refused connections: the site may block plain requests.
+    return { blocked: true };
   }
 }
 
@@ -357,7 +368,7 @@ async function searchSocialHrefs(
   return hrefs;
 }
 
-async function collectSocialHrefsFromWebsite(
+export async function collectSocialHrefsFromWebsite(
   website: string,
   lookup: Lookup,
   shouldAbort?: () => boolean,
@@ -365,62 +376,88 @@ async function collectSocialHrefsFromWebsite(
   const hrefs: string[] = [];
   let markdown: string | null = null;
   let canonicalWebsite: string | null = normalizeWebsiteUrl(website);
+  /** Whether the address the ad pointed at could be read at all (it may be a 404). */
+  let landingRead = false;
+  /** The first readable home page of the brand's site, used as its website when the landing page is gone. */
+  let homePage: string | null = null;
+  const found = () => platformCount(socialLinksToSociavaultParams(hrefs));
+  const keepText = (html: string) => {
+    if (markdown) return;
+    const text = html
+      .replace(/<(script|style)\b[\s\S]*?<\/\1>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (text) markdown = text.slice(0, 12_000);
+  };
 
   let firecrawlDown = !hasFirecrawlKey();
-  if (firecrawlDown) lookup.issues.add("Firecrawl is not configured");
-  for (const url of scrapeUrlCandidates(website)) {
+  let firecrawlUsed = 0;
+  let readWithoutNew = 0;
+  const candidates = scrapeUrlCandidates(website);
+  for (const [index, url] of candidates.entries()) {
     if (shouldAbort?.()) break;
+    const before = found();
     let read = false;
-    if (!firecrawlDown) {
+
+    // A direct read first: free, and it sees footer icon links Firecrawl sometimes drops.
+    const fetched = await fetchPageHtml(url);
+    const page = fetched && "html" in fetched ? fetched : null;
+    if (page) {
+      read = true;
+      hrefs.push(...extractSocialHrefsFromScrape({ html: page.html }, page.finalUrl));
+      keepText(page.html);
+      if (index === 0) landingRead = true;
+      try {
+        const path = new URL(page.finalUrl).pathname;
+        if (!homePage && (path === "/" || path === "")) homePage = normalizeWebsiteUrl(page.finalUrl);
+      } catch {
+        /* ignore */
+      }
+    }
+
+    // Firecrawl only for a page that blocked the direct read (not for one that does not exist).
+    if (!page && fetched && "blocked" in fetched && !firecrawlDown && firecrawlUsed < MAX_FIRECRAWL_PAGES) {
+      firecrawlUsed += 1;
       try {
         const scraped = await firecrawlScrapeBranding(url);
         const data = scraped.data;
-        if (!markdown && typeof data?.markdown === "string" && data.markdown.trim()) {
-          markdown = data.markdown.slice(0, 12_000);
+        if (data) {
+          read = true;
+          if (index === 0) landingRead = true;
+          if (!markdown && typeof data.markdown === "string" && data.markdown.trim()) {
+            markdown = data.markdown.slice(0, 12_000);
+          }
+          hrefs.push(
+            ...extractSocialHrefsFromScrape(
+              data as { links?: string[]; html?: string | null; markdown?: string | null; branding?: Record<string, unknown> | null },
+              url,
+            ),
+          );
+          if (index === 0 && data.metadata?.sourceURL) {
+            canonicalWebsite = normalizeWebsiteUrl(String(data.metadata.sourceURL)) || canonicalWebsite;
+          }
         }
-        if (data?.metadata?.sourceURL) {
-          canonicalWebsite = normalizeWebsiteUrl(String(data.metadata.sourceURL)) || canonicalWebsite;
-        } else if (!canonicalWebsite) {
-          canonicalWebsite = normalizeWebsiteUrl(url);
-        }
-        hrefs.push(
-          ...extractSocialHrefsFromScrape(
-            data as { links?: string[]; html?: string | null; markdown?: string | null; branding?: Record<string, unknown> | null },
-            url,
-          ),
-        );
-        read = Boolean(data);
       } catch (err) {
         lookup.issues.add(lookupIssue("Firecrawl", err));
         console.warn("[brandReview] Firecrawl scrape failed for", url, (err as Error).message);
         if (/credits|not configured/.test(lookupIssue("Firecrawl", err))) firecrawlDown = true;
       }
     }
-    // Also read the page directly: Firecrawl sometimes misses footer icon
-    // links, and it may be down or out of credits.
-    const foundBefore = platformCount(socialLinksToSociavaultParams(hrefs));
-    if (!read || foundBefore < 5) {
-      const html = await fetchPageHtml(url);
-      if (html) {
-        read = true;
-        hrefs.push(...extractSocialHrefsFromScrape({ html }, url));
-        if (!markdown) {
-          const text = html
-            .replace(/<(script|style)\b[\s\S]*?<\/\1>/gi, " ")
-            .replace(/<[^>]+>/g, " ")
-            .replace(/\s+/g, " ")
-            .trim();
-          if (text) markdown = text.slice(0, 12_000);
-        }
-      }
-    }
+    if (index === 0 && page) canonicalWebsite = normalizeWebsiteUrl(page.finalUrl) || canonicalWebsite;
     if (read) lookup.siteRead = true;
-    if (platformCount(socialLinksToSociavaultParams(hrefs)) >= 4) break;
+    if (found() >= 4) break;
+    if (read) readWithoutNew = found() > before ? 0 : readWithoutNew + 1;
+    if (found() > 0 && readWithoutNew >= MAX_PAGES_WITHOUT_NEW) break;
   }
+  if (!hasFirecrawlKey()) lookup.issues.add("Firecrawl is not configured");
+
+  // The ad's landing page is gone (404) or unreadable: the brand's main site is its website.
+  if (!landingRead && homePage) canonicalWebsite = homePage;
 
   // A site that builds its links with JavaScript: render it once in a browser.
-  if (!platformCount(socialLinksToSociavaultParams(hrefs)) && !shouldAbort?.()) {
-    hrefs.push(...(await renderedSocialLinks(canonicalWebsite || website)));
+  if (!found() && !shouldAbort?.()) {
+    hrefs.push(...(await renderedSocialLinks(homePage || canonicalWebsite || website)));
   }
 
   return { hrefs: Array.from(new Set(hrefs)), markdown, canonicalWebsite };
