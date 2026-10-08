@@ -59,8 +59,22 @@ export const MANUS_RESULT_SCHEMA = {
         logo_source: { type: "string", description: "Where the client's logo came from" },
         colours: { type: "array", items: { type: "string" }, description: "Hex colours used, from the client's site" },
         fonts: { type: "array", items: { type: "string" } },
+        colour_map: {
+          type: "array",
+          description: "Each colour role on the page and the client-site element it was measured from",
+          items: {
+            type: "object",
+            properties: {
+              role: { type: "string", description: "e.g. primary button, secondary button, highlight band, header, footer, card, link, heading" },
+              hex: { type: "string" },
+              measured_from: { type: "string", description: "The client-site element and page it was read from" },
+            },
+            required: ["role", "hex", "measured_from"],
+            additionalProperties: false,
+          },
+        },
       },
-      required: ["logo_source", "colours", "fonts"],
+      required: ["logo_source", "colours", "fonts", "colour_map"],
       additionalProperties: false,
     },
     verification: {
@@ -101,7 +115,12 @@ export type ManusResult = {
   html_filename: string;
   summary: string;
   sections: Array<{ competitor_section: string; rebuilt_as: string; layout_matches: boolean }>;
-  brand: { logo_source: string; colours: string[]; fonts: string[] };
+  brand: {
+    logo_source: string;
+    colours: string[];
+    fonts: string[];
+    colour_map?: Array<{ role: string; hex: string; measured_from: string }>;
+  };
   verification: { desktop_compared: boolean; mobile_compared: boolean; notes: string };
   images?: Array<{ section: string; source: "user_supplied" | "client_website" | "generated"; description: string }>;
   unresolved: string[];
@@ -129,7 +148,7 @@ function clientSection(input: ManusBriefInput): string {
 Services / products (from an earlier analysis — confirm on the website):
 ${list(p?.offerings || [])}
 
-Brand palette found earlier (a starting point only — confirm against the live site and correct it if the site shows otherwise):
+Brand palette guessed by an earlier automatic scan (often wrong: it can come from the logo or an image). Use it only if the site cannot be read; the colours measured on the client's own buttons, bands and tiles always win (see "Colours"):
 ${c ? `- primary ${c.primary}, secondary ${c.secondary}, accent ${c.accent}, background ${c.background}, text ${c.text}` : "- (not found — sample the colours from the website)"}
 Logo found earlier: ${assets?.logoUrl || "(not found — take it from the website header)"}
 Phones: ${(assets?.phones || []).slice(0, 3).join(", ") || "(read from the website)"}
@@ -270,7 +289,7 @@ ${clientSection(input)}
 1. Open the competitor page in a real browser at 1440px wide. Scroll to the bottom so lazy content loads, dismiss cookie banners, then take a full-page screenshot and one screenshot per section. Do the same at 390px wide.
 2. Write down every section from top to bottom, including the header and the footer: section type, number of columns and their ratio, number of cards/items/steps/questions, which side the image sits, text alignment (left or centred), background (plain, tinted, dark, brand colour, gradient or full-width photo), heading sizes and weights, spacing (tight or generous), button shape and style, icons, dividers, logo strips, and the form (fields, number of steps, position). Header: logo position, number of menu items, what sits on each side (phone, address, button). Footer: present or not, columns, how slim.
 3. Measure the competitor with getComputedStyle for each section: font sizes, weights, line heights and letter spacing of headings, leads, body and buttons; container max widths; section padding; gaps between columns and cards; card padding and border radius; image sizes; each section's height. Reproduce these numbers; only colours and fonts swap to the client's (adjust sizes slightly if the client's font runs wider, so lines break in similar places).
-4. Open the client website (browser first, Firecrawl for anything the browser misses). Collect: the sharpest logo file (see "Logo"), the client/partner logos it shows (see "Proof logo strip"), the exact brand colours (sample them from the site's CSS and screenshots), the fonts, the brand voice (how the site talks), the USPs, real services, facts, contact details, menu links, social links, and photos that suit the page.
+4. Open the client website (browser first, Firecrawl for anything the browser misses). Collect: the sharpest logo file (see "Logo"), the client/partner logos it shows (see "Proof logo strip"), the client's colour map (see "Colours": the measured colours of its buttons, bands, tiles, header and footer), the fonts, the brand voice (how the site talks), the USPs, real services, facts, contact details, menu links, social links, and photos that suit the page.
 5. Write the copy for the client (rules below), element by element against the competitor's copy.
 6. Build the HTML page section by section in the competitor's order.
 7. Check it visually (below). Fix every difference you find and check again.
@@ -290,12 +309,24 @@ ${clientSection(input)}
 
 ## Replace with the client's
 - Every word: the same meaning in different words, in the client's brand voice (see "Writing the copy").
-- Colours and fonts: the client's palette and fonts throughout. Where the competitor uses its brand colour, use the client's equivalent. Keep the competitor's light/dark rhythm in the client's colours.
+- Colours and fonts: the client's colour map and fonts throughout (see "Colours"). Keep the competitor's light/dark rhythm in the client's colours.
 - Logo: only the client's real logo, never redrawn or retyped as text (see "Logo").
 - Images: never reuse the competitor's photos, people or graphics (see "Images").
 - Proof logos: the client's own client/partner logos (see "Proof logo strip").
 - Links: menu and footer links go to the client's real pages. Call-to-action buttons go to the page's form (#anchor) or the client's real contact page. Phone links use tel:, email links use mailto:. No dead "#" links.
 - Contact details: only the client's real phone, email and address. Never invent them; if one is missing, put the call-to-action button in its place.
+
+## Colours
+The page's colours come from how the client's own website colours each kind of element, measured on the live site, not guessed from the logo, a photo or the palette above.
+1. Build the client's colour map. On the client's home page and one or two inner pages (services, products, contact), read the computed styles (background-color, color, border-color, and the hover state) of:
+   - primary buttons / main call-to-action buttons (fill, text, border, hover) and secondary or outline buttons;
+   - coloured bands and highlight strips (for example a rating or trust bar, announcement bar, stats strip), tiles, cards and badges: background, text, divider and icon colours;
+   - header, navigation and footer backgrounds and text; links; headings and body text; form fields and focus colours.
+   Take screenshots of those elements and check the measured values against what you see (a button that looks blue is blue on the page).
+2. Map roles from the competitor to the client: wherever the competitor uses a colour for a role, use the client's colour for the SAME role. The competitor's primary button gets the client's primary button colours (fill, text, hover); its coloured bands, tiles and strips get the client's band/tile colours; its header, footer, cards, badges, links and headings get the client's colours for those.
+3. Use the exact hex values you measured, including the client's text colour on each of its buttons and bands. Do not take button or band colours from the logo or a photo, and do not invent a new accent. If the client's site uses a role's colour only rarely (for example one red sale badge), do not promote it to the main button colour.
+4. If the client's site has no element for a role, use the closest role it does have (for example its link or heading colour for an accent), and check contrast.
+5. Report the map in "brand.colour_map": each role, its hex value and the client-site element you measured it from.
 
 ## Logo
 - It must be crisp. Use the SVG when the site has one (inline <svg>, .svg file, or an SVG inside the header link). Otherwise use the largest raster version: check srcset, data-src, retina (@2x/@3x) files, the logo in the site's structured data or og:image if it is the logo, and Firecrawl's branding/logo output. Never use a favicon, a thumbnail or a screenshot crop.
@@ -377,7 +408,7 @@ Open your finished ${MANUS_HTML_FILENAME} in the browser at 1440px and 390px, ta
 - Header and footer match the competitor's arrangement. Every logo strip the competitor has is there, filled with the client's logos.
 - The client's logo shows, is readable, and is sharp at 200% zoom. No competitor logo, name or photo appears anywhere: search the HTML source for the competitor's name and domain and remove any hit.
 - Each heading and lead says the same thing as the competitor's counterpart, in different words, about the same service. The hero headline (or the line under it) names the page's service, and every call to action makes the competitor's offer for that service.
-- Only the client's colours and fonts are used; headings, body text and buttons are aligned the way the competitor's are.
+- Only the client's colours and fonts are used, by role: put a screenshot of the client site's buttons and coloured bands next to yours; the primary buttons, secondary buttons, highlight bands and tiles must use the same colours as the client's own. Headings, body text and buttons are aligned the way the competitor's are.
 - Every photo appears once: no image is repeated in another section or card (only the logo may repeat).
 - No overlapping or clipped text at 1440, 1280, 1024, 768 and 390px (check the hero headline especially). No broken images, no placeholder text, no dead links, no horizontal scrolling on mobile, readable contrast everywhere.
 - The form works: required fields validate and the success message shows.
@@ -403,7 +434,8 @@ ${input.userFeedback ? `User's requests: ${input.userFeedback.slice(0, 1500)}\n`
 The attached brief.md has every rule. Read it completely before you start and follow it exactly:
 - make the page as identical to the competitor as possible: every section in order, the same layout, measured sizes and spacing, card counts, alignment, background types and logo strips
 - every heading and paragraph says the same thing as the competitor's, in different words and the client's brand voice
-- use the client's sharpest logo, its own client/partner logos, colours, fonts, links and contact details (use the Firecrawl connector when the browser misses something)
+- use the client's sharpest logo, its own client/partner logos, fonts, links and contact details (use the Firecrawl connector when the browser misses something)
+- colour every button, band, tile, header and footer with the colours the client's own site uses for that same kind of element (measure them on the live site), not colours from the logo or a guessed palette
 - images: the user's images first, then the client website's own photos; create new ones with the OpenAI connector (gpt-image-2) only for spots those cannot fill. Never use the same image twice
 - never copy the competitor's wording, names or images, and never invent facts, reviews or numbers
 - recreate the competitor's animations, interactions and distinctive effects the same way (scroll, hover and wait on its page to find them)
@@ -437,7 +469,7 @@ Deliverable: one self-contained ${MANUS_HTML_FILENAME} attached to the final mes
 Verification: compare with the competitor at 1440px and 390px and fix differences before delivering.
 Style direction: ${STYLE_DIRECTION_LABEL[input.styleDirection]}.
 Client industry: ${input.profile?.industry || "unknown"}. Services: ${(input.profile?.offerings || []).slice(0, 8).join(", ") || "see website"}.
-Known palette: ${c ? `primary ${c.primary}, secondary ${c.secondary}, accent ${c.accent}, background ${c.background}, text ${c.text}` : "unknown, sample from the client's site"}.
+Colours: measured by role on the client's live site (its buttons, bands, tiles, header, footer), and mapped role for role onto the competitor's layout; never taken from the logo or a photo. An earlier automatic guess (often wrong) was ${c ? `primary ${c.primary}, secondary ${c.secondary}, accent ${c.accent}` : "not available"}.
 Known logo: ${input.profile?.brandAssets?.logoUrl || "take it from the client's site header"}.
 ${input.userFeedback ? `User's requests: ${input.userFeedback}` : ""}
 ${input.userAssets?.length ? `The user supplied images the page must use (embedded as data URIs, in the best-fitting sections, instead of generated images):\n${assetLines(input)}` : ""}`.trim();

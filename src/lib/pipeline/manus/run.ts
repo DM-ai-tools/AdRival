@@ -1099,6 +1099,14 @@ export function heroMissesService(
   return offerFitsSearchedService(heroText(html), focus, { requireMatch: true }) ? null : service.label;
 }
 
+/** One line of agent-reported text, without control characters or extra spaces. */
+function clean(value: unknown): string {
+  return String(value ?? "")
+    .replace(/[\u0000-\u001f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 /** Names of the competitor that must not appear in the client's page. */
 function competitorLeaks(html: string, page: RecreatedLandingPage): string[] {
   const text = html.toLowerCase();
@@ -1175,8 +1183,18 @@ async function collectResult(
     ...(result && !(result.verification.desktop_compared && result.verification.mobile_compared)
       ? ["The agent did not confirm the desktop and mobile comparison."]
       : []),
+    ...(result && !(result.brand?.colour_map || []).some((c) => /button|cta/i.test(c.role))
+      ? ["The agent did not report the client's button colours. Check the buttons and coloured bands against the client's website."]
+      : []),
     ...unresolved.slice(0, 6),
   ];
+  // Which client-site element each colour was measured from, so it can be checked at a glance.
+  const colourNote = (result?.brand?.colour_map || []).length
+    ? `Colours: ${(result?.brand?.colour_map || [])
+        .slice(0, 8)
+        .map((c) => `${clean(c.role)} ${clean(c.hex)}${c.measured_from ? ` (from ${clean(c.measured_from).slice(0, 60)})` : ""}`)
+        .join("; ")}.`
+    : "";
   const imageCount = (source: string) => (result?.images || []).filter((i) => i.source === source).length;
   const imageNote = result?.images?.length
     ? `Images: ${[
@@ -1187,7 +1205,7 @@ async function collectResult(
         .filter(Boolean)
         .join(", ")}.`
     : "";
-  const summary = [result?.summary, result?.verification?.notes, imageNote].filter(Boolean).join(" ");
+  const summary = [result?.summary, result?.verification?.notes, colourNote, imageNote].filter(Boolean).join(" ");
   const editing = state.mode === "edit";
 
   savePage(competitorId, {

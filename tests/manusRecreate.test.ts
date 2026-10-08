@@ -203,6 +203,8 @@ test("the design agent builds the page, its question is answered, and a change r
     assert.equal(page.publishReady, false);
     assert.ok(page.publishBlockers?.some((b) => /Rival Clinic/.test(b)));
     assert.ok(page.publishBlockers?.includes("Add real patient reviews."));
+    // The report named no button colours: flagged for review.
+    assert.ok(page.publishBlockers?.some((b) => /button colours/.test(b)));
     assert.equal(page.manus?.creditUsage, 321);
 
     // The brief went as an attached file, with the task in interactive mode.
@@ -218,6 +220,10 @@ test("the design agent builds the page, its question is answered, and a change r
     assert.match(brief, /Visual check before delivering/);
     // The competitor's motion and distinctive effects are part of what is recreated.
     assert.match(brief, /## Motion and distinctive design/);
+    // Colours are measured by role on the client's site (buttons, bands, tiles), not guessed.
+    assert.match(brief, /## Colours/);
+    assert.match(brief, /primary buttons \/ main call-to-action buttons/);
+    assert.ok(JSON.stringify(create.body.structured_output_schema).includes("colour_map"));
     assert.doesNotMatch(brief, /static HTML file only|no new animations/);
     // The user's image goes with the task as a file, and the brief says to use it.
     assert.ok(parts.some((p) => p.filename === "asset-1.png" && p.file_data === png));
