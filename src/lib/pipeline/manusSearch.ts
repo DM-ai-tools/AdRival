@@ -13,14 +13,15 @@ import { findManusProject } from "../manus/projects";
 
 /**
  * Google / YouTube keyword search: a Manus agent (lite profile) opens Google
- * in the chosen country, reads the Sponsored results for each keyword and
- * checks every advertiser's domain in the Google Ads Transparency Center.
+ * in the chosen country, picks the competing businesses for each keyword
+ * (ads, normal results, the Maps / local pack) and checks each one's domain
+ * in the Google Ads Transparency Center.
  * It writes one line per checked advertiser while it works, so the app can
  * fetch their ads from SociaVault and review them before the agent finishes.
  * City/suburb searches send each wider ring as a follow-up to the same task.
  */
 
-/** One advertiser the agent saw in sponsored results and checked in the Transparency Center. */
+/** One competitor the agent picked from Google and checked in the Transparency Center. */
 export type SponsoredFind = {
   domain: string;
   advertiser: string | null;
@@ -172,19 +173,19 @@ export const SPONSORED_RESULT_SCHEMA = {
   properties: {
     advertisers: {
       type: "array",
-      description: "Every sponsored advertiser checked in the Transparency Center during this request.",
+      description: "Every competitor checked in the Transparency Center during this request.",
       items: {
         type: "object",
         additionalProperties: false,
         required: ["domain", "advertiser", "has_ads", "ads", "search", "headline", "text"],
         properties: {
-          domain: { type: "string", description: "Advertiser website domain, e.g. example.com.au" },
+          domain: { type: "string", description: "The competitor's website domain, e.g. example.com.au" },
           advertiser: { type: ["string", "null"], description: "Advertiser name in the Transparency Center" },
           has_ads: { type: "boolean", description: "The Transparency Center shows ads for this domain in the country" },
           ads: { type: ["integer", "null"], description: "Number of ads the Transparency Center shows, if visible" },
           search: { type: "string", description: "The Google search it appeared for" },
-          headline: { type: ["string", "null"], description: "Headline of the sponsored result" },
-          text: { type: ["string", "null"], description: "Description text of the sponsored result" },
+          headline: { type: ["string", "null"], description: "Title of its Google result (ad headline, result title or Maps name)" },
+          text: { type: ["string", "null"], description: "Text of its Google result (ad text, snippet or Maps category)" },
         },
       },
     },
@@ -244,7 +245,13 @@ export type SponsoredBriefInput = {
   productSeed?: boolean;
 };
 
-/** The message for one step: the first one carries the full instructions, later ones only the new searches. */
+/**
+ * The message for one step: the first one carries the full instructions,
+ * later ones only the new searches. The agent takes the competing businesses
+ * Google shows for each search (ads, normal results, the Maps / local pack),
+ * not only ads: many competitors that advertise do not show an ad to a
+ * browser outside the country.
+ */
 export function buildSponsoredMessage(input: SponsoredBriefInput, step: SponsoredStep, first: boolean): string {
   const { country, platform } = input;
   const countryName = COUNTRY_NAMES[country] || country;
@@ -256,34 +263,37 @@ export function buildSponsoredMessage(input: SponsoredBriefInput, step: Sponsore
   const exampleDomain = country === "AU" ? "example.com.au" : "example.com";
   const ytFilter =
     platform === "youtube"
-      ? " The link filters to YouTube; count only video ads. An advertiser with no video ads counts as no ads."
+      ? " The link filters to YouTube; count only video ads. A business with no video ads counts as no ads."
       : "";
+  const morePages = step.morePages
+    ? "\nAlso open page 2 of each search, and the Maps \"More places\" list, for businesses not checked yet.\n"
+    : "";
 
   if (!first) {
-    return `Next searches, same instructions as before (sponsored results only, Transparency Center region ${country}, post a FOUND or NOADS line for each advertiser as you go):
+    return `Next searches, same instructions as before (competing businesses from the Google results and Maps, Transparency Center region ${country}, post a FOUND or NOADS line for each one as you go):
 ${searches}
-${skipText}${step.morePages ? "\nAlso open page 2 of each search, and reload page 1 once: Google rotates which ads it shows.\n" : ""}
+${skipText}${morePages}
 When every search is done, stop.`;
   }
 
-  return `Find the businesses advertising on Google in ${countryName} for these searches. Work in your browser only: do not write code, create files or websites, and do not ask me anything.
+  return `Find the businesses competing on Google in ${countryName} for these searches, and check which of them run Google ads. Work in your browser only: do not write code, create files or websites, and do not ask me anything.
 
 Searches (open each link; it is Google ${countryName}, English):
 ${searches}
-${step.morePages ? "\nAlso open page 2 of each search, and reload page 1 once: Google rotates which ads it shows.\n" : ""}
+${morePages}
 For each search:
-1. Read only the results labelled "Sponsored" (the ads above and below the normal results, and sponsored product/shopping ads). Ignore normal results, the map/local pack, "People also ask", videos and AI overviews.
-2. Note each sponsored advertiser's website domain (as shown on the ad, e.g. ${exampleDomain}), the advertiser name, the ad headline and the ad text.
+1. Pick up to 8 businesses that sell what was searched, from anywhere on the page: ads, the normal results, and the Maps / local pack when it shows (open a Maps listing to get its website; skip listings with no website).
+2. Note each one's website domain (e.g. ${exampleDomain}), its name, and the title and text Google shows for it.
 3. If Google shows a consent page, accept it. If it shows a CAPTCHA or "unusual traffic" page, wait a few seconds and retry once, then try https://www.google.com/search with the same q, gl and hl. If still blocked, move on to the next search.
 
-Skip ${input.productSeed ? "marketplaces, department and general stores, " : ""}directories, review, quote and job sites, government and comparison sites.${input.industry ? ` The client is in: ${input.industry}. Skip advertisers that plainly sell something unrelated.` : ""}
+Only real businesses that sell it. Skip ${input.productSeed ? "marketplaces, department and general stores, " : ""}directories and listing sites, review, quote and job sites, news, blogs and guides, government and comparison sites.${input.industry ? ` The client is in: ${input.industry}. Skip businesses that plainly sell something unrelated.` : ""}
 ${skipText}
-Then check each new advertiser's domain in the Google Ads Transparency Center for ${countryName}:
+Then check each new business's domain in the Google Ads Transparency Center for ${countryName}:
 https://adstransparency.google.com/?region=${country}&domain=<domain>${platform === "youtube" ? "&platform=YOUTUBE" : ""}
 Wait for the results to load and read how many ads it shows and the advertiser name.${ytFilter}
 
 Right after checking each domain, post one line in your reply (exactly this format, valid JSON on one line):
-FOUND {"domain":"${exampleDomain}","advertiser":"Name in Transparency Center","ads":12,"search":"the search","headline":"ad headline","text":"ad text"}
+FOUND {"domain":"${exampleDomain}","advertiser":"Name in Transparency Center","ads":12,"search":"the search","headline":"title Google shows","text":"text Google shows"}
 or, when the Transparency Center shows no ads in ${countryName}:
 NOADS {"domain":"${exampleDomain}","search":"the search"}
 Post these lines as you go (a short message after every two or three domains), not only at the end. Use null for anything you could not read.
@@ -293,7 +303,7 @@ When every search is done, stop.`;
 
 /** The answer to any question the agent asks: it has everything it needs. */
 const CARRY_ON =
-  "Please decide yourself and carry on with the searches. Post a FOUND or NOADS line for each advertiser and stop when every search is done.";
+  "Please decide yourself and carry on with the searches. Post a FOUND or NOADS line for each business you check and stop when every search is done.";
 
 /**
  * One Manus task for a whole search run. Each step (a ring, the country,

@@ -11,7 +11,7 @@ const STAGE_LABELS: Record<string, string> = {
   analyzing_ad: "Checking relevance",
   filling_quota: "Filling the list",
   finding_domains: "Finding advertisers",
-  searching_sponsored: "Reading sponsored results",
+  searching_sponsored: "Finding Google competitors",
   verifying_domains: "Checking advertisers",
   ranking_domains: "Ranking advertisers",
   fetching_ads: "Fetching ads",

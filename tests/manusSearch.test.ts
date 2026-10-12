@@ -132,7 +132,9 @@ test("the brief opens Google in the run's country and checks the Transparency Ce
   );
   assert.match(first, /https:\/\/www\.google\.com\.au\/search\?q=dentist\+pakenham&gl=au&hl=en&pws=0/);
   assert.match(first, /adstransparency\.google\.com\/\?region=AU&domain=<domain>&platform=YOUTUBE/);
-  assert.match(first, /Sponsored/);
+  // Competitors come from anywhere on the page, not only ads.
+  assert.match(first, /ads, the normal results, and the Maps \/ local pack/);
+  assert.doesNotMatch(first, /Read only the results labelled "Sponsored"/);
   assert.match(first, /brightdental\.example/);
   assert.match(first, /FOUND \{"domain"/);
   const more = buildSponsoredMessage(
@@ -142,6 +144,7 @@ test("the brief opens Google in the run's country and checks the Transparency Ce
   );
   assert.match(more, /www\.google\.co\.uk\/search\?q=plumber&gl=gb&hl=en&pws=0&start=10/);
   assert.match(more, /region GB/);
+  assert.match(more, /More places/);
 });
 
 test("finds stream in while the agent works, a follow-up step reuses the task, and stop ends it", async () => {

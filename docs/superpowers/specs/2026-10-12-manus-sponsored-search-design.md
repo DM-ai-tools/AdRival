@@ -6,6 +6,10 @@ Date: 2026-10-12. Status: implemented (user approved the design and asked to go 
 
 Google and YouTube keyword searches find competitors from **Google's sponsored results** instead of organic web results. A Manus agent (profile `lite`, Manus 2.0 lite) opens Google in the run's country for each keyword, collects the Sponsored advertisers and checks each advertiser's domain in the Google Ads Transparency Center for that country. Advertisers with ads go to SociaVault, and the existing pipeline carries on: ad fetch, AI review, guardrails, save. Each run still aims for 10 competitors.
 
+## Change after the first production run (2026-10-12)
+
+A Manus lite run found no results labelled "Sponsored" in any of six searches, so it checked nothing. The agent now picks up to 8 competing businesses per search from anywhere on the Google page (ads, normal results and the Maps / local pack, opening a Maps listing for its website). It checks each one in the Transparency Center, and only those with ads go to SociaVault. The "find more" round adds page 2 and the Maps "More places" list. Internal names (sponsored*) were kept; user-facing wording says "Google competitors".
+
 ## Decisions (from the user)
 
 - 10 per run, as today (one industry/category per run).

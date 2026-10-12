@@ -36,7 +36,7 @@ const REASON_LABELS: Array<[keyof NonNullable<JobProgress["rejectReasons"]>, str
   ["noReadableCopy", "Ad text could not be read"],
   ["noAdsInRegion", "Sites with no Google ads in this country"],
   ["notCompetitorSite", "Search results that are not competitors"],
-  ["sponsoredNoAds", "Sponsored on Google but no ads in the Transparency Center"],
+  ["sponsoredNoAds", "Google competitors with no ads in the Transparency Center"],
 ];
 
 const RECENT_LIMIT = 5;
@@ -246,8 +246,8 @@ export function ProgressPanel({
         </div>
         {progress.sponsored?.checked ? (
           <div>
-            <dt>Sponsored advertisers</dt>
-            <dd title="Advertisers found in Google's sponsored results with ads in the Transparency Center, of all checked">
+            <dt>Google competitors with ads</dt>
+            <dd title="Competitors found on Google (results, ads and Maps) with ads in the Transparency Center, of all checked">
               {progress.sponsored.withAds}/{progress.sponsored.checked}
             </dd>
           </div>

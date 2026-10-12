@@ -100,7 +100,7 @@ const WEB_RESULTS_PER_QUERY = 10;
 const MAX_DOMAIN_CHECKS_PER_STEP = 20;
 /** Domains checked for live ads across the whole run. */
 const MAX_DOMAIN_CHECKS_TOTAL = 60;
-/** Sponsored advertisers (already confirmed in the Transparency Center) whose ads are fetched, across the run. */
+/** Google competitors the agent confirmed in the Transparency Center whose ads are fetched, across the run. */
 const MAX_SPONSORED_DOMAIN_CHECKS = 60;
 /** For an online store: marketplaces and department / general stores, whose range is mostly other products. */
 const GENERALIST_STORE =
@@ -652,7 +652,7 @@ export async function runGoogleFamilySearch(
       progress(
         "verifying_domains",
         source === "sponsored"
-          ? `Reading the Google ads of ${slice.length} sponsored ${slice.length === 1 ? "advertiser" : "advertisers"}: ${slice.join(", ")}…`
+          ? `Reading the Google ads of ${slice.length} ${slice.length === 1 ? "competitor" : "competitors"}: ${slice.join(", ")}…`
           : `Checking ${slice.length} top-ranked sites for Google ads shown in ${regionName} (${Math.min(i + slice.length, fresh.length)}/${fresh.length})…`,
       );
       const rows = await mapPool(slice, AD_REVIEW_BATCH, async (domain) => {
@@ -877,7 +877,7 @@ export async function runGoogleFamilySearch(
       }
     };
 
-    /** Sponsored advertisers the agent confirmed → their ads from SociaVault → review. */
+    /** Competitors the agent picked from Google and confirmed have ads → their ads from SociaVault → review. */
     const takeSponsored = async (finds: SponsoredFind[]) => {
       const sponsored = (job.progress.sponsored ??= { checked: 0, withAds: 0, searches: 0, status: "searching" });
       const toFetch: string[] = [];
@@ -895,7 +895,7 @@ export async function runGoogleFamilySearch(
         }
         if (checkedDomains.has(domain) || toFetch.includes(domain)) continue;
         sponsored.withAds += 1;
-        // The sponsored result's own words: used when the ads SociaVault returns have no readable text.
+        // The words Google showed for it: used when the ads SociaVault returns have no readable text.
         if (find.headline || find.text) {
           snippetOf.set(domain, { title: find.headline || find.advertiser || undefined, description: find.text || undefined });
         }
@@ -903,7 +903,7 @@ export async function runGoogleFamilySearch(
       }
       progress(
         "searching_sponsored",
-        `${sponsored.withAds} sponsored ${sponsored.withAds === 1 ? "advertiser" : "advertisers"} with ads in ${regionName} so far (${sponsored.checked} checked)…`,
+        `${sponsored.withAds} Google ${sponsored.withAds === 1 ? "competitor" : "competitors"} with ads in ${regionName} so far (${sponsored.checked} checked)…`,
       );
       if (toFetch.length) await checkWebDomains(toFetch, finds[0]?.search || anchors[0] || "", "sponsored");
     };
@@ -913,7 +913,7 @@ export async function runGoogleFamilySearch(
     const agent = manusSearchEnabled() && !getAppSettings().disabledProviders.includes("manus")
       ? new SponsoredSearchAgent(
           {
-            title: `${platform === "youtube" ? "YouTube" : "Google"} sponsored search: ${allKeywords.slice(0, 3).join(", ")} (${sponsoredCountry})`,
+            title: `${platform === "youtube" ? "YouTube" : "Google"} competitor search: ${allKeywords.slice(0, 3).join(", ")} (${sponsoredCountry})`,
             country: sponsoredCountry,
             platform,
             industry: businessProfile?.industry || job.selectedCategory?.label || null,
@@ -931,7 +931,7 @@ export async function runGoogleFamilySearch(
       : null;
     let agentUsable = Boolean(agent);
 
-    /** One step through the sponsored-results agent. False when the agent failed and the web search must take over. */
+    /** One step through the Google competitor agent. False when the agent failed and the web search must take over. */
     const runSponsoredStep = async (step: Step, more: boolean): Promise<boolean> => {
       const queries = (await step.webQueries()).slice(0, MAX_SPONSORED_QUERIES_PER_STEP);
       if (!queries.length) return true;
@@ -941,8 +941,8 @@ export async function runGoogleFamilySearch(
       progress(
         "searching_sponsored",
         accepted.length === 0 && !more
-          ? `Reading sponsored results on Google ${sponsoredCountry} for ${queries.map((q) => `"${q}"`).join(", ")}…`
-          : `Found ${accepted.length} of ${TARGET_COMPETITORS} so far. Reading more sponsored results ${step.label}…`,
+          ? `Finding competitors on Google ${sponsoredCountry} for ${queries.map((q) => `"${q}"`).join(", ")}…`
+          : `Found ${accepted.length} of ${TARGET_COMPETITORS} so far. Finding more Google competitors ${step.label}…`,
       );
       const result = await agent!.runStep(
         { queries, morePages: more, skipDomains: Array.from(checkedDomains) },
@@ -953,7 +953,7 @@ export async function runGoogleFamilySearch(
         sponsored.status = "failed";
         progress(
           "finding_domains",
-          `The sponsored-results search stopped (${result.reason || "unknown error"}). Continuing with the web search…`,
+          `The Google competitor search stopped (${result.reason || "unknown error"}). Continuing with the web search…`,
         );
         console.warn(`[googleSearch] sponsored search failed on job ${job.id}: ${result.reason}`);
         return false;
@@ -986,7 +986,7 @@ export async function runGoogleFamilySearch(
       }
       if (pendingReview.length) await flushReview();
 
-      // The sponsored search ran every step and the list is still short: the
+      // The agent ran every step and the list is still short: the
       // web search fills it, country-wide.
       if (agentUsable && !done()) {
         for (const step of steps.filter((s) => s.level == null)) {
@@ -1031,7 +1031,7 @@ export async function runGoogleFamilySearch(
       final.progress.stage = "done";
       const sponsored = job.progress.sponsored;
       const sponsoredNote = sponsored?.checked
-        ? ` ${sponsored.checked} sponsored advertisers checked on Google, ${sponsored.withAds} with ads.`
+        ? ` ${sponsored.checked} Google competitors checked, ${sponsored.withAds} with ads.`
         : "";
       final.progress.sponsored = sponsored || null;
       final.progress.message =

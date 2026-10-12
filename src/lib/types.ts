@@ -420,12 +420,12 @@ export interface JobProgress {
     noAdsInRegion?: number;
     /** Google: search results dropped as directories, publishers or non-competitors. */
     notCompetitorSite?: number;
-    /** Google: sponsored advertisers the search agent found with no ads in the Transparency Center for the country. */
+    /** Google: competitors the search agent found with no ads in the Transparency Center for the country. */
     sponsoredNoAds?: number;
   };
-  /** Google / YouTube: the search agent reading sponsored results on Google. */
+  /** Google / YouTube: the search agent picking competitors from Google results and Maps. */
   sponsored?: {
-    /** Sponsored advertisers checked in the Transparency Center. */
+    /** Competitors checked in the Transparency Center. */
     checked: number;
     /** Of those, advertisers with ads in the chosen country (sent on for review). */
     withAds: number;
