@@ -59,8 +59,11 @@ after(() => {
 type Event = Record<string, unknown> & { id: string; type: string; timestamp: number };
 const json = (data: unknown) => new Response(JSON.stringify(data), { status: 200, headers: { "content-type": "application/json" } });
 
-test("a Google search takes sponsored advertisers from the agent, reads their ads from SociaVault and saves the competitor", async () => {
-  await aiReady;
+/**
+ * Fake Manus and SociaVault. Every Manus round: the first poll is quiet, the
+ * second posts the round's lines (first round only), the third stops.
+ */
+function fakeProviders(realFetch: typeof fetch) {
   const events: Event[] = [];
   const manusCalls: string[] = [];
   const svCalls: Array<{ path: string; params: URLSearchParams }> = [];
@@ -74,8 +77,7 @@ test("a Google search takes sponsored advertisers from the agent, reads their ad
     events.push({ id: `e${clock}`, type, timestamp: clock, ...data });
   };
 
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
     if (url.hostname === "127.0.0.1") return realFetch(input as RequestInfo, init);
     if (url.hostname === "api.manus.ai") {
@@ -154,6 +156,15 @@ test("a Google search takes sponsored advertisers from the agent, reads their ad
     throw new Error(`unexpected request ${url.href}`);
   }) as typeof fetch;
 
+  return { fetchImpl: fetchImpl as typeof fetch, manusCalls, svCalls, body: () => createBody };
+}
+
+test("a Google search takes sponsored advertisers from the agent, reads their ads from SociaVault and saves the competitor", async () => {
+  await aiReady;
+  const realFetch = globalThis.fetch;
+  const fake = fakeProviders(realFetch);
+  const { manusCalls, svCalls } = fake;
+  globalThis.fetch = fake.fetchImpl;
   try {
     const { runGoogleFamilySearch } = await import("../src/lib/pipeline/googleSearch");
     const { getJob, getCompetitorsByRun } = await import("../src/lib/db");
@@ -183,8 +194,8 @@ test("a Google search takes sponsored advertisers from the agent, reads their ad
     assert.equal(job.manusSearch?.taskId, "S1");
     // The agent ran first; its confirmed advertiser was fetched from SociaVault for Australia only.
     assert.equal(manusCalls.filter((m) => m !== "project.list")[0], "task.create");
-    assert.equal(createBody.project_id, "P-goog");
-    assert.equal(createBody.agent_profile, "lite");
+    assert.equal(fake.body().project_id, "P-goog");
+    assert.equal(fake.body().agent_profile, "lite");
     const rivalFetch = svCalls.find((c) => c.path.endsWith("/company-ads") && c.params.get("domain") === "rivaldental.com.au");
     assert.ok(rivalFetch, "the sponsored advertiser's ads were fetched");
     assert.equal(rivalFetch!.params.get("region"), "AU");
@@ -213,6 +224,58 @@ test("a Google search takes sponsored advertisers from the agent, reads their ad
     assert.equal(manusCall!.runId, "job-google-1");
     assert.equal(manusCall!.estimatedCostUsdMicros, 600_000); // 120 × $0.005
     assert.ok(manusCall!.creditsCharged > 0);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a city/suburb run sends the agent at most three rounds, and a rival with no local address is taken once the search goes country-wide", async () => {
+  await aiReady;
+  const realFetch = globalThis.fetch;
+  const fake = fakeProviders(realFetch);
+  globalThis.fetch = fake.fetchImpl;
+  try {
+    const { runGoogleFamilySearch } = await import("../src/lib/pipeline/googleSearch");
+    const { getJob, getCompetitorsByRun } = await import("../src/lib/db");
+    const { makeUser } = await import("./helpers/factories");
+    const { runBillable } = await import("../src/lib/accounting/run");
+    const user = await makeUser({ credits: 1000 });
+    const home = { label: "Richmond, Melbourne, VIC", city: "Melbourne", suburb: "Richmond", region: "Victoria", countryCode: "AU", isPrimary: true };
+    await runBillable({ user, operation: "search.run", projectKind: "search", projectId: null, runId: "job-google-local" }, () =>
+      runGoogleFamilySearch("job-google-local", ["dentist"], "google", {
+        geo: "AU",
+        geoMode: "company_locations",
+        targetLocations: [home],
+        businessUrl: "https://brightdental.example",
+        businessProfile: {
+          url: "https://brightdental.example",
+          businessName: "Bright Dental",
+          industry: "Dental clinic",
+          description: "Family dentist.",
+          offerings: ["Check-ups", "Implants"],
+          competitorKeywords: ["dentist"],
+          positioningSummary: "Gentle family dentistry.",
+          categories: [],
+          locations: [home],
+          primaryMarketCountry: "AU",
+          serviceArea: {
+            radiusKm: 5,
+            nearbyAreas: ["Cremorne", "Abbotsford"],
+            widerRadiusKm: 15,
+            widerAreas: ["Hawthorn", "Brunswick"],
+            metro: "Melbourne",
+            region: "Victoria",
+          },
+          analyzedAt: new Date().toISOString(),
+        } as never,
+      }),
+    );
+    // One task, at most three rounds: the first message and two follow-ups.
+    assert.equal(fake.manusCalls.filter((m) => m === "task.create").length, 1);
+    assert.ok(fake.manusCalls.filter((m) => m === "task.sendMessage").length <= 2);
+    // No address was found for the rival, so it waited for the country-wide round and was then taken.
+    assert.deepEqual(getCompetitorsByRun("job-google-local").map((c) => c.pageName), ["Rival Dental Pty Ltd"]);
+    assert.equal(getJob("job-google-local")!.progress.accepted, 1);
   } finally {
     globalThis.fetch = realFetch;
   }

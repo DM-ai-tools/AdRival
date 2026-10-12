@@ -84,8 +84,9 @@ import {
 import { enrichLookupPageMetrics } from "./lookupEnrichment";
 import { looksLikeEnglish } from "./adLanguage";
 import {
-  MAX_SPONSORED_QUERIES_PER_STEP,
   SponsoredSearchAgent,
+  groupIntoRounds,
+  interleaveQueries,
   manusSearchEnabled,
   type SponsoredFind,
 } from "./manusSearch";
@@ -931,18 +932,23 @@ export async function runGoogleFamilySearch(
       : null;
     let agentUsable = Boolean(agent);
 
-    /** One step through the Google competitor agent. False when the agent failed and the web search must take over. */
-    const runSponsoredStep = async (step: Step, more: boolean): Promise<boolean> => {
-      const queries = (await step.webQueries()).slice(0, MAX_SPONSORED_QUERIES_PER_STEP);
+    /**
+     * One round through the Google competitor agent: the searches of every
+     * step in the group, mixed. False when the agent failed and the web
+     * search must take over.
+     */
+    const runAgentRound = async (group: Step[], round: number, rounds: number, more: boolean): Promise<boolean> => {
+      const queries = interleaveQueries(await Promise.all(group.map((s) => s.webQueries())));
       if (!queries.length) return true;
       const sponsored = (job.progress.sponsored ??= { checked: 0, withAds: 0, searches: 0, status: "searching" });
       sponsored.searches += queries.length;
       sponsored.status = "searching";
+      const label = group[group.length - 1].label;
       progress(
         "searching_sponsored",
-        accepted.length === 0 && !more
-          ? `Finding competitors on Google ${sponsoredCountry} for ${queries.map((q) => `"${q}"`).join(", ")}…`
-          : `Found ${accepted.length} of ${TARGET_COMPETITORS} so far. Finding more Google competitors ${step.label}…`,
+        round === 0
+          ? `Finding competitors on Google ${sponsoredCountry} for ${queries.map((q) => `"${q}"`).join(", ")} (round 1 of ${rounds})…`
+          : `Found ${accepted.length} of ${TARGET_COMPETITORS} so far. Finding more Google competitors ${label} (round ${round + 1} of ${rounds})…`,
       );
       const result = await agent!.runStep(
         { queries, morePages: more, skipDomains: Array.from(checkedDomains) },
@@ -962,39 +968,58 @@ export async function runGoogleFamilySearch(
       return true;
     };
 
-    try {
-      for (const [index, step] of steps.entries()) {
-        if (done()) break;
-        if (step.level != null) {
-          job.targetLocations = placesUpToRing(rings, step.level);
-          relaxedReview = step.level > 0;
-          if (step.level > 0) await releaseHeld(false);
-        } else if (rings.length) {
-          // Local rings ran short: go country-wide, rivals held for being in
-          // another city first.
-          countryWide = true;
-          relaxedReview = true;
-          await releaseHeld(true);
-        }
-        if (done()) break;
-        if (agentUsable) {
-          // The last step is the "find more" round: page 2 and a reload.
-          if (await runSponsoredStep(step, index === steps.length - 1)) continue;
-          agentUsable = false;
-        }
-        await runWebStep(step, index === 0);
+    /** Widens the area to a step: its ring's places, or country-wide (held rivals first). */
+    const enterStep = async (step: Step) => {
+      if (step.level != null) {
+        job.targetLocations = placesUpToRing(rings, step.level);
+        relaxedReview = step.level > 0;
+        if (step.level > 0) await releaseHeld(false);
+      } else if (rings.length && !countryWide) {
+        // Local rings ran short: go country-wide, rivals held for being in
+        // another city first.
+        countryWide = true;
+        relaxedReview = true;
+        await releaseHeld(true);
       }
-      if (pendingReview.length) await flushReview();
+    };
 
-      // The agent ran every step and the list is still short: the
-      // web search fills it, country-wide.
-      if (agentUsable && !done()) {
+    try {
+      // The agent gets at most MAX_AGENT_ROUNDS messages per run; the steps
+      // it covered are not searched again on the web.
+      let covered = 0;
+      if (agent) {
+        const rounds = groupIntoRounds(steps);
+        const moreStep = steps[steps.length - 1];
+        for (const [r, group] of rounds.entries()) {
+          if (done()) break;
+          for (const step of group) await enterStep(step);
+          if (done()) break;
+          if (!(await runAgentRound(group, r, rounds.length, group.includes(moreStep)))) {
+            agentUsable = false;
+            break;
+          }
+          covered += group.length;
+        }
+      }
+      if (!agentUsable) {
+        // No agent, or it failed: the web search runs the steps it did not cover.
+        for (const [index, step] of steps.entries()) {
+          if (index < covered) continue;
+          if (done()) break;
+          await enterStep(step);
+          if (done()) break;
+          await runWebStep(step, index === 0);
+        }
+      } else if (!done()) {
+        // The agent's rounds are used up and the list is still short: the
+        // web search fills it, country-wide.
         for (const step of steps.filter((s) => s.level == null)) {
           if (done()) break;
+          await enterStep(step);
           await runWebStep(step, false);
         }
-        if (pendingReview.length) await flushReview();
       }
+      if (pendingReview.length) await flushReview();
     } finally {
       await agent?.stop();
       // The agent's credits go to the ledger with the run.

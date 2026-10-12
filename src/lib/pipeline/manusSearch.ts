@@ -70,6 +70,50 @@ const COUNTRY_NAMES: Record<string, string> = {
   AU: "Australia", US: "the USA", GB: "the UK", CA: "Canada", NZ: "New Zealand", IN: "India", SG: "Singapore", DE: "Germany", AE: "the UAE",
 };
 
+/** Messages (rounds) one search run may send to its Manus task. */
+export const MAX_AGENT_ROUNDS = 3;
+
+/**
+ * The run's search steps grouped into at most MAX_AGENT_ROUNDS rounds, in
+ * order. A country-wide run: the country, then the "find more" round. A
+ * city/suburb run: the nearer rings, then the wider rings with the country,
+ * then the "find more" round. Steps with a `level` are local rings.
+ */
+export function groupIntoRounds<T extends { level: number | null }>(steps: T[], max = MAX_AGENT_ROUNDS): T[][] {
+  const rings = steps.filter((s) => s.level != null);
+  const country = steps.filter((s) => s.level == null);
+  let rounds: T[][];
+  if (!rings.length) {
+    rounds = country.map((s) => [s]);
+  } else {
+    const near = Math.ceil(rings.length / 2);
+    rounds = [rings.slice(0, near), [...rings.slice(near), ...country.slice(0, 1)], country.slice(1)];
+  }
+  rounds = rounds.filter((r) => r.length);
+  while (rounds.length > max) {
+    const last = rounds.pop()!;
+    rounds[rounds.length - 1].push(...last);
+  }
+  return rounds;
+}
+
+/** Searches from several steps mixed so each step gets some: every step's first, then every second… */
+export function interleaveQueries(lists: string[][], max = MAX_SPONSORED_QUERIES_PER_STEP): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const longest = Math.max(0, ...lists.map((l) => l.length));
+  for (let i = 0; i < longest && out.length < max; i += 1) {
+    for (const list of lists) {
+      const q = list[i]?.trim();
+      if (!q || seen.has(q.toLowerCase())) continue;
+      seen.add(q.toLowerCase());
+      out.push(q);
+      if (out.length >= max) break;
+    }
+  }
+  return out;
+}
+
 /** On when a Manus key is set, unless MANUS_SEARCH=off. */
 export function manusSearchEnabled(): boolean {
   return hasManusKey() && !/^(off|false|0|no)$/i.test(process.env.MANUS_SEARCH?.trim() || "");

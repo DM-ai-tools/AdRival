@@ -206,3 +206,35 @@ test("a failed task start is reported so the web search can take over", async ()
     globalThis.fetch = realFetch;
   }
 });
+
+test("a run sends the agent at most three rounds: nearer rings, wider rings with the country, then find more", async () => {
+  const { groupIntoRounds, interleaveQueries } = await import("../src/lib/pipeline/manusSearch");
+  const step = (label: string, level: number | null) => ({ label, level });
+  const local = [step("nearby", 0), step("wider", 1), step("outer", 2), step("state", 3), step("country", null), step("more", null)];
+  assert.deepEqual(
+    groupIntoRounds(local).map((r) => r.map((s) => s.label)),
+    [["nearby", "wider"], ["outer", "state", "country"], ["more"]],
+  );
+  assert.deepEqual(
+    groupIntoRounds([step("country", null), step("more", null)]).map((r) => r.map((s) => s.label)),
+    [["country"], ["more"]],
+  );
+  assert.deepEqual(
+    groupIntoRounds([step("nearby", 0), step("country", null), step("more", null)]).map((r) => r.map((s) => s.label)),
+    [["nearby"], ["country"], ["more"]],
+  );
+  for (const n of [1, 2, 5, 8]) {
+    const many = [...Array.from({ length: n }, (_, i) => step(`ring${i}`, i)), step("country", null), step("more", null)];
+    const rounds = groupIntoRounds(many);
+    assert.ok(rounds.length <= 3);
+    assert.equal(rounds.flat().length, many.length);
+  }
+  // Each ring gets some of the round's six searches.
+  assert.deepEqual(
+    interleaveQueries([
+      ["skate shop Ivanhoe", "skate shop Footscray", "skate shop Essendon", "skate shop Kew"],
+      ["skate shop Melbourne", "skate shop Ivanhoe", "roller skates Melbourne"],
+    ]),
+    ["skate shop Ivanhoe", "skate shop Melbourne", "skate shop Footscray", "skate shop Essendon", "roller skates Melbourne", "skate shop Kew"],
+  );
+});
