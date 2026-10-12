@@ -420,7 +420,19 @@ export interface JobProgress {
     noAdsInRegion?: number;
     /** Google: search results dropped as directories, publishers or non-competitors. */
     notCompetitorSite?: number;
+    /** Google: sponsored advertisers the search agent found with no ads in the Transparency Center for the country. */
+    sponsoredNoAds?: number;
   };
+  /** Google / YouTube: the search agent reading sponsored results on Google. */
+  sponsored?: {
+    /** Sponsored advertisers checked in the Transparency Center. */
+    checked: number;
+    /** Of those, advertisers with ads in the chosen country (sent on for review). */
+    withAds: number;
+    /** Searches handed to the agent so far. */
+    searches: number;
+    status: "searching" | "finished" | "failed" | "stopped";
+  } | null;
   /** Offers analysis progress when stage === "analyzing_offers" */
   offersPhase?: string | null;
   offersDone?: number;
@@ -451,6 +463,8 @@ export interface SearchJob {
   keywordLocation?: string | null;
   /** Countries actually queried (Meta / LinkedIn) */
   countries?: string[];
+  /** Google / YouTube: the Manus task that read sponsored results (admins / debugging). */
+  manusSearch?: { taskId: string; taskUrl: string | null } | null;
   /** Business website URL entered for this search (always saved for history) */
   businessUrl?: string | null;
   /** Industry context from business URL analysis */

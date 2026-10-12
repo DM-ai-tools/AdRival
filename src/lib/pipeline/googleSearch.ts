@@ -82,6 +82,12 @@ import {
 } from "./linkGuards";
 import { enrichLookupPageMetrics } from "./lookupEnrichment";
 import { looksLikeEnglish } from "./adLanguage";
+import {
+  MAX_SPONSORED_QUERIES_PER_STEP,
+  SponsoredSearchAgent,
+  manusSearchEnabled,
+  type SponsoredFind,
+} from "./manusSearch";
 
 const MAX_ADS_PAGES = 6;
 /** Transparency region that returns creatives across countries (lookups; a search uses the chosen country). */
@@ -92,6 +98,8 @@ const WEB_RESULTS_PER_QUERY = 10;
 const MAX_DOMAIN_CHECKS_PER_STEP = 20;
 /** Domains checked for live ads across the whole run. */
 const MAX_DOMAIN_CHECKS_TOTAL = 60;
+/** Sponsored advertisers (already confirmed in the Transparency Center) whose ads are fetched, across the run. */
+const MAX_SPONSORED_DOMAIN_CHECKS = 60;
 /** For an online store: marketplaces and department / general stores, whose range is mostly other products. */
 const GENERALIST_STORE =
   /(^|\.)(bigw|kmart|target|myer|davidjones|harveynorman|jbhifi|officeworks|bunnings|catch|kogan|temu|aliexpress|alibaba|shein|walmart|bestbuy|costco|homedepot|lowes|wayfair|etsy|mydeal|woolworths|coles|aldi|argos|currys|johnlewis|tesco|asda|flipkart)\.[a-z.]+$/i;
@@ -504,7 +512,11 @@ export async function runGoogleFamilySearch(
   const heldMismatches: CompetitorRecord[] = [];
   const webState = { firecrawlDown: !hasFirecrawlKey() };
   const regionName = webCountry || "all regions";
-  let domainChecks = 0;
+  /** Domains whose ads are fetched: web-search finds and sponsored finds have separate allowances. */
+  const budgets = {
+    web: { used: 0, max: MAX_DOMAIN_CHECKS_TOTAL },
+    sponsored: { used: 0, max: MAX_SPONSORED_DOMAIN_CHECKS },
+  };
   /** Off while searching local rings: rivals named for another place wait. */
   let countryWide = rings.length === 0;
   let relaxedReview = false;
@@ -625,18 +637,21 @@ export async function runGoogleFamilySearch(
   /** Top-ranked web domains → their ads in the chosen country → review. */
   /** Each web-found site's search listing, for reviewing stores whose ads have no readable text. */
   const snippetOf = new Map<string, { title?: string; description?: string }>();
-  const checkWebDomains = async (domains: string[], query: string) => {
+  const checkWebDomains = async (domains: string[], query: string, source: "web" | "sponsored" = "web") => {
+    const budget = budgets[source];
     const fresh = domains.filter((d) => !checkedDomains.has(d));
     for (let i = 0; i < fresh.length; i += AD_REVIEW_BATCH) {
-      if (done() || domainChecks >= MAX_DOMAIN_CHECKS_TOTAL) return;
+      if (done() || budget.used >= budget.max) return;
       const slice = fresh
         .slice(i, i + AD_REVIEW_BATCH)
-        .slice(0, MAX_DOMAIN_CHECKS_TOTAL - domainChecks);
+        .slice(0, budget.max - budget.used);
       for (const d of slice) checkedDomains.add(d);
-      domainChecks += slice.length;
+      budget.used += slice.length;
       progress(
         "verifying_domains",
-        `Checking ${slice.length} top-ranked sites for Google ads shown in ${regionName} (${Math.min(i + slice.length, fresh.length)}/${fresh.length})…`,
+        source === "sponsored"
+          ? `Reading the Google ads of ${slice.length} sponsored ${slice.length === 1 ? "advertiser" : "advertisers"}: ${slice.join(", ")}…`
+          : `Checking ${slice.length} top-ranked sites for Google ads shown in ${regionName} (${Math.min(i + slice.length, fresh.length)}/${fresh.length})…`,
       );
       const rows = await mapPool(slice, AD_REVIEW_BATCH, async (domain) => {
         try {
@@ -820,23 +835,11 @@ export async function runGoogleFamilySearch(
       nameQueries: async () => [],
     });
 
-    for (const [index, step] of steps.entries()) {
-      if (done()) break;
-      if (step.level != null) {
-        job.targetLocations = placesUpToRing(rings, step.level);
-        relaxedReview = step.level > 0;
-        if (step.level > 0) await releaseHeld(false);
-      } else if (rings.length) {
-        // Local rings ran short: go country-wide, rivals held for being in
-        // another city first.
-        countryWide = true;
-        relaxedReview = true;
-        await releaseHeld(true);
-      }
-      if (done()) break;
+    /** Today's web search for one step: top-ranked sites, then Transparency advertiser names. */
+    const runWebStep = async (step: Step, first: boolean) => {
       progress(
         "finding_domains",
-        index === 0
+        first
           ? `Searching the web for "${anchors[0] || allKeywords[0]}" ${step.label} (results from ${regionName})…`
           : `Found ${accepted.length} of ${TARGET_COMPETITORS} so far. Widening the search ${step.label}…`,
       );
@@ -870,8 +873,128 @@ export async function runGoogleFamilySearch(
       if (!done()) {
         await searchAdvertiserNames(await step.nameQueries(), step.level == null ? 8 : 4);
       }
+    };
+
+    /** Sponsored advertisers the agent confirmed → their ads from SociaVault → review. */
+    const takeSponsored = async (finds: SponsoredFind[]) => {
+      const sponsored = (job.progress.sponsored ??= { checked: 0, withAds: 0, searches: 0, status: "searching" });
+      const toFetch: string[] = [];
+      for (const find of finds) {
+        sponsored.checked += 1;
+        job.progress.scannedPages += 1;
+        if (!find.hasAds) {
+          bumpReason(job, "sponsoredNoAds");
+          continue;
+        }
+        const domain = domainFromUrl(find.domain);
+        if (!domain || (productSeed && GENERALIST_STORE.test(domain))) {
+          bumpReason(job, "notCompetitorSite");
+          continue;
+        }
+        if (checkedDomains.has(domain) || toFetch.includes(domain)) continue;
+        sponsored.withAds += 1;
+        // The sponsored result's own words: used when the ads SociaVault returns have no readable text.
+        if (find.headline || find.text) {
+          snippetOf.set(domain, { title: find.headline || find.advertiser || undefined, description: find.text || undefined });
+        }
+        toFetch.push(domain);
+      }
+      progress(
+        "searching_sponsored",
+        `${sponsored.withAds} sponsored ${sponsored.withAds === 1 ? "advertiser" : "advertisers"} with ads in ${regionName} so far (${sponsored.checked} checked)…`,
+      );
+      if (toFetch.length) await checkWebDomains(toFetch, finds[0]?.search || anchors[0] || "", "sponsored");
+    };
+
+    const sponsoredCountry = webCountry || "AU";
+    const agent = manusSearchEnabled()
+      ? new SponsoredSearchAgent(
+          {
+            title: `${platform === "youtube" ? "YouTube" : "Google"} sponsored search: ${allKeywords.slice(0, 3).join(", ")} (${sponsoredCountry})`,
+            country: sponsoredCountry,
+            platform,
+            industry: businessProfile?.industry || job.selectedCategory?.label || null,
+            productSeed,
+          },
+          {
+            isStopped: done,
+            onActivity: (text) => progress("searching_sponsored", text),
+            onTask: (task) => {
+              job.manusSearch = task;
+              saveJob(job);
+            },
+          },
+        )
+      : null;
+    let agentUsable = Boolean(agent);
+
+    /** One step through the sponsored-results agent. False when the agent failed and the web search must take over. */
+    const runSponsoredStep = async (step: Step, more: boolean): Promise<boolean> => {
+      const queries = (await step.webQueries()).slice(0, MAX_SPONSORED_QUERIES_PER_STEP);
+      if (!queries.length) return true;
+      const sponsored = (job.progress.sponsored ??= { checked: 0, withAds: 0, searches: 0, status: "searching" });
+      sponsored.searches += queries.length;
+      sponsored.status = "searching";
+      progress(
+        "searching_sponsored",
+        accepted.length === 0 && !more
+          ? `Reading sponsored results on Google ${sponsoredCountry} for ${queries.map((q) => `"${q}"`).join(", ")}…`
+          : `Found ${accepted.length} of ${TARGET_COMPETITORS} so far. Reading more sponsored results ${step.label}…`,
+      );
+      const result = await agent!.runStep(
+        { queries, morePages: more, skipDomains: Array.from(checkedDomains) },
+        takeSponsored,
+      );
+      if (pendingReview.length) await flushReview();
+      if (result.outcome === "failed") {
+        sponsored.status = "failed";
+        progress(
+          "finding_domains",
+          `The sponsored-results search stopped (${result.reason || "unknown error"}). Continuing with the web search…`,
+        );
+        console.warn(`[googleSearch] sponsored search failed on job ${job.id}: ${result.reason}`);
+        return false;
+      }
+      sponsored.status = result.outcome === "stopped" ? "stopped" : "finished";
+      return true;
+    };
+
+    try {
+      for (const [index, step] of steps.entries()) {
+        if (done()) break;
+        if (step.level != null) {
+          job.targetLocations = placesUpToRing(rings, step.level);
+          relaxedReview = step.level > 0;
+          if (step.level > 0) await releaseHeld(false);
+        } else if (rings.length) {
+          // Local rings ran short: go country-wide, rivals held for being in
+          // another city first.
+          countryWide = true;
+          relaxedReview = true;
+          await releaseHeld(true);
+        }
+        if (done()) break;
+        if (agentUsable) {
+          // The last step is the "find more" round: page 2 and a reload.
+          if (await runSponsoredStep(step, index === steps.length - 1)) continue;
+          agentUsable = false;
+        }
+        await runWebStep(step, index === 0);
+      }
+      if (pendingReview.length) await flushReview();
+
+      // The sponsored search ran every step and the list is still short: the
+      // web search fills it, country-wide.
+      if (agentUsable && !done()) {
+        for (const step of steps.filter((s) => s.level == null)) {
+          if (done()) break;
+          await runWebStep(step, false);
+        }
+        if (pendingReview.length) await flushReview();
+      }
+    } finally {
+      await agent?.stop();
     }
-    if (pendingReview.length) await flushReview();
 
     // Anything still held fills the list last.
     if (heldMismatches.length && !done()) {
@@ -892,10 +1015,15 @@ export async function runGoogleFamilySearch(
       const final = getJob(jobId) || job;
       final.status = job.status;
       final.progress.stage = "done";
+      const sponsored = job.progress.sponsored;
+      const sponsoredNote = sponsored?.checked
+        ? ` ${sponsored.checked} sponsored advertisers checked on Google, ${sponsored.withAds} with ads.`
+        : "";
+      final.progress.sponsored = sponsored || null;
       final.progress.message =
         accepted.length > 0
-          ? `Found ${accepted.length} competitors on ${platform} (ads shown in ${regionName}). Brand review & deep location run on demand / during offer analysis.`
-          : `No qualifying competitors found on ${platform} with ads shown in ${regionName}.`;
+          ? `Found ${accepted.length} competitors on ${platform} (ads shown in ${regionName}).${sponsoredNote} Brand review & deep location run on demand / during offer analysis.`
+          : `No qualifying competitors found on ${platform} with ads shown in ${regionName}.${sponsoredNote}`;
       final.updatedAt = new Date().toISOString();
       saveJob(final);
     }
