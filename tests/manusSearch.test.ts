@@ -4,7 +4,7 @@ import { test } from "node:test";
 // No real provider is reached: the Manus API is faked below.
 process.env.MANUS_API_KEY = "test-key";
 process.env.MANUS_POLL_MS = "5";
-delete process.env.MANUS_SEARCH;
+process.env.MANUS_SEARCH = "on";
 
 type Event = Record<string, unknown> & { id: string; type: string; timestamp: number };
 

@@ -1,5 +1,7 @@
 # Google / YouTube keyword search through Manus sponsored results
 
+**2026-10-12: switched off by default.** The agent took too long in production, so Google / YouTube searches went back to the web search. `MANUS_SEARCH=on` turns the agent back on; the code and tests are kept.
+
 Date: 2026-10-12. Status: implemented (user approved the design and asked to go ahead without reviewing this spec).
 
 ## Goal

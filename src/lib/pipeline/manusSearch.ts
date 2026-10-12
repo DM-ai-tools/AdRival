@@ -114,9 +114,12 @@ export function interleaveQueries(lists: string[][], max = MAX_SPONSORED_QUERIES
   return out;
 }
 
-/** On when a Manus key is set, unless MANUS_SEARCH=off. */
+/**
+ * Off by default: the agent was too slow in production, so Google / YouTube
+ * searches use the web search. MANUS_SEARCH=on (with a Manus key) turns it on.
+ */
 export function manusSearchEnabled(): boolean {
-  return hasManusKey() && !/^(off|false|0|no)$/i.test(process.env.MANUS_SEARCH?.trim() || "");
+  return hasManusKey() && /^(on|true|1|yes)$/i.test(process.env.MANUS_SEARCH?.trim() || "");
 }
 
 function agentProfile(): string {

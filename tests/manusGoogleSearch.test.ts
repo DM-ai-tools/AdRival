@@ -11,7 +11,7 @@ const store = useTempStore("manus-google-search");
 process.env.MANUS_API_KEY = "test-key";
 process.env.MANUS_POLL_MS = "5";
 process.env.SOCIAVAULT_API_KEY = "test-sv";
-delete process.env.MANUS_SEARCH;
+process.env.MANUS_SEARCH = "on";
 delete process.env.OPENROUTER_API_KEY;
 delete process.env.FIRECRAWL_API_KEY;
 
@@ -277,6 +277,32 @@ test("a city/suburb run sends the agent at most three rounds, and a rival with n
     assert.deepEqual(getCompetitorsByRun("job-google-local").map((c) => c.pageName), ["Rival Dental Pty Ltd"]);
     assert.equal(getJob("job-google-local")!.progress.accepted, 1);
   } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("by default a Google search uses the web search only, without the Manus agent", async () => {
+  await aiReady;
+  const realFetch = globalThis.fetch;
+  const fake = fakeProviders(realFetch);
+  globalThis.fetch = fake.fetchImpl;
+  delete process.env.MANUS_SEARCH;
+  try {
+    const { runGoogleFamilySearch } = await import("../src/lib/pipeline/googleSearch");
+    const { getJob } = await import("../src/lib/db");
+    const { makeUser } = await import("./helpers/factories");
+    const { runBillable } = await import("../src/lib/accounting/run");
+    const user = await makeUser({ credits: 1000 });
+    await runBillable({ user, operation: "search.run", projectKind: "search", projectId: null, runId: "job-google-web" }, () =>
+      runGoogleFamilySearch("job-google-web", ["dentist"], "google", { geo: "AU" }),
+    );
+    assert.deepEqual(fake.manusCalls, []);
+    // The web steps ran: SociaVault's Google search (Firecrawl has no key here) and the Transparency name search.
+    assert.ok(fake.svCalls.some((c) => c.path.endsWith("/google/search")));
+    assert.ok(fake.svCalls.some((c) => c.path.endsWith("/search-advertisers")));
+    assert.equal(getJob("job-google-web")!.manusSearch ?? null, null);
+  } finally {
+    process.env.MANUS_SEARCH = "on";
     globalThis.fetch = realFetch;
   }
 });
