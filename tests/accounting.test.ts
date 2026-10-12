@@ -171,8 +171,28 @@ describe("provider usage conversion", () => {
         status: "succeeded",
       },
     ]);
-    assert.equal(summary.totalUsdMicros, 1_000_000);
-    assert.equal(summary.unpricedCalls, 1);
+    // The SociaVault credit is priced per credit ($29 / 6,000 Starter pack).
+    assert.equal(summary.totalUsdMicros, 1_000_000 + 4_830);
+    assert.equal(summary.unpricedCalls, 0);
+  });
+
+  test("credit- and request-billed providers are priced per unit, and the price can be set per account", async () => {
+    const { priceUnitUsage, summarizeTrackedSpend } = await import("@/lib/accounting/priceBook");
+    assert.equal(priceUnitUsage("manus", { requests: 300 }).usdMicros, 1_500_000);
+    assert.equal(priceUnitUsage("firecrawl", { requests: 10 }).usdMicros, 38_000);
+    assert.equal(priceUnitUsage("brandfetch", { requests: 2 }).usdMicros, 80_000);
+    // Token-priced providers are not priced per request.
+    assert.equal(priceUnitUsage("openai", { requests: 5 }).usdMicros, null);
+    process.env.SOCIAVAULT_USD_PER_CREDIT = "0.002";
+    try {
+      const summary = summarizeTrackedSpend([
+        { provider: "sociavault", model: null, usage: { requests: 1000 }, estimatedCostUsdMicros: null, status: "succeeded" },
+      ]);
+      assert.equal(summary.totalUsdMicros, 2_000_000);
+      assert.equal(summary.rows[0].requests, 1000);
+    } finally {
+      delete process.env.SOCIAVAULT_USD_PER_CREDIT;
+    }
   });
 });
 

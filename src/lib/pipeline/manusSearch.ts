@@ -9,6 +9,7 @@ import {
   type ManusEvent,
 } from "../manus/client";
 import { activityFromEvents, confirmationFor, plainText } from "../manus/events";
+import { findManusProject } from "../manus/projects";
 
 /**
  * Google / YouTube keyword search: a Manus agent (lite profile) opens Google
@@ -75,6 +76,27 @@ export function manusSearchEnabled(): boolean {
 
 function agentProfile(): string {
   return process.env.MANUS_SEARCH_PROFILE?.trim() || "lite";
+}
+
+/** The Manus project (cloud folder) search tasks go into. */
+export const DEFAULT_SEARCH_PROJECT_NAME = "Google Comp - AdRival";
+
+/**
+ * MANUS_SEARCH_PROJECT_ID, else the project named MANUS_SEARCH_PROJECT_NAME
+ * (default "Google Comp - AdRival"; empty turns the folder off). A name that
+ * matches no project leaves the task outside any folder rather than losing
+ * the search, and says so.
+ */
+async function searchProject(): Promise<{ id: string | null; warning: string | null }> {
+  const id = process.env.MANUS_SEARCH_PROJECT_ID?.trim();
+  if (id) return { id, warning: null };
+  const name = (process.env.MANUS_SEARCH_PROJECT_NAME ?? DEFAULT_SEARCH_PROJECT_NAME).trim();
+  if (!name) return { id: null, warning: null };
+  const found = await findManusProject(name);
+  if ("missing" in found) {
+    return { id: null, warning: `Manus project "${name}" was not found (projects: ${found.missing}); the search task was created outside it.` };
+  }
+  return { id: found.id, warning: null };
 }
 
 /** MANUS_POLL_MS shortens every wait proportionally (tests); the default poll is 10 s. */
@@ -307,9 +329,12 @@ export class SponsoredSearchAgent {
     const content = buildSponsoredMessage(this.brief, step, first);
     try {
       if (first) {
+        const project = await searchProject();
+        if (project.warning) console.warn(`[manusSearch] ${project.warning}`);
         const created = await createManusTask({
           message: { content },
           title: this.brief.title,
+          projectId: project.id,
           agentProfile: agentProfile(),
           interactive: false,
           structuredOutputSchema: SPONSORED_RESULT_SCHEMA as unknown as Record<string, unknown>,

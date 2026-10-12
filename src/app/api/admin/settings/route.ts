@@ -20,6 +20,7 @@ const PROVIDER_KEY_ENV: Record<ProviderId, string> = {
   firecrawl: "FIRECRAWL_API_KEY",
   brandfetch: "BRANDFETCH_API_KEY",
   runway: "RUNWAYML_API_SECRET",
+  manus: "MANUS_API_KEY",
 };
 
 export const runtime = "nodejs";

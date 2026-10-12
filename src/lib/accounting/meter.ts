@@ -1,5 +1,7 @@
 import { getAppSettings, getUserById, recordProviderCreditAlert } from "@/lib/db";
 import type {
+  ProjectKind,
+  ProviderCallRecord,
   ProviderCallStatus,
   ProviderId,
   ProviderUsageUnits,
@@ -17,7 +19,7 @@ import {
   USER_PROVIDER_CREDIT_MESSAGE,
   looksLikeProviderCreditFailure,
 } from "./errors";
-import { priceTokenUsage } from "./priceBook";
+import { priceTokenUsage, priceUnitUsage } from "./priceBook";
 import {
   extendReservation,
   getReservation,
@@ -277,7 +279,8 @@ export async function meterProviderCall<T>(
       costMicros =
         reported?.reportedCostUsdMicros ??
         converted.estimatedCostUsdMicros ??
-        listed.usdMicros;
+        listed.usdMicros ??
+        priceUnitUsage(spec.provider, usage).usdMicros;
     }
 
     const result = settleProviderCall({
@@ -347,6 +350,64 @@ export async function meterProviderCall<T>(
   }
 }
 
+/**
+ * Usage a provider has already billed outside a metered request: a Manus
+ * task reports the credits it used only once it stops. It goes straight to
+ * the ledger with no hold, since the spend happened either way. Charged to
+ * the active billing context, else to `fallbackUserId` (a run picked up
+ * again after a restart has no context). Returns null when nobody can be
+ * charged; a repeated idempotency key is recorded once.
+ */
+export function recordIncurredUsage(input: {
+  provider: ProviderId;
+  operation: string;
+  usage: ProviderUsageUnits;
+  providerRequestId: string | null;
+  idempotencyKey: string;
+  fallbackUserId?: string | null;
+  projectKind?: ProjectKind | null;
+  projectId?: string | null;
+  runId?: string | null;
+  startedAt?: string;
+}): ProviderCallRecord | null {
+  const context = getBillingContext();
+  const userId = context?.chargedUserId ?? input.fallbackUserId ?? null;
+  if (!userId || !getUserById(userId)) {
+    console.warn(`[accounting] ${input.operation}: no user to record ${input.provider} usage against`);
+    return null;
+  }
+  const ruleSet = getActiveConversionRuleSet();
+  const converted = convertUsage(ruleSet, input.provider, null, input.usage);
+  const startedAt = input.startedAt ?? new Date().toISOString();
+  const result = settleProviderCall({
+    idempotencyKey: input.idempotencyKey,
+    initiatedByUserId: context?.initiatedByUserId ?? userId,
+    chargedUserId: userId,
+    projectKind: context?.projectKind ?? input.projectKind ?? null,
+    projectId: context?.projectId ?? input.projectId ?? null,
+    runId: context?.runId ?? input.runId ?? null,
+    provider: input.provider,
+    model: null,
+    endpoint: null,
+    operation: input.operation,
+    providerRequestId: input.providerRequestId,
+    usage: converted.usage,
+    usageConfidence: "confirmed",
+    creditsCharged: converted.creditsCharged,
+    estimatedCostUsdMicros:
+      converted.estimatedCostUsdMicros ?? priceUnitUsage(input.provider, converted.usage).usdMicros,
+    conversionRuleVersion: ruleSet.version,
+    status: "succeeded",
+    errorMessage: null,
+    reservationId: context?.reservationId ?? null,
+    startedAt,
+    durationMs: Math.max(0, Date.now() - Date.parse(startedAt)),
+    releaseSubunits: 0,
+  });
+  if (context && !result.duplicate) context.chargedSubunits.value += result.call.creditsCharged;
+  return result.call;
+}
+
 /* ───────────────────── Provider usage extraction helpers ────────────────── */
 
 interface OpenAiStyleUsage {
@@ -404,6 +465,23 @@ export function extractAnthropicUsage(result: unknown): ReportedUsage {
     },
     providerRequestId: body?.id ?? null,
   };
+}
+
+/**
+ * Firecrawl v2 reports the credits a call used (`creditsUsed`, top level or in
+ * the page metadata). Missing: one call is one credit.
+ */
+export function extractFirecrawlUsage(result: unknown): ReportedUsage {
+  const body = result as {
+    creditsUsed?: number;
+    data?: { creditsUsed?: number; metadata?: { creditsUsed?: number } } | unknown[];
+  } | null;
+  const data = body?.data && !Array.isArray(body.data) ? body.data : null;
+  const used = body?.creditsUsed ?? data?.creditsUsed ?? data?.metadata?.creditsUsed;
+  if (typeof used === "number" && Number.isFinite(used) && used >= 0) {
+    return { usage: { requests: used } };
+  }
+  return singleRequestUsage();
 }
 
 /** Providers that return no usage body: one call is one billable request. */

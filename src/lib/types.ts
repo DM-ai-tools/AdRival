@@ -1379,6 +1379,7 @@ export const PROVIDER_IDS = [
   "firecrawl",
   "brandfetch",
   "runway",
+  "manus",
 ] as const;
 
 export type ProviderId = (typeof PROVIDER_IDS)[number];

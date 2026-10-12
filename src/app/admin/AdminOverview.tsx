@@ -12,7 +12,18 @@ interface ProviderBalance {
   status: "available" | "unavailable" | "error";
   balance: number | null;
   currency: string | null;
+  totalUsed?: number | null;
+  /** Spend the provider itself reports (OpenAI, Anthropic: last 30 days). */
+  spentUsd?: number | null;
   note: string;
+}
+
+interface UnitPrice {
+  provider: string;
+  unit: "credit" | "request";
+  usdPerUnit: number;
+  source: string;
+  env: string;
 }
 
 interface TrackedSpendRow {
@@ -21,6 +32,7 @@ interface TrackedSpendRow {
   calls: number;
   inputTokens: number;
   outputTokens: number;
+  requests: number;
   usdMicros: number | null;
   basis: "stored" | "list_price" | "unpriced";
 }
@@ -30,6 +42,7 @@ interface OverviewPayload {
   users: { total: number; active: number; suspended: number; deleted: number; admins: number };
   credits: { allocatedSubunits: number; consumedSubunits: number; reservedSubunits: number; remainingSubunits: number };
   trackedSpend: { rows: TrackedSpendRow[]; totalUsdMicros: number | null; unpricedCalls: number; inputTokens: number; outputTokens: number };
+  unitPrices?: UnitPrice[];
   usageByProvider: Array<{
     provider: string;
     calls: number;
@@ -101,19 +114,35 @@ export default function AdminOverview({ onOpenUser }: { onOpenUser?: (userId: st
     void loadBalances();
   }, [loadBalances]);
 
-  // Credits charged next to what the calls cost, per service.
+  // Credits charged next to what the calls cost and what they used, per service.
   const costRows = useMemo(() => {
     if (!data) return [];
     const spend = new Map<string, number | null>();
+    const used = new Map<string, { tokens: number; units: number }>();
     for (const row of data.trackedSpend.rows) {
       const prev = spend.get(row.provider);
       spend.set(row.provider, row.usdMicros === null ? prev ?? null : (prev ?? 0) + row.usdMicros);
+      const u = used.get(row.provider) ?? { tokens: 0, units: 0 };
+      u.tokens += row.inputTokens + row.outputTokens;
+      u.units += row.requests;
+      used.set(row.provider, u);
     }
     return data.usageByProvider.map((row) => ({
       ...row,
       costUsdMicros: spend.has(row.provider) ? spend.get(row.provider)! : row.estimatedCostUsdMicros,
+      used: used.get(row.provider) ?? { tokens: 0, units: 0 },
     }));
   }, [data]);
+
+  /** What a provider's usage is counted in: tokens for models, its own credits or requests otherwise. */
+  const usageText = (provider: string, used: { tokens: number; units: number }) => {
+    const unit = data?.unitPrices?.find((u) => u.provider === provider);
+    if (unit) {
+      const n = Math.round(used.units * 100) / 100;
+      return `${n.toLocaleString()} ${unit.unit === "credit" ? "credits" : "requests"}`;
+    }
+    return used.tokens ? `${used.tokens.toLocaleString()} tokens` : "—";
+  };
 
   const maxDay = Math.max(1, ...(data?.usageByDate ?? []).map((d) => d.creditsCharged));
 
@@ -216,6 +245,7 @@ export default function AdminOverview({ onOpenUser }: { onOpenUser?: (userId: st
                 <tr>
                   <th>Service</th>
                   <th>Calls</th>
+                  <th>Usage</th>
                   <th>Credits charged</th>
                   <th>Cost</th>
                   <th>Failed</th>
@@ -227,6 +257,7 @@ export default function AdminOverview({ onOpenUser }: { onOpenUser?: (userId: st
                   <tr key={row.provider}>
                     <td>{providerLabel(row.provider, "admin")}</td>
                     <td>{row.calls}</td>
+                    <td>{usageText(row.provider, row.used)}</td>
                     <td>{formatCredits(row.creditsCharged)}</td>
                     <td>{row.costUsdMicros === null ? "Unavailable" : formatUsdMicros(row.costUsdMicros)}</td>
                     <td>{row.failedCalls || "—"}</td>
@@ -269,6 +300,36 @@ export default function AdminOverview({ onOpenUser }: { onOpenUser?: (userId: st
           </details>
         ) : null}
 
+        {data.unitPrices?.length ? (
+          <details className="admin-details">
+            <summary>Prices used for credit- and request-billed services</summary>
+            <div className="table-wrap">
+              <table className="comp-table">
+                <thead>
+                  <tr>
+                    <th>Service</th>
+                    <th>Price</th>
+                    <th>Basis</th>
+                    <th>Change with</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.unitPrices.map((u) => (
+                    <tr key={u.provider}>
+                      <td>{providerLabel(u.provider, "admin")}</td>
+                      <td>
+                        ${u.usdPerUnit} per {u.unit}
+                      </td>
+                      <td className="muted">{u.source}</td>
+                      <td className="muted">{u.env}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </details>
+        ) : null}
+
         {balancesHidden ? null : (
         <>
         <div className="progress-head">
@@ -281,13 +342,18 @@ export default function AdminOverview({ onOpenUser }: { onOpenUser?: (userId: st
           <p className="muted">{balancesBusy ? "Checking balances…" : "Balances could not be loaded."}</p>
         ) : (
           <>
-            <p className="form-hint">Only providers with a balance API are shown with a figure. Checked {formatDateTime(balances.checkedAt)}.</p>
+            <p className="form-hint">
+              Balance and spend as each provider reports them, next to the spend this app tracked in the selected period.
+              Checked {formatDateTime(balances.checkedAt)}.
+            </p>
             <div className="table-wrap">
               <table className="comp-table">
                 <thead>
                   <tr>
                     <th>Service</th>
                     <th>Balance</th>
+                    <th>Spent (provider)</th>
+                    <th>Spent (tracked here)</th>
                     <th>Note</th>
                   </tr>
                 </thead>
@@ -300,7 +366,22 @@ export default function AdminOverview({ onOpenUser }: { onOpenUser?: (userId: st
                           ? `${Number.isInteger(row.balance) ? row.balance : row.balance.toFixed(4)} ${row.currency ?? ""}`.trim()
                           : row.status === "error"
                             ? "Could not check"
-                            : "Not available"}
+                            : "Not published"}
+                      </td>
+                      <td>
+                        {typeof row.spentUsd === "number"
+                          ? `${row.spentUsd.toFixed(2)} (30 days)`
+                          : typeof row.totalUsed === "number"
+                            ? `${Number.isInteger(row.totalUsed) ? row.totalUsed : row.totalUsed.toFixed(4)} ${row.currency ?? ""}`.trim()
+                            : "—"}
+                      </td>
+                      <td>
+                        {(() => {
+                          const tracked = costRows.find((c) => c.provider === row.provider);
+                          if (!tracked) return "None in period";
+                          const cost = tracked.costUsdMicros === null ? "cost unavailable" : formatUsdMicros(tracked.costUsdMicros);
+                          return `${cost} · ${usageText(row.provider, tracked.used)}`;
+                        })()}
                       </td>
                       <td className="muted">{row.note}</td>
                     </tr>

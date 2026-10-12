@@ -21,7 +21,6 @@ import {
   hasManusKey,
   latestManusEvents,
   listManusConnectors,
-  listManusProjects,
   manusEventsSince,
   sendManusMessage,
   stopManusTask,
@@ -45,8 +44,10 @@ import { answerAgentQuestion } from "./answer";
 import { loadAssets, saveAssets, type UserAsset } from "./assets";
 import { describeRepeats, repeatedImages } from "./imageCheck";
 import { activityFromEvents, confirmationFor, plainText } from "../../manus/events";
+import { findManusProject, matchManusProject, projectKey } from "../../manus/projects";
+import { recordManusTaskCreditsSoon } from "../../manus/usage";
 
-export { activityFromEvents };
+export { activityFromEvents, matchManusProject };
 
 /**
  * Landing page recreation by the Manus agent. (The earlier built-in
@@ -98,41 +99,6 @@ function agentProfile(): string {
   return process.env.MANUS_AGENT_PROFILE?.trim() || "standard";
 }
 
-/** Letters and digits only, lower case: "Redesign  Pipeline" → "redesignpipeline". */
-function projectKey(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9]/g, "");
-}
-
-/** Edit distance, for project names typed with a small slip ("redeisgn" / "redesign"). */
-function editDistance(a: string, b: string): number {
-  const row = Array.from({ length: b.length + 1 }, (_, i) => i);
-  for (let i = 1; i <= a.length; i += 1) {
-    let prev = row[0];
-    row[0] = i;
-    for (let j = 1; j <= b.length; j += 1) {
-      const next = Math.min(row[j] + 1, row[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
-      prev = row[j];
-      row[j] = next;
-    }
-  }
-  return row[b.length];
-}
-
-/** Picks the project for a name: exact match, then one containing it, then one a typo away. */
-export function matchManusProject<T extends { id: string; name: string }>(projects: T[], name: string): T | null {
-  const want = projectKey(name);
-  if (!want) return null;
-  const exact = projects.filter((p) => projectKey(p.name) === want);
-  if (exact.length) return exact[0];
-  const containing = projects.filter((p) => projectKey(p.name).includes(want) || want.includes(projectKey(p.name)));
-  if (containing.length === 1) return containing[0];
-  const close = projects
-    .map((p) => ({ p, d: editDistance(projectKey(p.name), want) }))
-    .filter((x) => x.d <= Math.max(2, Math.floor(want.length / 6)))
-    .sort((a, b) => a.d - b.d);
-  return close.length && (close.length === 1 || close[0].d < close[1].d) ? close[0].p : null;
-}
-
 /**
  * Connectors every task gets: MANUS_CONNECTORS (names or ids, comma separated;
  * default Firecrawl and OpenAI), looked up among the account's installed
@@ -166,8 +132,6 @@ async function manusConnectors(): Promise<string[] | undefined> {
 /** The Manus project (cloud folder) recreate tasks go into unless MANUS_PROJECT_NAME/ID says otherwise. */
 const DEFAULT_PROJECT_NAME = "redeisgn pipeline";
 
-let projectCache: { key: string; id: string; name: string } | null = null;
-
 /**
  * The Manus project (cloud folder) every task goes into: MANUS_PROJECT_ID, or
  * the project named MANUS_PROJECT_NAME. Null when neither is set. A name that
@@ -179,15 +143,11 @@ async function manusProject(): Promise<{ id: string; name: string } | null> {
   // Empty MANUS_PROJECT_NAME= turns the folder off; unset uses the team's folder.
   const name = (process.env.MANUS_PROJECT_NAME ?? DEFAULT_PROJECT_NAME).trim();
   if (!name) return null;
-  if (projectCache?.key === name) return { id: projectCache.id, name: projectCache.name };
-  const projects = await listManusProjects();
-  const hit = matchManusProject(projects, name);
-  if (!hit) {
-    const names = projects.map((p) => `"${p.name}"`).join(", ") || "none";
-    throw new Error(`The design agent project "${name}" was not found. Projects in the account: ${names}. Set MANUS_PROJECT_NAME to one of them.`);
+  const found = await findManusProject(name);
+  if ("missing" in found) {
+    throw new Error(`The design agent project "${name}" was not found. Projects in the account: ${found.missing}. Set MANUS_PROJECT_NAME to one of them.`);
   }
-  projectCache = { key: name, id: hit.id, name: hit.name };
-  return { id: hit.id, name: hit.name };
+  return found;
 }
 
 export function isManusPage(page: RecreatedLandingPage | null | undefined): boolean {
@@ -355,6 +315,22 @@ function beginRun(competitorId: string): AbortSignal {
 
 function endRun(competitorId: string, signal: AbortSignal) {
   if (runs.get(competitorId)?.signal === signal) runs.delete(competitorId);
+  recordCredits(competitorId);
+}
+
+/** The agent's credits for this page's task go to the ledger (charged to the run's owner after a restart). */
+function recordCredits(competitorId: string) {
+  const competitor = getCompetitor(competitorId);
+  const taskId = competitor?.recreatedPage?.manus?.taskId;
+  if (!competitor || !taskId) return;
+  recordManusTaskCreditsSoon({
+    taskId,
+    operation: "manus.recreate",
+    fallbackUserId: getJob(competitor.runId)?.ownerUserId ?? null,
+    projectKind: "search",
+    projectId: competitor.runId,
+    runId: competitor.runId,
+  });
 }
 
 class StoppedError extends Error {
@@ -669,6 +645,7 @@ export async function stopManusRecreation(competitorId: string, reason = "Recrea
   runs.delete(competitorId);
   const page = latestPage(competitorId);
   if (page.manus?.taskId) await stopManusTask(page.manus.taskId).catch(() => undefined);
+  recordCredits(competitorId);
   const stage = (STAGES.find((s) => s.id === page.progress?.phase)?.id || "build") as StageId;
   savePage(competitorId, {
     status: page.html ? "completed" : "failed",

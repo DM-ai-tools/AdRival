@@ -109,6 +109,10 @@ export function seedConversionRuleSet(): ConversionRuleSet {
       runway: {
         default: { perImage: C(4), perRequest: C(4) },
       },
+      // Manus reports the credits a task used; one request-unit is one Manus credit.
+      manus: {
+        default: { perRequest: C(0.1) },
+      },
     },
     /**
      * Conservative ceiling held before a single call of unknown size. Chosen so
@@ -122,6 +126,7 @@ export function seedConversionRuleSet(): ConversionRuleSet {
       firecrawl: C(1),
       brandfetch: C(1),
       runway: C(6),
+      manus: C(100),
     },
   };
 }
@@ -143,7 +148,8 @@ export function resolveRate(
   provider: ProviderId,
   key: string | null,
 ): ProviderRate | null {
-  const providerRates = ruleSet.rates[provider];
+  // A provider added after the active rule set was saved uses the default rates.
+  const providerRates = ruleSet.rates[provider] ?? seedConversionRuleSet().rates[provider];
   if (!providerRates) return null;
   if (key) {
     if (providerRates[key]) return providerRates[key];
@@ -165,7 +171,9 @@ export function reservationCeiling(
   ruleSet: ConversionRuleSet,
   provider: ProviderId,
 ): number {
-  const configured = ruleSet.perCallReservationCeiling[provider];
+  const configured =
+    ruleSet.perCallReservationCeiling[provider] ??
+    (ruleSet.rates[provider] ? undefined : seedConversionRuleSet().perCallReservationCeiling[provider]);
   if (typeof configured === "number" && configured > 0) return configured;
   // No configured ceiling means the call is not safely boundable.
   return 0;

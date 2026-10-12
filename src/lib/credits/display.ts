@@ -12,6 +12,7 @@ const USER_FACING_PROVIDER_LABELS: Record<ProviderId, string> = {
   firecrawl: "Site scrape",
   brandfetch: "Brand lookup",
   runway: "Image generation",
+  manus: "Research agent",
 };
 
 const ADMIN_PROVIDER_LABELS: Record<ProviderId, string> = {
@@ -22,6 +23,7 @@ const ADMIN_PROVIDER_LABELS: Record<ProviderId, string> = {
   firecrawl: "Firecrawl",
   brandfetch: "Brandfetch",
   runway: "Runway",
+  manus: "Manus",
 };
 
 export function providerLabel(

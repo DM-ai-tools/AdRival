@@ -9,7 +9,7 @@ import {
 } from "@/lib/accounting/service";
 import { queryAudit } from "@/lib/accounting/records";
 import { getProviderBalances } from "@/lib/accounting/providerBalances";
-import { summarizeTrackedSpend } from "@/lib/accounting/priceBook";
+import { UNIT_LIST_PRICES, summarizeTrackedSpend, unitListPrice } from "@/lib/accounting/priceBook";
 import {
   ROUTINE_AUDIT_ACTIONS,
   auditActionLabel,
@@ -108,6 +108,14 @@ export async function GET(request: Request) {
       trackedSpend: summarizeTrackedSpend(
         queryProviderCalls({ from, limit: Number.MAX_SAFE_INTEGER, chargedUserIds: scoped }).rows,
       ),
+      /** Prices for providers billed per credit or request (env overrides applied). */
+      unitPrices: UNIT_LIST_PRICES.map((p) => unitListPrice(p.provider)!).map((p) => ({
+        provider: p.provider,
+        unit: p.unit,
+        usdPerUnit: p.usdPerUnit,
+        source: p.source,
+        env: p.env,
+      })),
     });
   } catch (err) {
     return errorResponse(err, { audience: "admin" });

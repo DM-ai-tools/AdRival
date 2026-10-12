@@ -89,6 +89,8 @@ function fakeManus() {
       }
       case "task.detail":
         return json({ ok: true, task: { id: "S1", status } });
+      case "project.list":
+        return json({ ok: true, data: [{ id: "P-red", name: "Redesign Pipeline" }, { id: "P-goog", name: "Google Comp - AdRival" }] });
       case "task.stop":
         status = "stopped";
         return json({ ok: true });
@@ -168,6 +170,8 @@ test("finds stream in while the agent works, a follow-up step reuses the task, a
     const create = fake.sent.find((s) => s.method === "task.create")!.body;
     assert.equal(create.agent_profile, "lite");
     assert.equal(create.interactive_mode, false);
+    // Search tasks go into the "Google Comp - AdRival" folder.
+    assert.equal(create.project_id, "P-goog");
     assert.ok(create.structured_output_schema);
 
     // Next ring: a follow-up message to the same task; the run fills up and says stop.

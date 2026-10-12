@@ -20,7 +20,8 @@ import { USD_MICROS } from "./units";
  *   https://docs.perplexity.ai/docs/getting-started/pricing
  *
  * Models without a listed rate are left unpriced (null), never $0.
- * SociaVault, Firecrawl, Brandfetch and Runway are not token-priced here.
+ * SociaVault, Firecrawl, Brandfetch, Runway and Manus are priced per credit
+ * or request instead (UNIT_LIST_PRICES below).
  */
 export interface TokenListPrice {
   provider: ProviderId;
@@ -174,6 +175,52 @@ export function priceTokenUsage(
   };
 }
 
+/**
+ * Providers billed per credit or per request: what one request-unit costs.
+ * SociaVault, Firecrawl and Manus store their own credits as request-units
+ * (see extractSociavaultUsage, extractFirecrawlUsage, recordIncurredUsage).
+ * Plan prices differ, so each figure can be set with its env var to match the
+ * account's plan; the defaults are the published entry-plan rates.
+ */
+export interface UnitListPrice {
+  provider: ProviderId;
+  /** What one request-unit is, for the admin screens. */
+  unit: "credit" | "request";
+  usdPerUnit: number;
+  env: string;
+  source: string;
+}
+
+export const UNIT_LIST_PRICES: UnitListPrice[] = [
+  // https://sociavault.com/pricing — Starter $29 / 6,000 credits (larger packs are cheaper per credit).
+  { provider: "sociavault", unit: "credit", usdPerUnit: 0.00483, env: "SOCIAVAULT_USD_PER_CREDIT", source: "SociaVault Starter pack ($29 / 6,000 credits)" },
+  // https://www.firecrawl.dev/pricing — Hobby $19 / 5,000 credits a month.
+  { provider: "firecrawl", unit: "credit", usdPerUnit: 0.0038, env: "FIRECRAWL_USD_PER_CREDIT", source: "Firecrawl Hobby plan ($19 / 5,000 credits)" },
+  // https://brandfetch.com/developers/pricing — Growth $99 / 2,500 brand fetches a month.
+  { provider: "brandfetch", unit: "request", usdPerUnit: 0.04, env: "BRANDFETCH_USD_PER_REQUEST", source: "Brandfetch Growth plan (~$0.04 per fetch)" },
+  // https://docs.dev.runwayml.com/guides/pricing — $0.01 per credit.
+  { provider: "runway", unit: "credit", usdPerUnit: 0.01, env: "RUNWAY_USD_PER_CREDIT", source: "Runway API ($0.01 per credit)" },
+  // https://manus.im/pricing — $20 / 4,000 credits a month.
+  { provider: "manus", unit: "credit", usdPerUnit: 0.005, env: "MANUS_USD_PER_CREDIT", source: "Manus plan ($20 / 4,000 credits)" },
+];
+
+export function unitListPrice(provider: ProviderId): (UnitListPrice & { overridden: boolean }) | null {
+  const price = UNIT_LIST_PRICES.find((p) => p.provider === provider);
+  if (!price) return null;
+  const override = Number(process.env[price.env]);
+  return Number.isFinite(override) && override >= 0 && process.env[price.env]?.trim()
+    ? { ...price, usdPerUnit: override, overridden: true, source: `${price.env} (set for this account)` }
+    : { ...price, overridden: false };
+}
+
+/** Cost of request-units for a per-credit / per-request provider; null for token-priced ones. */
+export function priceUnitUsage(provider: ProviderId, usage: ProviderUsageUnits): { usdMicros: number | null; source: string | null } {
+  const price = unitListPrice(provider);
+  const units = usage.requests ?? 0;
+  if (!price || units <= 0) return { usdMicros: null, source: null };
+  return { usdMicros: Math.round(units * price.usdPerUnit * USD_MICROS), source: price.source };
+}
+
 /** $3 per 1M tokens * 1,000 tokens = 3,000 micro-USD. */
 export function usdPerMillionToMicros(tokens: number, usdPerMillion: number): number {
   return Math.round(tokens * usdPerMillion);
@@ -238,7 +285,9 @@ export function summarizeTrackedSpend(calls: TrackedSpendCall[]): TrackedSpendSu
       row.usdMicros = (row.usdMicros ?? 0) + call.estimatedCostUsdMicros;
       if (row.basis === "unpriced") row.basis = "stored";
     } else {
-      const priced = priceTokenUsage(call.provider, call.model, call.usage);
+      // Older calls stored no cost: token list price, else the per-credit price.
+      const tokens = priceTokenUsage(call.provider, call.model, call.usage);
+      const priced = tokens.usdMicros !== null ? tokens : priceUnitUsage(call.provider, call.usage);
       if (priced.usdMicros !== null) {
         row.usdMicros = (row.usdMicros ?? 0) + priced.usdMicros;
         if (row.basis === "unpriced") row.basis = "list_price";

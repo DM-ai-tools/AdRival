@@ -68,6 +68,7 @@ test("a Google search takes sponsored advertisers from the agent, reads their ad
   let polls = 0;
   let status = "running";
   let step = 0;
+  let createBody: Record<string, unknown> = {};
   const push = (type: string, data: Record<string, unknown>) => {
     clock += 1;
     events.push({ id: `e${clock}`, type, timestamp: clock, ...data });
@@ -80,6 +81,7 @@ test("a Google search takes sponsored advertisers from the agent, reads their ad
     if (url.hostname === "api.manus.ai") {
       const method = url.pathname.replace("/v2/", "");
       manusCalls.push(method);
+      if (method === "task.create") createBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
       if (method === "task.create" || method === "task.sendMessage") {
         step += 1;
         status = "running";
@@ -103,7 +105,8 @@ test("a Google search takes sponsored advertisers from the agent, reads their ad
         }
         return json({ ok: true, messages: [...events].reverse().map((e) => ({ ...e, timestamp: String(e.timestamp) })) });
       }
-      if (method === "task.detail") return json({ ok: true, task: { id: "S1", status } });
+      if (method === "task.detail") return json({ ok: true, task: { id: "S1", status, credit_usage: 120 } });
+      if (method === "project.list") return json({ ok: true, data: [{ id: "P-goog", name: "Google Comp - AdRival" }] });
       if (method === "task.stop") return json({ ok: true });
       throw new Error(`unexpected Manus call ${method}`);
     }
@@ -179,7 +182,9 @@ test("a Google search takes sponsored advertisers from the agent, reads their ad
     const job = getJob("job-google-1")!;
     assert.equal(job.manusSearch?.taskId, "S1");
     // The agent ran first; its confirmed advertiser was fetched from SociaVault for Australia only.
-    assert.equal(manusCalls[0], "task.create");
+    assert.equal(manusCalls.filter((m) => m !== "project.list")[0], "task.create");
+    assert.equal(createBody.project_id, "P-goog");
+    assert.equal(createBody.agent_profile, "lite");
     const rivalFetch = svCalls.find((c) => c.path.endsWith("/company-ads") && c.params.get("domain") === "rivaldental.com.au");
     assert.ok(rivalFetch, "the sponsored advertiser's ads were fetched");
     assert.equal(rivalFetch!.params.get("region"), "AU");
@@ -195,6 +200,19 @@ test("a Google search takes sponsored advertisers from the agent, reads their ad
     // Short of 10, so the web search still ran after the agent's rounds.
     assert.ok(svCalls.some((c) => c.path.endsWith("/search-advertisers")));
     assert.equal(job.status, "partial");
+
+    // The agent's 120 credits are in the ledger for this run, with a cost and app credits charged.
+    const { readDb } = await import("../src/lib/db");
+    let manusCall = null as null | { usage: { requests?: number }; estimatedCostUsdMicros: number | null; creditsCharged: number; runId: string | null };
+    for (let i = 0; i < 50 && !manusCall; i += 1) {
+      manusCall = (readDb().providerCalls ?? []).find((c) => c.provider === "manus") ?? null;
+      if (!manusCall) await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.ok(manusCall, "Manus credits were recorded");
+    assert.equal(manusCall!.usage.requests, 120);
+    assert.equal(manusCall!.runId, "job-google-1");
+    assert.equal(manusCall!.estimatedCostUsdMicros, 600_000); // 120 × $0.005
+    assert.ok(manusCall!.creditsCharged > 0);
   } finally {
     globalThis.fetch = realFetch;
   }

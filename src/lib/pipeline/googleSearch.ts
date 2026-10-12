@@ -35,6 +35,7 @@ import {
   hasFirecrawlKey,
 } from "../firecrawl/client";
 import {
+  getAppSettings,
   getJob,
   isSearchJobSuppressed,
   isLookupJobSuppressed,
@@ -88,6 +89,7 @@ import {
   manusSearchEnabled,
   type SponsoredFind,
 } from "./manusSearch";
+import { recordManusTaskCreditsSoon } from "../manus/usage";
 
 const MAX_ADS_PAGES = 6;
 /** Transparency region that returns creatives across countries (lookups; a search uses the chosen country). */
@@ -907,7 +909,8 @@ export async function runGoogleFamilySearch(
     };
 
     const sponsoredCountry = webCountry || "AU";
-    const agent = manusSearchEnabled()
+    // An admin can switch Manus off in Settings: the web search then runs alone.
+    const agent = manusSearchEnabled() && !getAppSettings().disabledProviders.includes("manus")
       ? new SponsoredSearchAgent(
           {
             title: `${platform === "youtube" ? "YouTube" : "Google"} sponsored search: ${allKeywords.slice(0, 3).join(", ")} (${sponsoredCountry})`,
@@ -994,6 +997,17 @@ export async function runGoogleFamilySearch(
       }
     } finally {
       await agent?.stop();
+      // The agent's credits go to the ledger with the run.
+      if (agent?.taskId) {
+        recordManusTaskCreditsSoon({
+          taskId: agent.taskId,
+          operation: `manus.sponsored_search.${platform}`,
+          fallbackUserId: getJob(jobId)?.ownerUserId ?? null,
+          projectKind: "search",
+          projectId: jobId,
+          runId: jobId,
+        });
+      }
     }
 
     // Anything still held fills the list last.

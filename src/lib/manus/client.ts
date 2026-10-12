@@ -143,6 +143,19 @@ export async function listManusConnectors(): Promise<ManusConnector[]> {
   return res.data || [];
 }
 
+/** The account's spendable credits (`total_credits` is the authoritative figure). */
+export async function getManusAvailableCredits(): Promise<{ total: number; periodicCredits: number | null; nextRefresh: number | null }> {
+  const res = await call<{ data?: { total_credits?: number; periodic_credits?: number; next_refresh_time?: number } }>(
+    "usage.availableCredits",
+    {},
+  );
+  return {
+    total: Number(res.data?.total_credits ?? 0),
+    periodicCredits: typeof res.data?.periodic_credits === "number" ? res.data.periodic_credits : null,
+    nextRefresh: typeof res.data?.next_refresh_time === "number" ? res.data.next_refresh_time : null,
+  };
+}
+
 export async function listManusProjects(): Promise<ManusProject[]> {
   const res = await call<{ data?: ManusProject[] }>("project.list", {});
   return res.data || [];
