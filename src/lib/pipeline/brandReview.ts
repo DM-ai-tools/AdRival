@@ -27,6 +27,7 @@ import {
   fetchCandidate,
   NEEDS_PROOF,
   profileMatchesBrand,
+  vouchedBySiteLinks,
   type Candidate,
   type CandidateSource,
   type FetchedProfile,
@@ -746,9 +747,12 @@ export async function runBrandReview(input: {
         continue;
       }
       const match = profileMatchesBrand(profile, brandRef());
+      const otherSiteLinks = candidates.filter((x) => x.source === "site" && x.platform !== platform).map((x) => x.value);
       const accept =
         c.source === "ad" ||
-        (NEEDS_PROOF.has(c.source) ? match.site === "same" || (match.site !== "other" && match.name) : !(match.site === "other" && !match.name));
+        (NEEDS_PROOF.has(c.source)
+          ? match.site === "same" || (match.site !== "other" && match.name)
+          : !(match.site === "other" && !match.name) || vouchedBySiteLinks(profile, otherSiteLinks));
       if (!accept) continue;
       profileLinks.push(...profile.links);
       const current = resolved.get(platform);

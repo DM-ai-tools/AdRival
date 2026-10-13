@@ -287,6 +287,23 @@ export function profileMatchesBrand(
   return { site, name };
 }
 
+/**
+ * Whether the brand's site links this profile's business on other networks
+ * too. A broker site (pepperbroker.com.au, advertiser "FIVESTONES AUSTRALIA")
+ * links its parent's accounts (Pepper Money) on every platform: those agree
+ * with each other. One stray link (a web agency's Instagram) is not vouched for.
+ */
+export function vouchedBySiteLinks(
+  profile: Pick<FetchedProfile, "names" | "website">,
+  otherSiteLinks: string[],
+): boolean {
+  const theirs = siteSlug(profile.website);
+  const keys = [theirs && !LINK_IN_BIO.test(theirs) ? theirs : "", ...profile.names.map(compact)].filter((k) => k.length >= 5);
+  // The handle part only, so "face" or "book" cannot match facebook.com itself.
+  const handles = otherSiteLinks.map((link) => compact(link.replace(/^(https?:)?\/\/[^/]+/i, "")));
+  return keys.some((k) => handles.some((h) => h.includes(k)));
+}
+
 /** Candidates for every platform found in a list of links. */
 export function candidatesFromLinks(links: Array<string | null | undefined>, source: CandidateSource): Candidate[] {
   const out: Candidate[] = [];

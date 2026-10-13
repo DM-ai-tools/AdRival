@@ -100,3 +100,77 @@ test("every platform on the site gets its real count; a searched account of anot
     process.env = saved;
   }
 });
+
+test("a site that links its parent brand's accounts keeps them; one stray link to another business does not", { timeout: 60_000 }, async () => {
+  const saved = { ...process.env };
+  for (const key of ["FIRECRAWL_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"]) delete process.env[key];
+  process.env.SOCIAVAULT_API_KEY = "test-key";
+  const realFetch = globalThis.fetch;
+  // pepperbroker.com.au (advertiser "FIVESTONES AUSTRALIA PTY.LTD") links Pepper Money's
+  // accounts, whose profiles point at peppermoney.com.au. The web agency's Instagram comes
+  // first, so it is tried (and must be rejected) before Pepper Money's.
+  const site = `<!doctype html><html><head></head><body><footer>
+    <p>Site by <a href="https://www.instagram.com/kineticdigital">Kinetic Digital</a></p>
+    <a href="https://www.linkedin.com/company/peppermoneyanz">in</a>
+    <a href="https://www.facebook.com/peppermoney/">f</a>
+    <a href="https://www.instagram.com/pepper_money">ig</a>
+    <a href="https://www.youtube.com/channel/UCa4914giBkj_kuepbLzYhGw">yt</a>
+    <a href="https://www.twitter.com/peppermoney">x</a>
+  </footer></body></html>`;
+  const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = new URL(String(input instanceof Request ? input.url : input));
+    if (url.hostname.endsWith("pepperbroker.com.au")) {
+      return new Response(site, { status: 200, headers: { "content-type": "text/html" } });
+    }
+    if (url.hostname === "api.sociavault.com") {
+      const p = url.pathname;
+      if (p.endsWith("/facebook/profile")) {
+        return json({ success: false, error: "Profile is private", credits_used: 1 });
+      }
+      if (p.endsWith("/instagram/profile")) {
+        if (url.searchParams.get("handle") === "kineticdigital") {
+          return json({ success: true, data: { data: { user: { username: "kineticdigital", full_name: "Kinetic Digital", edge_followed_by: { count: 900 }, external_url: "https://kineticdigital.com.au" } } }, credits_used: 1 });
+        }
+        return json({ success: true, data: { data: { user: { username: "pepper_money", full_name: "Pepper Money", edge_followed_by: { count: 5400 }, external_url: "https://sprout.link/pepper_money" } } }, credits_used: 1 });
+      }
+      if (p.endsWith("/twitter/profile")) {
+        return json({ success: true, data: { core: { name: "Pepper Money Australia", screen_name: "peppermoney" }, legacy: { followers_count: 2239, entities: { url: { urls: [{ expanded_url: "http://www.peppermoney.com.au" }] } } } }, credits_used: 1 });
+      }
+      if (p.endsWith("/youtube/channel")) {
+        return json({ success: true, data: { name: "Pepper Money", subscriberCount: 933, links: { "0": "https://peppermoney.com.au" } }, credits_used: 1 });
+      }
+      if (p.endsWith("/linkedin/company")) {
+        return json({ success: true, data: { name: "Pepper Money ANZ", employeeCount: 715, followers: 32376, website: "http://www.peppermoney.com.au" }, credits_used: 1 });
+      }
+      if (p.endsWith("/google/search")) return json({ success: true, data: { results: [] }, credits_used: 1 });
+      return new Response("not found", { status: 404 });
+    }
+    return new Response("not found", { status: 404, headers: { "content-type": "text/plain" } });
+  }) as typeof fetch;
+
+  try {
+    const user = await makeUser({ credits: 1000 });
+    const job = makeSearchProject({ ownerUserId: user.id });
+    const brand = await runBillable(
+      { user, operation: "test.brand_review", projectKind: "search", projectId: job.id, runId: job.id },
+      () =>
+        runBrandReview({
+          pageId: "AR123",
+          pageName: "FIVESTONES AUSTRALIA PTY.LTD",
+          websiteHint: "https://www.pepperbroker.com.au/",
+          sourcePlatform: "google",
+        }),
+    );
+    assert.equal(brand.facebookUrl, "https://www.facebook.com/peppermoney");
+    assert.equal(brand.instagramHandle, "pepper_money");
+    assert.equal(brand.instagramFollowers, 5400);
+    assert.equal(brand.twitterFollowers, 2239);
+    assert.equal(brand.youtubeSubscribers, 933);
+    assert.equal(brand.linkedinEmployees, 715);
+    assert.equal(brand.linkedinFollowers, 32376);
+  } finally {
+    globalThis.fetch = realFetch;
+    process.env = saved;
+  }
+});
