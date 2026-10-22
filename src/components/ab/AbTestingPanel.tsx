@@ -9,6 +9,12 @@ import type { StageCoverage } from "@/lib/pipeline/awareness/coverage";
 import { AbPageCard } from "./AbPageCard";
 import { CoverageStrip, STAGE_LABELS } from "./CoverageStrip";
 import { IcpDrawer } from "./IcpDrawer";
+import { inFlightKey, stageInFlight, tryAddInFlight } from "@/lib/pipeline/awareness/inFlight";
+
+// Module scope on purpose: a paid request keeps its guard while the user
+// switches sources or leaves the tab, and only its own finally clears it.
+const icpInFlight = new Set<string>();
+const labelInFlight = new Set<string>();
 
 type Source = { kind: "search" | "lookup"; id: string };
 type RunItem = {
@@ -39,13 +45,12 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
   const [stageFilter, setStageFilter] = useState("");
   const [audienceFilter, setAudienceFilter] = useState("");
   const [labelCount, setLabelCount] = useState<number | null>(null);
-  const [labelBusy, setLabelBusy] = useState(false);
+  const [, setTick] = useState(0);
+  const bump = () => setTick((n) => n + 1);
   const [recreatingId, setRecreatingId] = useState<string | null>(null);
   // Drawer for one stage's ICP. baseId is the user's "Change page" pick.
   const [drawer, setDrawer] = useState<{ stage: string; baseId: string | null } | null>(null);
-  const [generatingStage, setGeneratingStage] = useState<string | null>(null);
   const [icpError, setIcpError] = useState<string | null>(null);
-  const generatingRef = useRef(false);
   const openerRef = useRef<HTMLElement | null>(null);
   // Bumped on every source change and every load; a response only applies
   // while its number is still current, so a slow older request is dropped.
@@ -101,14 +106,15 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
     setAudienceFilter("");
     setDrawer(null);
     setIcpError(null);
-    setGeneratingStage(null);
-    generatingRef.current = false;
     if (source) void load(source);
     else setLoading(false);
     return () => {
       loadSeq.current += 1; // invalidate anything still in flight for this source
     };
   }, [source, load]);
+
+  const generatingStage = source ? stageInFlight(icpInFlight, source) : null;
+  const labelBusy = source ? labelInFlight.has(inFlightKey(source, "label")) : false;
 
   const unlabelled = useMemo(
     () => (data?.pages ?? []).filter((p) => p.status === "completed" && !p.levels).length,
@@ -128,7 +134,9 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
   async function startLabel() {
     if (!source) return;
     const forKey = key(source);
-    setLabelBusy(true);
+    const busyKey = inFlightKey(source, "label");
+    if (!tryAddInFlight(labelInFlight, busyKey)) return;
+    bump();
     setError(null);
     try {
       // No confirm: the route only counts the pages, nothing is spent.
@@ -149,14 +157,17 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
     } catch (e) {
       if (forKey === sourceKey.current) setError(e instanceof Error ? e.message : "Could not count pages");
     } finally {
-      setLabelBusy(false);
+      labelInFlight.delete(busyKey);
+      bump();
     }
   }
 
   async function confirmLabel() {
     if (!source) return;
     const forKey = key(source);
-    setLabelBusy(true);
+    const busyKey = inFlightKey(source, "label");
+    if (!tryAddInFlight(labelInFlight, busyKey)) return;
+    bump();
     setError(null);
     try {
       const res = await fetch("/api/ab-testing/label", {
@@ -175,7 +186,8 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
     } catch (e) {
       if (forKey === sourceKey.current) setError(e instanceof Error ? e.message : "Labelling failed");
     } finally {
-      setLabelBusy(false);
+      labelInFlight.delete(busyKey);
+      bump();
     }
   }
 
@@ -230,10 +242,11 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
 
   // Spends credits. Only reached from an explicit Generate / Regenerate click.
   async function generateIcp(stage: string) {
-    if (!source || generatingRef.current) return;
-    generatingRef.current = true;
+    if (!source) return;
+    const flightKey = inFlightKey(source, stage);
+    if (!tryAddInFlight(icpInFlight, flightKey)) return;
     const forKey = key(source);
-    setGeneratingStage(stage);
+    bump();
     setIcpError(null);
     try {
       const res = await fetch("/api/ab-testing/icp", {
@@ -260,10 +273,8 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
         setIcpError(e instanceof Error ? e.message : "Could not generate the ICP");
       }
     } finally {
-      if (forKey === sourceKey.current) {
-        generatingRef.current = false;
-        setGeneratingStage(null);
-      }
+      icpInFlight.delete(flightKey);
+      bump();
     }
   }
 

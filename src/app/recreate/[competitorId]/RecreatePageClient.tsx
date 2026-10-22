@@ -6,6 +6,7 @@ import type { CompetitorRecord, RecreatedLandingPage } from "@/lib/types";
 import { stripDraftBanner } from "@/lib/pipeline/stripDraftBanner";
 import { readReturnPath, returnLabel } from "@/lib/returnTo";
 import { externalUrl } from "@/lib/externalUrl";
+import { stageNameText } from "@/lib/export/levelLabels";
 import { FeedbackComposer, type Screenshot } from "./FeedbackComposer";
 
 type Brand = { businessUrl: string | null; businessName: string | null };
@@ -63,6 +64,10 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
   const [building, setBuilding] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [hasIcpParam, setHasIcpParam] = useState(false);
+  useEffect(() => {
+    setHasIcpParam(Boolean(new URLSearchParams(window.location.search).get("icp")));
+  }, []);
   /** One box for content and design: everything goes to the design agent. */
   const [feedback, setFeedback] = useState("");
   const [screenshots, setScreenshots] = useState<Screenshot[]>([]);
@@ -363,6 +368,9 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
   }
 
   const busy = working || loading;
+  const icpStageName = stageNameText(page?.targetIcp?.stage);
+  const buildingFor =
+    page?.targetIcp || hasIcpParam ? `Building for: ${icpStageName ? `${icpStageName} ` : "audience "}ICP` : null;
   const hasFeedback = Boolean(feedback.trim() || screenshots.length);
   const backHref = returnPath || defaultReturnPath(competitor?.runId);
   const fromLookup = Boolean(competitor?.runId?.startsWith(LOOKUP_RECREATE_PREFIX));
@@ -396,6 +404,7 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
             <p className="muted">
               {competitor ? `Inspired by ${competitor.pageName}` : "Loading…"}
               {page?.keyword ? ` · keyword “${page.keyword}”` : ""}
+              {buildingFor ? ` · ${buildingFor}` : ""}
               {page?.businessUrl ? (
                 <>
                   {" "}

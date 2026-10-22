@@ -7,7 +7,9 @@ import type {
   RecreationProgressStage,
   SearchJob,
 } from "../../types";
-import { getCompetitor, getIcp, getJob, updateCompetitor } from "../../db";
+import { getCompetitor, getIcp, getIcps, getJob, updateCompetitor } from "../../db";
+import type { IcpRecord } from "../../types";
+import { LOOKUP_RECREATE_PREFIX } from "../lookupRecreateBridge";
 import { getBillingContext } from "../../accounting/context";
 import { touchReservation } from "../../accounting/service";
 import { sanitizeClientFacingText } from "../../clientFacing";
@@ -431,6 +433,28 @@ function screenshotNote(shots: FeedbackScreenshot[]): string {
 
 // ── Start, edit, stop, resume ───────────────────────────────────────────
 
+/**
+ * Finds the audience profile for a build. A regenerated ICP gets a new id, so a
+ * saved id can go missing: fall back to the current ICP for the same source and
+ * stage, and throw (before any spend) when there is none.
+ */
+export function resolveTargetIcp(
+  target: { icpId: string; stage: AwarenessStage } | null,
+  runId: string,
+): { record: IcpRecord; target: { icpId: string; stage: AwarenessStage } } | null {
+  if (!target) return null;
+  const byId = getIcp(target.icpId);
+  if (byId) return { record: byId, target };
+  const source = runId.startsWith(LOOKUP_RECREATE_PREFIX)
+    ? { kind: "lookup" as const, id: runId.slice(LOOKUP_RECREATE_PREFIX.length) }
+    : { kind: "search" as const, id: runId };
+  const current = getIcps(source.kind, source.id).find((i) => i.stage === target.stage);
+  if (!current) {
+    throw new Error("This page's audience profile was removed. Open it again from A/B testing.");
+  }
+  return { record: current, target: { icpId: current.id, stage: current.stage } };
+}
+
 /** Builds the page with the design agent. Returns when the page is ready or the run failed. */
 export async function runManusRecreation(
   competitorId: string,
@@ -459,6 +483,16 @@ export async function runManusRecreation(
   const styleDirection: StyleDirection = options.styleDirection || competitor.recreatedPage?.styleDirection || "brand";
   const feedback = options.userFeedback?.trim() || null;
 
+  // The reader this page is for: a new target from the request, else the one kept on the page.
+  // Resolved before anything is stopped or spent: a page saved for an audience
+  // profile must never fall back to a plain brief.
+  const resolved = resolveTargetIcp(
+    options.targetIcp ?? competitor.recreatedPage?.targetIcp ?? null,
+    competitor.runId,
+  );
+  const targetIcp = resolved?.target ?? null;
+  const icp = resolved ? { stage: resolved.record.stage, content: resolved.record } : null;
+
   // A new build replaces a running one.
   const previous = competitor.recreatedPage;
   if (previous?.manus?.taskId && isManusRunActive(previous)) {
@@ -468,11 +502,6 @@ export async function runManusRecreation(
 
   if (options.assets?.length) saveAssets(competitorId, options.assets);
   const assets = options.assets?.length ? options.assets : loadAssets(competitorId);
-
-  // The reader this page is for: a new target from the request, else the one kept on the page.
-  const targetIcp = options.targetIcp ?? competitor.recreatedPage?.targetIcp ?? null;
-  const icpRecord = targetIcp ? getIcp(targetIcp.icpId) : null;
-  const icp = icpRecord ? { stage: icpRecord.stage, content: icpRecord } : null;
 
   const signal = beginRun(competitorId);
   const input = {

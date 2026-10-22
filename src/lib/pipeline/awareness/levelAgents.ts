@@ -130,6 +130,11 @@ export async function analyzeLevels(input: {
     runAgent(call, AWARENESS_SYSTEM, user, awarenessSchema, "awareness"),
   ]);
 
+  // A failed awareness agent is an outage, not an "unclear" label: throw so the
+  // page stays unlabelled and can be retried. An audience-only failure keeps
+  // the awareness result and marks the audience unclear.
+  if (!awa) throw new Error("Awareness agent failed; page left unlabelled");
+
   const audEvidence = aud ? groundedEvidence(aud.evidence, words) : null;
   const audOk = aud && aud.audienceLevel !== "unclear" && audEvidence;
   const awaEvidence = awa ? groundedEvidence(awa.evidence, words) : null;

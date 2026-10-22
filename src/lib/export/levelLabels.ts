@@ -37,3 +37,8 @@ export function awarenessStageText(levels: PageLevels | null | undefined): strin
   const focus = FOCUS[levels?.awarenessFocus ?? ""];
   return focus ? `${stage} (${focus})` : stage;
 }
+
+/** The plain name of an awareness stage, for example "Problem aware"; empty for an unknown one. */
+export function stageNameText(stage: string | null | undefined): string {
+  return STAGE[stage ?? ""] ?? "";
+}

@@ -15,6 +15,7 @@ import {
   getJob,
   getLookupAd,
   getLookupAds,
+  getLookupJob,
   getSearchCompetitorAdsByCompetitor,
   updateCompetitor,
   updateLookupAd,
@@ -571,7 +572,7 @@ export function buildLevels(
  */
 export async function runWithLevels<X>(
   extract: () => Promise<X>,
-  levels: () => Promise<LevelsResult>,
+  levels: () => Promise<LevelsResult | null>,
 ): Promise<{ extracted: X; levels: LevelsResult | null }> {
   const [extracted, levelsResult] = await Promise.all([
     extract(),
@@ -592,6 +593,25 @@ function levelsInput(outline: PageOutline) {
   };
 }
 
+/** Search offers reports label pages under an internal lookup nobody can see; skip the paid calls there. */
+export function shouldLabelLevels(input: { internalOnly: boolean }): boolean {
+  return !input.internalOnly;
+}
+
+type StoredAnalysis = { status?: string; analyzedAt?: string | null } | null | undefined;
+
+/**
+ * Labelling reads the page before a slow fetch and two model calls. Only write
+ * the levels if the stored analysis is still the one we started from, so a
+ * re-analysis done in the meantime is never overwritten with a stale copy.
+ */
+export function shouldWriteLevels(input: { before: StoredAnalysis; current: StoredAnalysis }): boolean {
+  const { before, current } = input;
+  if (!before || !current) return false;
+  if (current.status !== "completed") return false;
+  return (current.analyzedAt ?? null) === (before.analyzedAt ?? null);
+}
+
 /** Adds levels to an already analysed competitor page without redoing the offer. */
 export async function labelCompetitorLevels(competitorId: string): Promise<CompetitorRecord> {
   const competitor = getCompetitor(competitorId);
@@ -599,12 +619,19 @@ export async function labelCompetitorLevels(competitorId: string): Promise<Compe
   if (!competitor || analysis?.status !== "completed") {
     throw new Error("Analyze this page before labelling it.");
   }
+  if (analysis.levels) return competitor;
   const url = analysis.analyzedUrl || resolveCompetitorUrl(competitor);
   if (!url) throw new Error("No usable landing page URL on this competitor.");
   const page = await fetchLandingPage(url);
   const result = await analyzeLevels(levelsInput(page.outline));
   const levels = buildLevels(analysis.pageArchitecture?.sections ?? [], result);
-  const updated = updateCompetitor(competitorId, { pageAnalysis: { ...analysis, levels } });
+  const fresh = getCompetitor(competitorId);
+  const current = fresh?.pageAnalysis;
+  if (!fresh || !current || !shouldWriteLevels({ before: analysis, current })) {
+    if (!fresh) throw new Error("Competitor no longer exists");
+    return fresh;
+  }
+  const updated = updateCompetitor(competitorId, { pageAnalysis: { ...current, levels } });
   if (!updated) throw new Error("Failed to save levels");
   return updated;
 }
@@ -616,12 +643,19 @@ export async function labelLookupAdLevels(adId: string): Promise<LookupAdRecord>
   if (!ad || analysis?.status !== "completed") {
     throw new Error("Analyze this page before labelling it.");
   }
+  if (analysis.levels) return ad;
   const url = analysis.analyzedUrl || resolveLookupAdUrl(ad);
   if (!url) throw new Error("No usable landing page URL on this ad.");
   const page = await fetchLandingPage(url);
   const result = await analyzeLevels(levelsInput(page.outline));
   const levels = buildLevels(analysis.pageArchitecture?.sections ?? [], result);
-  const updated = updateLookupAd(adId, { pageAnalysis: { ...analysis, levels } });
+  const fresh = getLookupAd(adId);
+  const current = fresh?.pageAnalysis;
+  if (!fresh || !current || !shouldWriteLevels({ before: analysis, current })) {
+    if (!fresh) throw new Error("Ad no longer exists");
+    return fresh;
+  }
+  const updated = updateLookupAd(adId, { pageAnalysis: { ...current, levels } });
   if (!updated) throw new Error("Failed to save levels");
   return updated;
 }
@@ -1206,7 +1240,12 @@ export async function analyzeLookupAdLandingPage(
           screenshots: screenshots.tiles,
           serviceContext: service,
         }),
-      () => analyzeLevels(levelsInput(outline)),
+      // Search offers reports analyse pages under an internal lookup the A/B
+      // tab never lists, so labels there would be paid for and never seen.
+      () =>
+        shouldLabelLevels({ internalOnly: Boolean(getLookupJob(ad.lookupId)?.internalOnly) })
+          ? analyzeLevels(levelsInput(outline))
+          : Promise.resolve(null),
     );
     if (screenshots.warnings.length) {
       console.warn("[page-analysis] screenshot warnings", screenshots.warnings.slice(0, 3));
