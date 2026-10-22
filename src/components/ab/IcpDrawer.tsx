@@ -240,7 +240,13 @@ export function IcpDrawer({
                 type="button"
                 className="ghost-btn ab-drawer-primary"
                 disabled={!basePage || recreating || generating}
-                title={basePage ? undefined : NO_BASE_TIP}
+                title={
+                  !basePage
+                    ? NO_BASE_TIP
+                    : basePage.origin === "offers"
+                      ? "Analyses the base page first and uses credits if it has not been analysed for recreation yet"
+                      : undefined
+                }
                 onClick={onRecreate}
               >
                 {recreating ? "Opening…" : "Recreate a page for this ICP"}

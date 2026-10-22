@@ -3,6 +3,13 @@
 import { useState } from "react";
 import type { AbPage } from "@/lib/pipeline/awareness/abPages";
 import { STAGE_LABELS } from "./CoverageStrip";
+import { formatRunDate } from "@/lib/pipeline/awareness/runLabels";
+
+const ORIGIN_LABELS: Record<AbPage["origin"], string> = {
+  competitor: "Competitor",
+  offers: "Offers dashboard",
+  lookup: "Lookup",
+};
 
 const AUDIENCE_LABELS: Record<string, string> = {
   newbie: "Newbie",
@@ -38,6 +45,7 @@ export function AbPageCard({
     <li className="ab-card">
       <div className="ab-card-head">
         <strong>{page.brand}</strong>
+        <span className="ab-origin">{ORIGIN_LABELS[page.origin] ?? page.origin}</span>
         {page.url ? (
           <a href={page.url} target="_blank" rel="noreferrer" className="ab-card-url">
             {page.url}
@@ -49,6 +57,10 @@ export function AbPageCard({
         {page.primaryOffer ? <span>Offer: {page.primaryOffer}</span> : null}
         {page.cta ? <span className="cta-badge">{page.cta}</span> : null}
       </p>
+
+      {formatRunDate(page.analyzedAt).label ? (
+        <p className="muted ab-card-analysed">Analysed {formatRunDate(page.analyzedAt).label}</p>
+      ) : null}
 
       {page.status === "pending" ? (
         <p className="muted">Analysing…</p>
@@ -98,10 +110,18 @@ export function AbPageCard({
           type="button"
           className="ghost-btn"
           disabled={recreating}
+          title={
+            page.origin === "offers"
+              ? "Analyses this page first and uses credits if it has not been analysed for recreation yet"
+              : undefined
+          }
           onClick={() => onRecreate(page)}
         >
           {recreating ? "Opening…" : "Recreate for my brand"}
         </button>
+        {page.origin === "offers" && !recreating ? (
+          <span className="muted ab-card-credit"> Analyses the page first; uses credits if not yet analysed.</span>
+        ) : null}
       </div>
     </li>
   );

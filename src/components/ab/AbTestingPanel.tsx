@@ -6,7 +6,9 @@ import type { AbPage } from "@/lib/pipeline/awareness/abPages";
 import { pickDisplayedBase } from "@/lib/pipeline/awareness/icpText";
 import type { IcpRecord } from "@/lib/types";
 import type { StageCoverage } from "@/lib/pipeline/awareness/coverage";
+import type { RunItem } from "@/lib/pipeline/awareness/runLabels";
 import { AbPageCard } from "./AbPageCard";
+import { RunPicker } from "./RunPicker";
 import { CoverageStrip, STAGE_LABELS } from "./CoverageStrip";
 import { IcpDrawer } from "./IcpDrawer";
 import { inFlightKey, stageInFlight, tryAddInFlight } from "@/lib/pipeline/awareness/inFlight";
@@ -17,12 +19,6 @@ const icpInFlight = new Set<string>();
 const labelInFlight = new Set<string>();
 
 type Source = { kind: "search" | "lookup"; id: string };
-type RunItem = {
-  id: string;
-  kind: "search" | "lookup";
-  title: string;
-  updatedAt: string;
-};
 type AbData = {
   pages: AbPage[];
   coverage: { stages: StageCoverage[]; labelledCount: number };
@@ -192,9 +188,30 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
   }
 
   async function recreate(page: AbPage, icpId?: string) {
+    // Guard double clicks: the offers path can spend credits.
+    if (recreatingId !== null) return;
     setRecreatingId(page.id);
     setError(null);
     try {
+      if (page.origin === "offers" && source) {
+        // Dashboard pages use the offers dashboard's own route, authorised
+        // through the search run. It analyses the page first if needed.
+        const res = await fetch("/api/search/landing-recreate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jobId: source.id, url: page.url }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok || !body.page?.recreatePath) {
+          throw new Error(body.error || "The landing page could not be analysed. Try again.");
+        }
+        if (body.page.analysis?.status !== "completed") {
+          throw new Error("The landing page could not be analysed. Try again.");
+        }
+        const path = String(body.page.recreatePath);
+        router.push(icpId ? `${path}${path.includes("?") ? "&" : "?"}icp=${encodeURIComponent(icpId)}` : path);
+        return;
+      }
       let competitorId = page.id;
       if (page.source === "lookupAd") {
         const call = (extra: Record<string, unknown>) =>
@@ -286,27 +303,25 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
   return (
     <section className="panel ab-panel">
       <h2>A/B testing</h2>
-      <label className="ab-picker">
-        <span className="muted">Compare pages from</span>
-        <select
-          className="search-input"
-          value={source ? key(source) : ""}
-          onChange={(e) => {
-            const [kind, ...rest] = e.target.value.split(":");
-            setSource(e.target.value ? { kind: kind as Source["kind"], id: rest.join(":") } : null);
-          }}
-        >
-          {!source ? <option value="">Choose a search or lookup</option> : null}
-          {source && !runs.some((r) => key(r) === key(source)) ? (
-            <option value={key(source)}>Current run</option>
-          ) : null}
-          {runs.map((r) => (
-            <option key={key(r)} value={key(r)}>
-              {r.kind === "lookup" ? "Lookup" : "Search"}: {r.title}
-            </option>
-          ))}
-        </select>
-      </label>
+      <RunPicker
+        runs={runs}
+        value={source}
+        onSelect={(r) => setSource((cur) => (cur && key(cur) === key(r) ? cur : { kind: r.kind, id: r.id }))}
+      />
+      {data ? (
+        <p className="muted ab-summary">
+          {(() => {
+            const n = data.pages.length;
+            const comp = data.pages.filter((p) => p.origin === "competitor").length;
+            const off = data.pages.filter((p) => p.origin === "offers").length;
+            const parts = [
+              comp ? `${comp} from competitors` : "",
+              off ? `${off} from the offers dashboard` : "",
+            ].filter(Boolean);
+            return `Showing ${n} ${n === 1 ? "page" : "pages"}${parts.length ? ` · ${parts.join(" · ")}` : ""}`;
+          })()}
+        </p>
+      ) : null}
 
       {error ? (
         <div className="notice notice-error" role="alert">

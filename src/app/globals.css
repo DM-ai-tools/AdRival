@@ -5588,3 +5588,109 @@ select.search-input {
   margin: 0 0 10px;
   padding-left: 18px;
 }
+
+/* A/B run picker */
+.ab-runpicker {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 34rem;
+  margin-bottom: 8px;
+}
+.ab-runpicker-button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 12px;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--glass-strong);
+}
+.ab-runpicker-current {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.ab-runpicker-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.ab-runpicker-sub {
+  font-size: 0.8rem;
+}
+.ab-runpicker-pop {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  margin-top: 4px;
+  padding: 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel, #fff);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+}
+.ab-runpicker-search {
+  width: 100%;
+  margin-bottom: 6px;
+}
+.ab-runpicker-scroll {
+  max-height: 320px;
+  overflow-y: auto;
+}
+.ab-runpicker-group {
+  margin: 8px 4px 4px;
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.ab-runpicker-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.ab-runpicker-row.is-active {
+  background: rgba(15, 122, 108, 0.1);
+}
+.ab-runpicker-row.is-selected {
+  box-shadow: inset 3px 0 0 rgba(15, 122, 108, 0.7);
+}
+.ab-runpicker-rowhead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.ab-runpicker-empty {
+  margin: 10px 6px;
+}
+.ab-summary {
+  margin: 0 0 12px;
+  font-size: 0.85rem;
+}
+.ab-origin {
+  font-size: 0.72rem;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  color: var(--muted);
+}
+.ab-card-analysed,
+.ab-card-credit {
+  margin: 2px 0 4px;
+  font-size: 0.8rem;
+}
