@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildAbPages, pickBaseForStage, type AbPage } from "../src/lib/pipeline/awareness/abPages";
-import type { CompetitorRecord, LandingPageOfferAnalysis, PageLevels } from "../src/lib/types";
+import {
+  buildAbPages,
+  mergeOfferPages,
+  pickBaseForStage,
+  type AbPage,
+} from "../src/lib/pipeline/awareness/abPages";
+import type {
+  CompetitorRecord,
+  LandingPageOfferAnalysis,
+  LookupAdRecord,
+  PageLevels,
+} from "../src/lib/types";
 
 function levels(stage: PageLevels["awarenessStage"]): PageLevels {
   return {
@@ -43,6 +53,7 @@ function page(id: string, stage: PageLevels["awarenessStage"] | null, activeAds:
   return {
     id,
     source: "competitor",
+    origin: "competitor",
     brand: id,
     url: "https://x",
     headline: null,
@@ -51,6 +62,7 @@ function page(id: string, stage: PageLevels["awarenessStage"] | null, activeAds:
     status: "completed",
     levels: stage ? levels(stage) : null,
     activeAds,
+    analyzedAt: null,
   };
 }
 
@@ -96,4 +108,67 @@ test("pickBaseForStage uses unlabelled pages last and returns null with none", (
   assert.equal(pickBaseForStage([{ ...page("p", null, 1), status: "pending" }], "unaware"), null);
   assert.equal(pickBaseForStage([page("u", null, 1), page("z", "unclear", 1)], "unaware")?.id, "u");
   assert.equal(pickBaseForStage([page("u", null, 1), page("m", "most_aware", 1)], "unaware")?.id, "m");
+});
+
+function offerAd(id: string, extra: Partial<LookupAdRecord> = {}): LookupAdRecord {
+  return { id, lookupId: "search-offers:run1:1", pageName: `Offer ${id}`, ...extra } as unknown as LookupAdRecord;
+}
+
+function competitorPages(): AbPage[] {
+  return buildAbPages({
+    competitors: [competitor("c1", { pageAnalysis: analysis("completed", { analyzedUrl: "https://A.example/lp" }) })],
+  });
+}
+
+test("mergeOfferPages lists competitor pages then offers pages with origins", () => {
+  const merged = mergeOfferPages(competitorPages(), [
+    offerAd("o1", { pageAnalysis: analysis("completed", { analyzedUrl: "https://b.example/x" }) }),
+  ]);
+  assert.deepEqual(
+    merged.map((p) => [p.id, p.origin, p.source]),
+    [
+      ["c1", "competitor", "competitor"],
+      ["o1", "offers", "lookupAd"],
+    ],
+  );
+  assert.equal(merged[1].brand, "Offer o1");
+  assert.equal(merged[1].analyzedAt, "2026-01-01T00:00:00.000Z");
+  const lookup = buildAbPages({ lookupAds: [offerAd("l1", { pageAnalysis: analysis("completed") })] });
+  assert.equal(lookup[0].origin, "lookup");
+});
+
+test("mergeOfferPages keeps one page per URL and the competitor wins", () => {
+  const merged = mergeOfferPages(competitorPages(), [
+    offerAd("o1", { pageAnalysis: analysis("completed", { analyzedUrl: "https://a.EXAMPLE/lp/#top" }) }),
+  ]);
+  assert.deepEqual(merged.map((p) => p.id), ["c1"]);
+});
+
+test("mergeOfferPages prefers completed, then levelled, then latest among same-URL offers ads", () => {
+  const url = "https://b.example/x";
+  const merged = mergeOfferPages([], [
+    offerAd("failed", { pageAnalysis: analysis("failed", { analyzedUrl: url, analyzedAt: "2026-03-01T00:00:00.000Z" }) }),
+    offerAd("plain", { pageAnalysis: analysis("completed", { analyzedUrl: url, analyzedAt: "2026-02-01T00:00:00.000Z" }) }),
+    offerAd("lev", { pageAnalysis: analysis("completed", { analyzedUrl: url, levels: levels("unaware") }) }),
+  ]);
+  assert.deepEqual(merged.map((p) => p.id), ["lev"]);
+  const later = mergeOfferPages([], [
+    offerAd("old", { pageAnalysis: analysis("completed", { analyzedUrl: url }) }),
+    offerAd("new", { pageAnalysis: analysis("completed", { analyzedUrl: url, analyzedAt: "2026-05-01T00:00:00.000Z" }) }),
+  ]);
+  assert.deepEqual(later.map((p) => p.id), ["new"]);
+});
+
+test("mergeOfferPages ignores unanalysed ads and leaves competitor pages alone when empty", () => {
+  const base = competitorPages();
+  assert.deepEqual(mergeOfferPages(base, []), base);
+  assert.deepEqual(mergeOfferPages(base, [offerAd("none")]), base);
+  assert.deepEqual(mergeOfferPages([], []), []);
+});
+
+test("an offers page without levels loads as levels null", () => {
+  const merged = mergeOfferPages([], [
+    offerAd("o", { pageAnalysis: analysis("completed", { analyzedUrl: "https://c.example" }) }),
+  ]);
+  assert.equal(merged[0].levels, null);
 });

@@ -15,7 +15,6 @@ import {
   getJob,
   getLookupAd,
   getLookupAds,
-  getLookupJob,
   getSearchCompetitorAdsByCompetitor,
   updateCompetitor,
   updateLookupAd,
@@ -591,11 +590,6 @@ function levelsInput(outline: PageOutline) {
     heroCandidates: outline.heroCandidates,
     visibleText: outline.bodyText ?? outline.plainText,
   };
-}
-
-/** Search offers reports label pages under an internal lookup nobody can see; skip the paid calls there. */
-export function shouldLabelLevels(input: { internalOnly: boolean }): boolean {
-  return !input.internalOnly;
 }
 
 type StoredAnalysis = { status?: string; analyzedAt?: string | null } | null | undefined;
@@ -1240,12 +1234,7 @@ export async function analyzeLookupAdLandingPage(
           screenshots: screenshots.tiles,
           serviceContext: service,
         }),
-      // Search offers reports analyse pages under an internal lookup the A/B
-      // tab never lists, so labels there would be paid for and never seen.
-      () =>
-        shouldLabelLevels({ internalOnly: Boolean(getLookupJob(ad.lookupId)?.internalOnly) })
-          ? analyzeLevels(levelsInput(outline))
-          : Promise.resolve(null),
+      () => analyzeLevels(levelsInput(outline)),
     );
     if (screenshots.warnings.length) {
       console.warn("[page-analysis] screenshot warnings", screenshots.warnings.slice(0, 3));

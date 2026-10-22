@@ -10,6 +10,7 @@ import { AWARENESS_STAGES } from "./coverage";
 export type AbPage = {
   id: string;
   source: "competitor" | "lookupAd";
+  origin: "competitor" | "offers" | "lookup";
   brand: string;
   url: string;
   headline: string | null;
@@ -18,11 +19,13 @@ export type AbPage = {
   status: "pending" | "completed" | "failed" | "none";
   levels: PageLevels | null;
   activeAds: number | null;
+  analyzedAt: string | null;
 };
 
 function toPage(
   id: string,
   source: AbPage["source"],
+  origin: AbPage["origin"],
   brand: string,
   analysis: LandingPageOfferAnalysis,
   activeAds: number | null,
@@ -30,6 +33,7 @@ function toPage(
   return {
     id,
     source,
+    origin,
     brand,
     url: analysis.analyzedUrl ?? "",
     headline: analysis.offer?.headline ?? null,
@@ -38,6 +42,7 @@ function toPage(
     status: analysis.status ?? "none",
     levels: analysis.levels ?? null,
     activeAds,
+    analyzedAt: analysis.analyzedAt ?? null,
   };
 }
 
@@ -49,13 +54,51 @@ export function buildAbPages(input: {
   const pages: AbPage[] = [];
   for (const c of input.competitors ?? []) {
     if (c.recreateOnly || !c.pageAnalysis) continue;
-    pages.push(toPage(c.id, "competitor", c.pageName, c.pageAnalysis, c.activeAdsCount ?? null));
+    pages.push(toPage(c.id, "competitor", "competitor", c.pageName, c.pageAnalysis, c.activeAdsCount ?? null));
   }
   for (const a of input.lookupAds ?? []) {
     if (!a.pageAnalysis) continue;
-    pages.push(toPage(a.id, "lookupAd", a.pageName, a.pageAnalysis, null));
+    pages.push(toPage(a.id, "lookupAd", "lookup", a.pageName, a.pageAnalysis, null));
   }
   return pages;
+}
+
+/** Lower-cased host, no fragment, no trailing slash: enough to tell two listings of one page apart. */
+function urlKey(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  try {
+    const u = new URL(/^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`);
+    return `${u.host.toLowerCase()}${u.pathname.replace(/\/+$/, "")}${u.search}`;
+  } catch {
+    return trimmed.replace(/#.*$/, "").replace(/\/+$/, "").toLowerCase();
+  }
+}
+
+function betterOffer(a: AbPage, b: AbPage): boolean {
+  const done = Number(a.status === "completed") - Number(b.status === "completed");
+  if (done) return done > 0;
+  const lev = Number(Boolean(a.levels)) - Number(Boolean(b.levels));
+  if (lev) return lev > 0;
+  return (a.analyzedAt ?? "") > (b.analyzedAt ?? "");
+}
+
+/**
+ * Competitor pages followed by the offers dashboard's analysed pages, one per distinct
+ * landing URL. A competitor page wins over an offers page with the same URL.
+ */
+export function mergeOfferPages(competitorPages: AbPage[], offerAds: LookupAdRecord[]): AbPage[] {
+  const taken = new Set(competitorPages.map((p) => urlKey(p.url)).filter(Boolean));
+  const best = new Map<string, AbPage>();
+  for (const ad of offerAds) {
+    if (!ad.pageAnalysis) continue;
+    const page = toPage(ad.id, "lookupAd", "offers", ad.pageName, ad.pageAnalysis, null);
+    const key = urlKey(page.url) || `id:${page.id}`;
+    if (taken.has(key)) continue;
+    const prev = best.get(key);
+    if (!prev || betterOffer(page, prev)) best.set(key, page);
+  }
+  return [...competitorPages, ...best.values()];
 }
 
 /** The completed page closest to a stage; unlabelled or unclear pages only as a last resort. */

@@ -16,8 +16,8 @@ const icp: IcpContent = {
 };
 
 const page = (id: string, status: AbPage["status"]): AbPage => ({
-  id, source: "competitor", brand: id, url: "", headline: null, primaryOffer: null, cta: null,
-  status, levels: null, activeAds: null,
+  id, source: "competitor", origin: "competitor", brand: id, url: "", headline: null, primaryOffer: null, cta: null,
+  status, levels: null, activeAds: null, analyzedAt: null,
 });
 
 test("icpToText skips empty blocks and blank items", () => {

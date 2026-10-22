@@ -158,10 +158,10 @@ test("an in-flight ICP key survives a source switch and only its owner removes i
 });
 
 // Finding 5
-test("search offers pages skip the level agents", async () => {
-  const { shouldLabelLevels } = await import("../src/lib/pipeline/landingPageAnalysis");
-  assert.equal(shouldLabelLevels({ internalOnly: true }), false);
-  assert.equal(shouldLabelLevels({ internalOnly: false }), true);
+test("level agents run for standalone and internal (search offers) lookups alike", async () => {
+  const mod = (await import("../src/lib/pipeline/landingPageAnalysis")) as Record<string, unknown>;
+  // The internalOnly skip was reversed: offers pages are listed and labelled in the A/B tab.
+  assert.equal(mod.shouldLabelLevels, undefined);
 });
 
 // Finding 4
