@@ -1,3 +1,5 @@
+import type { IcpContent } from "./types";
+
 /**
  * Strip third-party LLM / framework brand names from client-facing copy.
  * Keeps the task description (analyze, scrape, generate images, etc.).
@@ -74,6 +76,28 @@ export function maskClientFacingText(
     out = out.replace(pattern, replacement);
   }
   return out.replace(/\s{2,}/g, " ").trim();
+}
+
+export function maskIcp<T extends IcpContent>(icp: T): T {
+  const m = (v: string) => maskClientFacingText(v) ?? "";
+  const mn = (v: string | null) => (v == null ? v : maskClientFacingText(v));
+  return {
+    ...icp,
+    painPoints: icp.painPoints.map(m),
+    demographics: {
+      ageRange: mn(icp.demographics.ageRange),
+      role: mn(icp.demographics.role),
+      budget: mn(icp.demographics.budget),
+      location: mn(icp.demographics.location),
+      other: mn(icp.demographics.other),
+    },
+    psychographics: icp.psychographics.map(m),
+    saysOutLoud: icp.saysOutLoud.map(m),
+    interests: icp.interests.map(m),
+    hopesAndDesires: icp.hopesAndDesires.map(m),
+    stageNotes: m(icp.stageNotes),
+    suggestedAngle: m(icp.suggestedAngle),
+  };
 }
 
 export function maskPageAnalysis<

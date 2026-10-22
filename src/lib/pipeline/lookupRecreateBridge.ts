@@ -30,8 +30,10 @@ export type ExistingRecreationHit = {
   updatedAt: string;
 };
 
+export const LOOKUP_RECREATE_PREFIX = "lookup-recreate-";
+
 function recreationRunId(lookupId: string): string {
-  return `lookup-recreate-${lookupId}`;
+  return `${LOOKUP_RECREATE_PREFIX}${lookupId}`;
 }
 
 function recreationCompetitorId(adId: string): string {

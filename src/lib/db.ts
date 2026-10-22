@@ -9,6 +9,7 @@ import type {
   CompetitorRecord,
   DatabaseShape,
   HistoryRunSummary,
+  IcpRecord,
   LookupAdRecord,
   SearchCompetitorAdRecord,
   LookupHistorySummary,
@@ -492,6 +493,7 @@ function migrateDb(parsed: DatabaseShape): DatabaseShape {
   if (!parsed.seenPageIds) parsed.seenPageIds = [];
   if (!parsed.lookupJobs) parsed.lookupJobs = [];
   if (!parsed.lookupAds) parsed.lookupAds = [];
+  if (!parsed.icps) parsed.icps = [];
   if (!parsed.searchCompetitorAds) parsed.searchCompetitorAds = [];
   if (!parsed.deletedRunIds) parsed.deletedRunIds = [];
   if (!parsed.users) parsed.users = [];
@@ -754,6 +756,7 @@ function normalizeDb(
   if (Array.isArray(input.seenPageIds)) db.seenPageIds = input.seenPageIds;
   if (Array.isArray(input.lookupJobs)) db.lookupJobs = input.lookupJobs;
   if (Array.isArray(input.lookupAds)) db.lookupAds = input.lookupAds;
+  if (Array.isArray(input.icps)) db.icps = input.icps;
   if (Array.isArray(input.searchCompetitorAds)) {
     db.searchCompetitorAds = input.searchCompetitorAds;
   }
@@ -814,6 +817,7 @@ export function mergeStore(payload: Partial<DatabaseShape>, options: ImportOwner
     ),
     lookupJobs: byId(current.lookupJobs ?? [], incoming.lookupJobs ?? []),
     lookupAds: byId(current.lookupAds ?? [], incoming.lookupAds ?? []),
+    icps: byId(current.icps ?? [], incoming.icps ?? []),
     searchCompetitorAds: byId(
       current.searchCompetitorAds ?? [],
       incoming.searchCompetitorAds ?? [],
@@ -1107,6 +1111,15 @@ export function deleteHistoryRun(runId: string): {
       if (db.lookupAds) {
         db.lookupAds = db.lookupAds.filter((ad) => !removedLookupIds.has(ad.lookupId));
       }
+      if (db.icps) {
+        db.icps = db.icps.filter(
+          (i) => !(i.source.kind === "lookup" && removedLookupIds.has(i.source.id)),
+        );
+      }
+    }
+
+    if (db.icps) {
+      db.icps = db.icps.filter((i) => !(i.source.kind === "search" && i.source.id === runId));
     }
 
     const jobIdx = db.jobs.findIndex((j) => j.id === runId);
@@ -1136,6 +1149,32 @@ export function deleteHistoryRun(runId: string): {
   });
 }
 
+export function getIcps(kind: ProjectKind, id: string): IcpRecord[] {
+  return (ensureDb().icps ?? []).filter((i) => i.source.kind === kind && i.source.id === id);
+}
+
+export function getIcp(icpId: string): IcpRecord | null {
+  return (ensureDb().icps ?? []).find((i) => i.id === icpId) ?? null;
+}
+
+/** One ICP per source + stage; a new one replaces the old. */
+export function upsertIcp(icp: IcpRecord): IcpRecord {
+  return withDbLock(() => {
+    const db = ensureDb();
+    const rest = (db.icps ?? []).filter(
+      (i) =>
+        !(
+          i.source.kind === icp.source.kind &&
+          i.source.id === icp.source.id &&
+          i.stage === icp.stage
+        ) && i.id !== icp.id,
+    );
+    db.icps = [icp, ...rest];
+    writeDb(db);
+    return icp;
+  });
+}
+
 /** Delete every run + competitor + clear seen page ids */
 export function clearAllHistory(): { removedRuns: number; removedCompetitors: number } {
   return withDbLock(() => {
@@ -1149,6 +1188,7 @@ export function clearAllHistory(): { removedRuns: number; removedCompetitors: nu
     db.jobs = [];
     db.competitors = [];
     db.searchCompetitorAds = [];
+    db.icps = (db.icps ?? []).filter((i) => i.source.kind !== "search");
     db.seenPageIds = [];
     writeDb(db);
     return { removedRuns, removedCompetitors };
@@ -1348,6 +1388,9 @@ export function deleteLookupHistoryRun(lookupId: string): {
     }
     const before = db.lookupAds.length;
     db.lookupAds = db.lookupAds.filter((a) => a.lookupId !== lookupId);
+    if (db.icps) {
+      db.icps = db.icps.filter((i) => !(i.source.kind === "lookup" && i.source.id === lookupId));
+    }
     db.lookupJobs.splice(idx, 1);
     writeDb(db);
     return { ok: true, removedAds: before - db.lookupAds.length };
@@ -1368,6 +1411,7 @@ export function clearAllLookupHistory(): {
     const removedAds = db.lookupAds?.length ?? 0;
     db.lookupJobs = [];
     db.lookupAds = [];
+    db.icps = (db.icps ?? []).filter((i) => i.source.kind !== "lookup");
     writeDb(db);
     return { removedRuns, removedAds };
   });
