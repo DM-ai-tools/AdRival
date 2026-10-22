@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { AbPage } from "@/lib/pipeline/awareness/abPages";
 import type { StageCoverage } from "@/lib/pipeline/awareness/coverage";
@@ -36,6 +36,11 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
   const [labelCount, setLabelCount] = useState<number | null>(null);
   const [labelBusy, setLabelBusy] = useState(false);
   const [recreatingId, setRecreatingId] = useState<string | null>(null);
+  // Bumped on every source change and every load; a response only applies
+  // while its number is still current, so a slow older request is dropped.
+  const loadSeq = useRef(0);
+  const sourceKey = useRef<string>(defaultSource ? key(defaultSource) : "");
+  const bannerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -58,25 +63,36 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
   }, []);
 
   const load = useCallback(async (s: Source) => {
+    const seq = ++loadSeq.current;
     setLoading(true);
     setError(null);
     try {
       const res = await fetch(`/api/ab-testing?kind=${s.kind}&id=${encodeURIComponent(s.id)}`);
       const body = await res.json();
+      if (seq !== loadSeq.current) return;
       if (!res.ok) throw new Error(body.error || "Could not load pages");
       setData(body);
     } catch (e) {
+      if (seq !== loadSeq.current) return;
       setData(null);
       setError(e instanceof Error ? e.message : "Could not load pages");
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
+    sourceKey.current = source ? key(source) : "";
     setLabelCount(null);
+    setData(null);
+    setError(null);
+    setStageFilter("");
+    setAudienceFilter("");
     if (source) void load(source);
-    else setData(null);
+    else setLoading(false);
+    return () => {
+      loadSeq.current += 1; // invalidate anything still in flight for this source
+    };
   }, [source, load]);
 
   const unlabelled = useMemo(
@@ -96,6 +112,7 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
 
   async function startLabel() {
     if (!source) return;
+    const forKey = key(source);
     setLabelBusy(true);
     setError(null);
     try {
@@ -106,10 +123,16 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
         body: JSON.stringify({ kind: source.kind, id: source.id }),
       });
       const body = await res.json();
+      if (forKey !== sourceKey.current) return;
       if (!res.ok) throw new Error(body.error || "Could not count pages");
       setLabelCount(body.count ?? 0);
+      // Bring the confirm banner into view; the list can be long.
+      setTimeout(() => {
+        bannerRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+        bannerRef.current?.focus();
+      }, 0);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not count pages");
+      if (forKey === sourceKey.current) setError(e instanceof Error ? e.message : "Could not count pages");
     } finally {
       setLabelBusy(false);
     }
@@ -117,6 +140,7 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
 
   async function confirmLabel() {
     if (!source) return;
+    const forKey = key(source);
     setLabelBusy(true);
     setError(null);
     try {
@@ -126,12 +150,15 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
         body: JSON.stringify({ kind: source.kind, id: source.id, confirm: true }),
       });
       const body = await res.json();
+      if (forKey !== sourceKey.current) return;
       if (!res.ok) throw new Error(body.error || "Labelling failed");
-      if (body.failed) setError(`${body.failed} page(s) could not be labelled.`);
       setLabelCount(null);
       await load(source);
+      if (body.failed && forKey === sourceKey.current) {
+        setError(`${body.failed} page(s) could not be labelled.`);
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Labelling failed");
+      if (forKey === sourceKey.current) setError(e instanceof Error ? e.message : "Labelling failed");
     } finally {
       setLabelBusy(false);
     }
@@ -211,7 +238,7 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
           />
 
           {unlabelled > 0 ? (
-            <div className="notice ab-label-banner">
+            <div className="notice ab-label-banner" ref={bannerRef} tabIndex={-1}>
               {labelCount === null ? (
                 <>
                   <p>
@@ -226,7 +253,7 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
                   <p>
                     {labelCount === 0
                       ? "Nothing to label."
-                      : `This will label ${labelCount} ${labelCount === 1 ? "page" : "pages"} and use credits.`}
+                      : `This will label all ${labelCount} unlabelled ${labelCount === 1 ? "page" : "pages"} in this run and use credits.`}
                   </p>
                   <span>
                     {labelCount > 0 ? (
@@ -293,6 +320,7 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
                       page={p}
                       onRecreate={recreate}
                       onLabel={startLabel}
+                      labelAllCount={unlabelled}
                       recreating={recreatingId === p.id}
                     />
                   ))}

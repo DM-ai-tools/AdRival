@@ -15,12 +15,15 @@ export function AbPageCard({
   page,
   onRecreate,
   onLabel,
+  labelAllCount,
   recreating,
 }: {
   page: AbPage;
   onRecreate: (page: AbPage) => void;
   /** Starts the label flow (count, then confirm) for this source. */
   onLabel?: () => void;
+  /** Labelling covers every unlabelled page of the run, not just this card. */
+  labelAllCount?: number;
   recreating?: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -58,7 +61,7 @@ export function AbPageCard({
           <span className="location-badge is-unknown">Not labelled</span>{" "}
           {page.status === "completed" && onLabel ? (
             <button type="button" className="link-btn" onClick={onLabel}>
-              Label now
+              {labelAllCount && labelAllCount > 1 ? `Label now (labels all ${labelAllCount})` : "Label now"}
             </button>
           ) : null}
         </p>
