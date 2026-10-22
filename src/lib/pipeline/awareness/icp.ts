@@ -42,8 +42,8 @@ const icpSchema = z.object({
   saysOutLoud: list,
   interests: list,
   hopesAndDesires: list,
-  stageNotes: z.string().default(""),
-  suggestedAngle: z.string().default(""),
+  stageNotes: z.string().default("").transform((v) => v.trim()),
+  suggestedAngle: z.string().default("").transform((v) => v.trim()),
 });
 
 const SYSTEM = `You write an ideal customer profile (ICP) for one specific service, aimed at one stage of market awareness (Eugene Schwartz).
@@ -109,7 +109,17 @@ export async function generateIcp(input: {
     2,
   );
   try {
-    return icpSchema.parse(parseJson(await call(SYSTEM, user)));
+    const icp = icpSchema.parse(parseJson(await call(SYSTEM, user)));
+    if (
+      !icp.painPoints.length ||
+      !icp.saysOutLoud.length ||
+      !icp.hopesAndDesires.length ||
+      !icp.suggestedAngle ||
+      !icp.stageNotes
+    ) {
+      throw new Error("empty ICP");
+    }
+    return icp;
   } catch (err) {
     if (isCreditError(err)) throw err;
     throw new Error("Could not build the customer profile. Try again.");

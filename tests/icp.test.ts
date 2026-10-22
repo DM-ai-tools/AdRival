@@ -87,6 +87,15 @@ test("valid output fills all sections and the prompt carries stage and competito
   assert.ok(icp.stageNotes && icp.suggestedAngle);
 });
 
+test("an empty or hollow model reply is rejected, not stored as an ICP", async () => {
+  for (const reply of ["{}", JSON.stringify({ ...valid, painPoints: [] }), JSON.stringify({ ...valid, suggestedAngle: "  " })]) {
+    await assert.rejects(
+      generateIcp({ profile, stage: "unaware", keywords: [], competitorPages: [], call: async () => reply }),
+      /Could not build the customer profile/,
+    );
+  }
+});
+
 test("lists longer than 8 are truncated", async () => {
   const long = Array.from({ length: 12 }, (_, i) => `item ${i}`);
   const icp = await generateIcp({
