@@ -893,6 +893,58 @@ export interface SameLandingPageAdsSummary {
   note?: string | null;
 }
 
+export type AudienceLevel = "newbie" | "intermediate" | "advanced" | "unclear";
+export type AwarenessStage =
+  | "unaware"
+  | "problem_aware"
+  | "solution_aware"
+  | "product_aware"
+  | "most_aware"
+  | "unclear";
+export type AwarenessFocus = "only_problem" | "only_solution" | "balanced";
+
+export interface SectionLevel {
+  sectionName: string;
+  audienceLevel: AudienceLevel;
+  awarenessStage: AwarenessStage;
+}
+
+/** Who a landing page is written for and how aware that reader is. */
+export interface PageLevels {
+  audienceLevel: AudienceLevel;
+  audienceReason: string;
+  audienceEvidence: string | null;
+  awarenessStage: AwarenessStage;
+  awarenessFocus: AwarenessFocus | null;
+  awarenessReason: string;
+  awarenessEvidence: string | null;
+  sectionLevels: SectionLevel[];
+}
+
+export interface IcpContent {
+  painPoints: string[];
+  demographics: {
+    ageRange: string | null;
+    role: string | null;
+    budget: string | null;
+    location: string | null;
+    other: string | null;
+  };
+  psychographics: string[];
+  saysOutLoud: string[];
+  interests: string[];
+  hopesAndDesires: string[];
+  stageNotes: string;
+  suggestedAngle: string;
+}
+
+export interface IcpRecord extends IcpContent {
+  id: string;
+  source: { kind: ProjectKind; id: string };
+  stage: Exclude<AwarenessStage, "unclear">;
+  createdAt: string;
+}
+
 export interface LandingPageOfferAnalysis {
   status: "pending" | "completed" | "failed";
   analyzedUrl: string;
@@ -922,6 +974,8 @@ export interface LandingPageOfferAnalysis {
   serviceOffers?: ServiceOfferEvidence[] | null;
   /** Whether the page sells the searched service at all (offers report only). */
   mentionsService?: boolean | null;
+  /** Audience level and awareness stage labels (optional: older analyses lack them). */
+  levels?: PageLevels | null;
 }
 
 /** One editable copy block produced before design fit. */
@@ -1121,6 +1175,8 @@ export type ManusRecreationState = {
 
 /** Generated HTML landing page for the user's brand, inspired by a competitor. */
 export interface RecreatedLandingPage {
+  /** The ICP and awareness stage this page was recreated for. */
+  targetIcp?: { icpId: string; stage: AwarenessStage } | null;
   /**
    * pending — job started
    * content_ready — legacy content draft ready for review
@@ -1234,6 +1290,7 @@ export type LookupHistorySummary = LookupJob & {
 };
 
 export interface DatabaseShape {
+  icps?: IcpRecord[];
   /** Bumped by src/lib/db.ts migrations; see docs/MULTI_USER.md. */
   schemaVersion?: number;
   jobs: SearchJob[];
