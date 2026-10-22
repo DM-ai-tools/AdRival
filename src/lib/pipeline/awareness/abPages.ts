@@ -5,6 +5,7 @@ import type {
   LookupAdRecord,
   PageLevels,
 } from "../../types";
+import { normalizeLandingUrl } from "../htmlFetch";
 import { AWARENESS_STAGES } from "./coverage";
 
 export type AbPage = {
@@ -68,7 +69,10 @@ function urlKey(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return "";
   try {
-    const u = new URL(/^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`);
+    // Tracking params (utm_*, fbclid, gclid...) are dropped; other params still tell pages apart.
+    const cleaned = normalizeLandingUrl(trimmed, { stripTracking: true }) ?? trimmed;
+    const u = new URL(/^https?:\/\//i.test(cleaned) ? cleaned : `https://${cleaned}`);
+    u.searchParams.sort();
     return `${u.host.toLowerCase()}${u.pathname.replace(/\/+$/, "")}${u.search}`;
   } catch {
     return trimmed.replace(/#.*$/, "").replace(/\/+$/, "").toLowerCase();

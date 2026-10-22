@@ -172,3 +172,24 @@ test("an offers page without levels loads as levels null", () => {
   ]);
   assert.equal(merged[0].levels, null);
 });
+
+test("mergeOfferPages ignores tracking params and their order when deduping", () => {
+  const merged = mergeOfferPages(competitorPages(), [
+    offerAd("o1", { pageAnalysis: analysis("completed", { analyzedUrl: "https://a.example/lp?utm_source=fb&fbclid=abc" }) }),
+    offerAd("o2", { pageAnalysis: analysis("completed", { analyzedUrl: "https://a.example/lp/?fbclid=abc&utm_source=x#t" }) }),
+  ]);
+  assert.deepEqual(merged.map((p) => p.id), ["c1"]);
+  const two = mergeOfferPages([], [
+    offerAd("p1", { pageAnalysis: analysis("completed", { analyzedUrl: "https://b.example/x?utm_source=a&gclid=1" }) }),
+    offerAd("p2", { pageAnalysis: analysis("completed", { analyzedUrl: "https://b.example/x?gclid=2&utm_source=b" }) }),
+  ]);
+  assert.equal(two.length, 1);
+});
+
+test("mergeOfferPages keeps pages that differ by a real query param", () => {
+  const merged = mergeOfferPages([], [
+    offerAd("a1", { pageAnalysis: analysis("completed", { analyzedUrl: "https://b.example/a?id=1&utm_source=x" }) }),
+    offerAd("a2", { pageAnalysis: analysis("completed", { analyzedUrl: "https://b.example/a?id=2" }) }),
+  ]);
+  assert.deepEqual(merged.map((p) => p.id), ["a1", "a2"]);
+});
