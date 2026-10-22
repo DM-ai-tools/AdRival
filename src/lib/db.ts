@@ -1315,6 +1315,7 @@ export function updateLookupAd(
           offer: prev.pageAnalysis.offer,
           pageArchitecture: prev.pageAnalysis.pageArchitecture,
           summary: prev.pageAnalysis.summary,
+          levels: prev.pageAnalysis.levels,
         },
       };
     }

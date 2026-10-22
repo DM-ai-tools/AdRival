@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { analyzeLevels, attachSectionLevels } from "../src/lib/pipeline/awareness/levelAgents";
 import type { JsonCaller } from "../src/lib/pipeline/llmJson";
+import { buildLevels, runWithLevels } from "../src/lib/pipeline/landingPageAnalysis";
+import { InsufficientCreditsError } from "../src/lib/accounting/errors";
 
 const visibleText =
   "Tired of wasting money on ads that never convert? Our dashboard shows exactly where every dollar goes. Start your free trial today.";
@@ -101,4 +103,63 @@ test("attachSectionLevels matches by heading and inherits otherwise", () => {
   assert.equal(out.length, 2);
   assert.deepEqual(out[0], { sectionName: "Hero", audienceLevel: "newbie", awarenessStage: "problem_aware" });
   assert.deepEqual(out[1], { sectionName: "Features", audienceLevel: "advanced", awarenessStage: "solution_aware" });
+});
+
+test("buildLevels fills one section level per section and is null without a result", async () => {
+  const sections = [
+    { name: "Hero", summary: "Opening pitch" },
+    { name: "Features", summary: "Stop wasting ad spend" },
+  ];
+  assert.equal(buildLevels(sections, null), null);
+  const result = await analyzeLevels({ ...base, call: fakeFor(audienceOk, awarenessOk) });
+  const levels = buildLevels(sections, result);
+  assert.equal(levels?.sectionLevels.length, 2);
+  assert.equal(levels?.audienceLevel, "newbie");
+});
+
+test("runWithLevels keeps the extraction when the level agents fail", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  const out = await runWithLevels(
+    async () => "extracted",
+    async () => {
+      throw new Error("agent down");
+    },
+  );
+  assert.deepEqual(out, { extracted: "extracted", levels: null });
+});
+
+test("runWithLevels rethrows credit errors", async () => {
+  await assert.rejects(
+    runWithLevels(
+      async () => "extracted",
+      async () => {
+        throw new InsufficientCreditsError(10, 1);
+      },
+    ),
+    (err) => err instanceof InsufficientCreditsError,
+  );
+});
+
+test("runWithLevels starts both before either settles", async () => {
+  const started: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const run = runWithLevels(
+    async () => {
+      started.push("extract");
+      await gate;
+      return 1;
+    },
+    async () => {
+      started.push("levels");
+      await gate;
+      return { levels: (await analyzeLevels({ ...base, call: fakeFor(audienceOk, awarenessOk) })).levels, blocks: [] };
+    },
+  );
+  await Promise.resolve();
+  assert.deepEqual(started, ["extract", "levels"]);
+  release();
+  const out = await run;
+  assert.equal(out.extracted, 1);
+  assert.equal(out.levels?.levels.audienceLevel, "newbie");
 });

@@ -5,6 +5,7 @@ import type {
   CompetitorRecord,
   LandingPageOfferAnalysis,
   LookupAdRecord,
+  PageLevels,
   ServiceOfferEvidence,
 } from "../types";
 import { evidenceWords, pageCoverage } from "./evidence";
@@ -30,6 +31,7 @@ import {
   getAnthropicModel,
 } from "../anthropic/client";
 import { isCreditError } from "../accounting/errors";
+import { analyzeLevels, attachSectionLevels, type LevelsResult } from "./awareness/levelAgents";
 import { maskClientFacingText } from "../clientFacing";
 import { fetchRawLandingHtml, normalizeLandingUrl } from "./htmlFetch";
 import type { ServiceFocus } from "./offerServiceFocus";
@@ -549,6 +551,79 @@ async function fetchLandingPage(url: string): Promise<{
     outline: extractPageOutline(page.html, page.title),
     homepageFallback: page.homepageFallback,
   };
+}
+
+export function buildLevels(
+  sections: Array<{ name: string; summary: string; keyElements?: string[] }>,
+  result: LevelsResult | null,
+): PageLevels | null {
+  if (!result) return null;
+  return {
+    ...result.levels,
+    sectionLevels: attachSectionLevels(sections, result.blocks, result.levels),
+  };
+}
+
+/**
+ * Runs the offer extraction and the level agents together. A level failure
+ * leaves levels null so the page analysis still completes; credit errors
+ * still stop everything.
+ */
+export async function runWithLevels<X>(
+  extract: () => Promise<X>,
+  levels: () => Promise<LevelsResult>,
+): Promise<{ extracted: X; levels: LevelsResult | null }> {
+  const [extracted, levelsResult] = await Promise.all([
+    extract(),
+    levels().catch((err) => {
+      if (isCreditError(err)) throw err;
+      console.warn("[page-analysis] level agents failed", err);
+      return null;
+    }),
+  ]);
+  return { extracted, levels: levelsResult };
+}
+
+function levelsInput(outline: PageOutline) {
+  return {
+    headingOutline: outline.headingOutline,
+    heroCandidates: outline.heroCandidates,
+    visibleText: outline.bodyText ?? outline.plainText,
+  };
+}
+
+/** Adds levels to an already analysed competitor page without redoing the offer. */
+export async function labelCompetitorLevels(competitorId: string): Promise<CompetitorRecord> {
+  const competitor = getCompetitor(competitorId);
+  const analysis = competitor?.pageAnalysis;
+  if (!competitor || analysis?.status !== "completed") {
+    throw new Error("Analyze this page before labelling it.");
+  }
+  const url = analysis.analyzedUrl || resolveCompetitorUrl(competitor);
+  if (!url) throw new Error("No usable landing page URL on this competitor.");
+  const page = await fetchLandingPage(url);
+  const result = await analyzeLevels(levelsInput(page.outline));
+  const levels = buildLevels(analysis.pageArchitecture?.sections ?? [], result);
+  const updated = updateCompetitor(competitorId, { pageAnalysis: { ...analysis, levels } });
+  if (!updated) throw new Error("Failed to save levels");
+  return updated;
+}
+
+/** Adds levels to an already analysed lookup ad page without redoing the offer. */
+export async function labelLookupAdLevels(adId: string): Promise<LookupAdRecord> {
+  const ad = getLookupAd(adId);
+  const analysis = ad?.pageAnalysis;
+  if (!ad || analysis?.status !== "completed") {
+    throw new Error("Analyze this page before labelling it.");
+  }
+  const url = analysis.analyzedUrl || resolveLookupAdUrl(ad);
+  if (!url) throw new Error("No usable landing page URL on this ad.");
+  const page = await fetchLandingPage(url);
+  const result = await analyzeLevels(levelsInput(page.outline));
+  const levels = buildLevels(analysis.pageArchitecture?.sections ?? [], result);
+  const updated = updateLookupAd(adId, { pageAnalysis: { ...analysis, levels } });
+  if (!updated) throw new Error("Failed to save levels");
+  return updated;
 }
 
 /** What the offers report is researching, passed to the page analysis. */
@@ -1121,14 +1196,18 @@ export async function analyzeLookupAdLandingPage(
     const screenshots = await captureCompetitorScreenshotTiles(page.finalUrl, {
       foldOnly: Boolean(forOffers),
     });
-    const llm = await analyzeWithLlm({
-      url: page.finalUrl,
-      outline,
-      adTitle: ad.title,
-      adBody: ad.body,
-      screenshots: screenshots.tiles,
-      serviceContext: service,
-    });
+    const { extracted: llm, levels: levelsResult } = await runWithLevels(
+      () =>
+        analyzeWithLlm({
+          url: page.finalUrl,
+          outline,
+          adTitle: ad.title,
+          adBody: ad.body,
+          screenshots: screenshots.tiles,
+          serviceContext: service,
+        }),
+      () => analyzeLevels(levelsInput(outline)),
+    );
     if (screenshots.warnings.length) {
       console.warn("[page-analysis] screenshot warnings", screenshots.warnings.slice(0, 3));
     }
@@ -1166,6 +1245,7 @@ export async function analyzeLookupAdLandingPage(
           : []),
       ],
       summary: llm.summary ?? null,
+      levels: buildLevels(llm.pageArchitecture?.sections ?? [], levelsResult),
       error: null,
       sameLandingPageAds,
       mentionsService: service ? (llm.mentionsService ?? null) : null,
@@ -1249,14 +1329,18 @@ export async function analyzeCompetitorLandingPage(
     }
 
     const screenshots = await captureCompetitorScreenshotTiles(page.finalUrl);
-    const llm = await analyzeWithLlm({
-      url: page.finalUrl,
-      outline,
-      adTitle: competitor.sampleAd?.title,
-      adBody: competitor.sampleAd?.body,
-      platform: String(competitor.platform || "facebook"),
-      screenshots: screenshots.tiles,
-    });
+    const { extracted: llm, levels: levelsResult } = await runWithLevels(
+      () =>
+        analyzeWithLlm({
+          url: page.finalUrl,
+          outline,
+          adTitle: competitor.sampleAd?.title,
+          adBody: competitor.sampleAd?.body,
+          platform: String(competitor.platform || "facebook"),
+          screenshots: screenshots.tiles,
+        }),
+      () => analyzeLevels(levelsInput(outline)),
+    );
     if (screenshots.warnings.length) {
       console.warn("[page-analysis] screenshot warnings", screenshots.warnings.slice(0, 3));
     }
@@ -1304,6 +1388,7 @@ export async function analyzeCompetitorLandingPage(
           : []),
       ],
       summary: llm.summary ?? null,
+      levels: buildLevels(llm.pageArchitecture?.sections ?? [], levelsResult),
       error: null,
       sameLandingPageAds,
     };
