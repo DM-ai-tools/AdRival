@@ -30,6 +30,8 @@ const OPERATION: Record<string, string> = {
   "search.location_refresh_batch": "Find addresses (all)",
   "competitor.brand_review": "Brand review",
   "competitor.analyze_landing_page": "Offer & page details",
+  "page.label_levels": "Label page levels",
+  "icp.generate": "Customer profile",
   "competitor.location_refresh": "Find address",
   "business.analyze_url": "Analyze URL",
   "lookup.competitor_ads": "Brand lookup",
