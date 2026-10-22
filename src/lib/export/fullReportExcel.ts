@@ -2,6 +2,7 @@ import ExcelJS from "exceljs";
 import type { CompetitorRecord, SearchJob } from "../types";
 import type { ServiceFocus } from "../pipeline/offerServiceFocus";
 import { maskClientFacingText } from "../clientFacing";
+import { audienceLevelText, awarenessStageText } from "./levelLabels";
 import { BRAND, addOffersSheets, clean, date, link, styleSheet, type OffersExportAd } from "./offersExcel";
 
 /**
@@ -262,6 +263,8 @@ function pageAnalysisSheet(wb: ExcelJS.Workbook, records: CompetitorRecord[]): n
     { header: "Summary", key: "summary", width: 60 },
     { header: "Ads using this page", key: "adsHere", width: 11 },
     { header: "Ad hooks and offers", key: "hooks", width: 60 },
+    { header: "Audience level", key: "audienceLevel", width: 16 },
+    { header: "Awareness stage", key: "awarenessStage", width: 26 },
   ];
   for (const c of analysed) {
     const a = c.pageAnalysis!;
@@ -288,6 +291,8 @@ function pageAnalysisSheet(wb: ExcelJS.Workbook, records: CompetitorRecord[]): n
         .slice(0, 6)
         .map((ad) => `${clean(ad.hook)}${ad.offer ? ` → ${clean(ad.offer)}` : ""}`)
         .join("\n"),
+      audienceLevel: audienceLevelText(a.levels),
+      awarenessStage: awarenessStageText(a.levels),
     });
   }
   styleSheet(sheet, ["headline", "offer", "guarantees", "uvps", "trust", "conversion", "sections", "summary", "hooks"]);

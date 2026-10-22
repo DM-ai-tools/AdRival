@@ -110,3 +110,43 @@ test("the full report has a sheet per section of the run, from the website analy
   const open = wb.getWorksheet("Recreated pages")!.getRow(2).getCell(11).value as { hyperlink: string };
   assert.equal(open.hyperlink, "https://app.example/recreate/c1");
 });
+
+test("the landing page analysis sheet shows audience level and awareness stage, and leaves them empty without levels", async () => {
+  const withLevels = {
+    ...competitor,
+    pageAnalysis: {
+      ...competitor.pageAnalysis,
+      levels: { audienceLevel: "newbie", awarenessStage: "problem_aware", awarenessFocus: "only_problem" },
+    },
+  } as unknown as CompetitorRecord;
+  const unclear = {
+    ...competitor,
+    id: "c3",
+    pageName: "Unclear Co",
+    pageAnalysis: { ...competitor.pageAnalysis, levels: { audienceLevel: "unclear", awarenessStage: "unclear", awarenessFocus: null } },
+  } as unknown as CompetitorRecord;
+  const without = { ...competitor, id: "c2", pageName: "No Levels Co" } as unknown as CompetitorRecord;
+  const buf = await buildFullReportWorkbook({
+    job,
+    competitors: [withLevels, without, unclear],
+    recreateOnly: [],
+    offerAds: [],
+    focus: null,
+    origin: "https://app.example",
+  });
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(buf as unknown as ArrayBuffer);
+  const sheet = wb.getWorksheet("Landing page analysis")!;
+  const headers = (sheet.getRow(1).values as unknown[]).map((v) => String(v ?? ""));
+  const aud = headers.indexOf("Audience level");
+  const stage = headers.indexOf("Awareness stage");
+  assert.ok(aud > 0 && stage > 0, "both headers exist");
+  assert.equal(headers.indexOf("Audience"), 12, "existing columns keep their place");
+  const cell = (row: number, col: number) => String(sheet.getRow(row).getCell(col).value ?? "");
+  assert.equal(cell(2, aud), "Newbie");
+  assert.equal(cell(2, stage), "Problem aware (only problem)");
+  assert.equal(cell(3, aud), "");
+  assert.equal(cell(3, stage), "");
+  assert.equal(cell(4, aud), "");
+  assert.equal(cell(4, stage), "");
+});

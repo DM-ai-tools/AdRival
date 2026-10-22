@@ -435,6 +435,27 @@ If an earlier attempt failed, the same button says **Try again**.
 6. Fix individual images with notes.
 7. Download the HTML.
 
+### A/B testing
+
+The **A/B testing** tab on a search lists the landing pages that have been analysed, each with the audience level (Newbie, Intermediate, Advanced) and the buyer stage it is written for (Unaware to Most aware).
+
+A strip across the top shows each buyer stage as one of three states:
+
+- **Covered**: at least one page as a whole is written for that stage.
+- **Partly covered**: only a section of a page speaks to that stage.
+- **Missing**: nothing in the run speaks to that stage.
+
+What you can do:
+
+- **Generate ICP** (on a partly covered or missing stage) writes an ideal customer profile for that stage from your client’s business. It needs the client’s website to be added first. **Regenerate** inside the profile writes it again.
+- **View ICP** opens a profile that already exists. Opening it is free.
+- **Recreate a page for this ICP** (in the profile) or **Recreate for my brand** (on a page card) opens the recreate page from section 10.
+- **Label now** works out the audience level and stage of a page that has none. **Label all** does it for every unlabelled page in the run and first asks you to confirm, showing the number of pages.
+
+**Credits.** Generate ICP, Regenerate, Label now, Label all and Recreate use credits. Recreate is charged when you press **Create my page**, as in section 10. Nothing is charged for opening an existing ICP or for browsing the tab.
+
+The full report download (Export) also carries two columns on the landing page analysis sheet, **Audience level** and **Awareness stage**. They are empty for pages that have not been labelled.
+
 ---
 
 ## 11. History
