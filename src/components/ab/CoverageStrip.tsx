@@ -1,5 +1,6 @@
 "use client";
 
+import { chipAction } from "@/lib/pipeline/awareness/icpText";
 import type { StageCoverage } from "@/lib/pipeline/awareness/coverage";
 
 export const STAGE_LABELS: Record<string, string> = {
@@ -46,6 +47,11 @@ export function CoverageStrip({
               : c.status === "partial"
                 ? "Partly covered"
                 : "Missing";
+          const action = chipAction({
+            status: c.status,
+            hasIcp: icpStages.includes(c.stage),
+            profileReady,
+          });
           return (
             <li
               key={c.stage}
@@ -54,7 +60,7 @@ export function CoverageStrip({
             >
               <span className="ab-chip-stage">{label}</span>
               <span className="ab-chip-detail">{detail}</span>
-              {icpStages.includes(c.stage) ? (
+              {action.button === "view" ? (
                 <button
                   type="button"
                   className="ghost-btn ab-chip-btn"
@@ -62,11 +68,11 @@ export function CoverageStrip({
                 >
                   View ICP
                 </button>
-              ) : c.status === "missing" ? (
+              ) : action.button === "generate" ? (
                 <button
                   type="button"
                   className="ghost-btn ab-chip-btn"
-                  disabled={!profileReady || generatingStage !== null}
+                  disabled={action.generateDisabled || generatingStage !== null}
                   title={profileReady ? undefined : NO_PROFILE_TIP}
                   onClick={(e) => onGenerate?.(c.stage, e.currentTarget)}
                 >

@@ -45,3 +45,14 @@ export function pickDisplayedBase(
   }
   return defaultBase ?? null;
 }
+
+/** Which button a coverage chip shows. Generate is offered for any stage that is not fully covered. */
+export function chipAction(input: {
+  status: "covered" | "partial" | "missing";
+  hasIcp: boolean;
+  profileReady: boolean;
+}): { button: "view" | "generate" | null; generateDisabled: boolean } {
+  if (input.hasIcp) return { button: "view", generateDisabled: false };
+  if (input.status !== "covered") return { button: "generate", generateDisabled: !input.profileReady };
+  return { button: null, generateDisabled: false };
+}

@@ -39,3 +39,16 @@ test("pickDisplayedBase prefers a completed override, else the default", () => {
   assert.equal(pickDisplayedBase(a, [a, b], "gone"), a);
   assert.equal(pickDisplayedBase(null, [a], null), null);
 });
+
+import { chipAction } from "../src/lib/pipeline/awareness/icpText";
+
+test("chipAction decides which chip button shows", () => {
+  const a = (status: "covered" | "partial" | "missing", hasIcp: boolean, profileReady = true) =>
+    chipAction({ status, hasIcp, profileReady });
+  assert.equal(a("missing", false).button, "generate");
+  assert.equal(a("partial", false).button, "generate");
+  assert.equal(a("covered", false).button, null);
+  for (const s of ["missing", "partial", "covered"] as const) assert.equal(a(s, true).button, "view");
+  assert.equal(a("partial", false, false).generateDisabled, true);
+  assert.equal(a("missing", false, true).generateDisabled, false);
+});
