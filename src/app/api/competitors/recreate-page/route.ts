@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
-import { getCompetitor, getJob, getLookupJob, updateCompetitor, updateJob, updateLookupJob } from "@/lib/db";
+import { getCompetitor, getIcp, getJob, getLookupJob, updateCompetitor, updateJob, updateLookupJob } from "@/lib/db";
 import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
 import { runBillable } from "@/lib/accounting/run";
 import { isCreditError } from "@/lib/accounting/errors";
-import type { CompetitorRecord } from "@/lib/types";
+import type { AwarenessStage, CompetitorRecord } from "@/lib/types";
 import { sanitizeClientFacingText, maskRecreatedPage, maskPageAnalysis } from "@/lib/clientFacing";
 import { isStyleDirection } from "@/lib/pipeline/skills/playbook";
 import {
@@ -16,6 +16,7 @@ import {
   undoManusChange,
 } from "@/lib/pipeline/manus/run";
 import { cleanAssets } from "@/lib/pipeline/manus/assets";
+import { icpBelongsToRun } from "@/lib/pipeline/awareness/icp";
 
 export const runtime = "nodejs";
 /** A design-agent build runs well past 10 minutes; it continues after the reply. */
@@ -273,9 +274,19 @@ export async function POST(request: Request) {
     if (!force && existing.recreatedPage?.status === "completed" && existing.recreatedPage.html) {
       return NextResponse.json({ competitor: maskCompetitor(existing), cached: true });
     }
+    // A page for a generated ICP: the ICP must belong to this competitor's search.
+    let targetIcp: { icpId: string; stage: AwarenessStage } | undefined;
+    if (body.icpId !== undefined && body.icpId !== null && body.icpId !== "") {
+      const icp = getIcp(String(body.icpId));
+      if (!icp || !icpBelongsToRun(icp, existing.runId)) {
+        return NextResponse.json({ error: "That audience profile was not found for this search." }, { status: 400 });
+      }
+      targetIcp = { icpId: icp.id, stage: icp.stage };
+    }
     return startBuild(competitorId, () =>
       billed("recreate.generate_page", () =>
         runManusRecreation(competitorId, {
+          targetIcp,
           userFeedback: userFeedback || null,
           styleDirection,
           screenshots,

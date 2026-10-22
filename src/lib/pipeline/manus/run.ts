@@ -1,4 +1,5 @@
 import type {
+  AwarenessStage,
   CompetitorRecord,
   ManusRecreationState,
   RecreatedLandingPage,
@@ -6,7 +7,7 @@ import type {
   RecreationProgressStage,
   SearchJob,
 } from "../../types";
-import { getCompetitor, getJob, updateCompetitor } from "../../db";
+import { getCompetitor, getIcp, getJob, updateCompetitor } from "../../db";
 import { getBillingContext } from "../../accounting/context";
 import { touchReservation } from "../../accounting/service";
 import { sanitizeClientFacingText } from "../../clientFacing";
@@ -279,6 +280,7 @@ function briefInput(
   businessUrl: string,
   styleDirection: StyleDirection,
   userFeedback: string | null,
+  icp: ManusBriefInput["icp"] = null,
 ): ManusBriefInput {
   const profile = job.businessProfile || null;
   return {
@@ -299,6 +301,7 @@ function briefInput(
     pageAnalysis: competitor.pageAnalysis || null,
     styleDirection,
     userFeedback,
+    ...(icp ? { icp } : {}),
   };
 }
 
@@ -437,6 +440,8 @@ export async function runManusRecreation(
     screenshots?: FeedbackScreenshot[];
     /** Images the page must use. New ones replace the saved set; none given reuses the saved set. */
     assets?: UserAsset[];
+    /** A new reader to write for; omitted keeps the one already on the page. */
+    targetIcp?: { icpId: string; stage: AwarenessStage } | null;
   } = {},
 ): Promise<CompetitorRecord> {
   if (!hasManusKey()) throw new Error("The design agent is not set up yet: add MANUS_API_KEY to the environment.");
@@ -464,9 +469,14 @@ export async function runManusRecreation(
   if (options.assets?.length) saveAssets(competitorId, options.assets);
   const assets = options.assets?.length ? options.assets : loadAssets(competitorId);
 
+  // The reader this page is for: a new target from the request, else the one kept on the page.
+  const targetIcp = options.targetIcp ?? competitor.recreatedPage?.targetIcp ?? null;
+  const icpRecord = targetIcp ? getIcp(targetIcp.icpId) : null;
+  const icp = icpRecord ? { stage: icpRecord.stage, content: icpRecord } : null;
+
   const signal = beginRun(competitorId);
   const input = {
-    ...briefInput(competitor, job, businessUrl, styleDirection, feedback),
+    ...briefInput(competitor, job, businessUrl, styleDirection, feedback, icp),
     userAssets: assets.map((a) => ({ name: a.name, caption: a.caption })),
   };
   const existing = competitor.recreatedPage;
@@ -495,6 +505,7 @@ export async function runManusRecreation(
     pipelineVersion: MANUS_PIPELINE_VERSION,
     styleDirection,
     userFeedback: feedback,
+    ...(targetIcp ? { targetIcp } : {}),
     publishReady: false,
     publishBlockers: [],
     qualityReport: null,

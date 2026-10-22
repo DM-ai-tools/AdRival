@@ -176,8 +176,15 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
   );
 
   const generatePage = useCallback(
-    (force = false) =>
-      send({ action: force ? "regenerate_page" : "generate_page", force }, "generate", "Page generation failed"),
+    (force = false) => {
+      // Arriving from an A/B test with ?icp=<id> builds the page for that reader.
+      const icpId = new URLSearchParams(window.location.search).get("icp") || undefined;
+      return send(
+        { action: force ? "regenerate_page" : "generate_page", force, icpId },
+        "generate",
+        "Page generation failed",
+      );
+    },
     [send],
   );
 

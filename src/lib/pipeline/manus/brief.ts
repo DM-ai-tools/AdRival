@@ -1,4 +1,4 @@
-import type { BrandColors, BusinessProfile, LandingPageOfferAnalysis } from "../../types";
+import type { AwarenessStage, BrandColors, BusinessProfile, IcpContent, LandingPageOfferAnalysis } from "../../types";
 import { STYLE_DIRECTION_LABEL, styleGuide, type StyleDirection } from "../skills/playbook";
 import { familiesInText } from "../offerServiceFocus";
 
@@ -25,6 +25,8 @@ export type ManusBriefInput = {
   userFeedback: string | null;
   /** Images the user attached that the page must use (sent with the task as files). */
   userAssets?: Array<{ name: string; caption: string }>;
+  /** The reader this page is rewritten for (an A/B test variant); absent for a plain rebuild. */
+  icp?: { stage: AwarenessStage; content: IcpContent } | null;
 };
 
 /** The file the agent must attach. */
@@ -264,6 +266,27 @@ Sections an earlier analysis saw (a cross-check list; the live page in your brow
 ${sections.length ? sections.map((s, i) => `${i + 1}. ${s.name} — ${s.purpose}`).join("\n") : "- (not available — list them yourself)"}`;
 }
 
+function icpSection(input: ManusBriefInput): string {
+  if (!input.icp) return "";
+  const { stage, content } = input.icp;
+  const list = (items: string[]) => (items.length ? items.map((i) => `- ${i}`).join("\n") : "- (none given)");
+  return `## The reader this page is for
+This page is written for one reader. Their stage of awareness: ${stage}.
+What this reader already knows: ${content.stageNotes}
+
+Their pain points:
+${list(content.painPoints)}
+
+What they say out loud (echo these phrases in the headline and subheads, in their own words):
+${list(content.saysOutLoud)}
+
+Suggested angle: ${content.suggestedAngle}
+
+Keep the competitor's layout, section order and design exactly as described above, but rewrite the headline, the proof and the call-to-action copy for this reader.
+
+`;
+}
+
 /** The full brief, attached to the task as brief.md. */
 export function buildManusBrief(input: ManusBriefInput): string {
   const style = styleGuide(input.styleDirection);
@@ -281,7 +304,7 @@ Deliver ONE self-contained HTML file named \`${MANUS_HTML_FILENAME}\`, attached 
 
 ${input.userFeedback ? `## The user's requests (follow these first, within the hard rules)\n${input.userFeedback}\n\n` : ""}${userAssetsSection(input)}${focusSection(input)}
 
-${competitorSection(input)}
+${icpSection(input)}${competitorSection(input)}
 
 ${clientSection(input)}
 

@@ -323,6 +323,58 @@ test("the page stays on the searched service: the brief names it and a hero abou
   assert.equal(heroMissesService(onTopic, service), null);
 });
 
+test("the brief is unchanged without an ICP and names the reader when one is set", async () => {
+  const { createHash } = await import("node:crypto");
+  const { buildManusBrief } = await import("../src/lib/pipeline/manus/brief");
+  const input = {
+    competitorName: "Rival Agency",
+    competitorUrl: "https://rival.example/seo",
+    clientUrl: "https://trafficradius.example",
+    clientName: "Traffic Radius",
+    keyword: "seo agency",
+    searchKeywords: ["seo agency", "seo services melbourne"],
+    selectedCategory: null,
+    profile: null,
+    brandColors: null,
+    pageAnalysis: {
+      status: "completed" as const,
+      analyzedUrl: "https://rival.example/seo",
+      analyzedAt: "",
+      offer: { headline: "Rank higher on Google with SEO that compounds", primaryOffer: "Free SEO audit", cta: "Get my free SEO audit" },
+    },
+    styleDirection: "brand" as const,
+    userFeedback: null,
+  };
+  // Hash of the brief as it was before the ICP section existed.
+  const BEFORE = "240df951f7577c95721fd89e8e1cb4836d06898a71df6101a0887c3faefb8f99";
+  const hash = (text: string) => createHash("sha256").update(text).digest("hex");
+  assert.equal(hash(buildManusBrief(input)), BEFORE);
+  assert.equal(hash(buildManusBrief({ ...input, icp: null })), BEFORE);
+
+  const brief = buildManusBrief({
+    ...input,
+    icp: {
+      stage: "problem_aware",
+      content: {
+        painPoints: ["Leads dried up after the last Google update"],
+        demographics: { ageRange: null, role: null, budget: null, location: null, other: null },
+        psychographics: [],
+        saysOutLoud: ["Why did my traffic fall off a cliff?"],
+        interests: [],
+        hopesAndDesires: [],
+        stageNotes: "Knows traffic fell but not why.",
+        suggestedAngle: "Diagnose the drop before selling the fix",
+      },
+    },
+  });
+  assert.match(brief, /## The reader this page is for/);
+  assert.match(brief, /problem_aware/);
+  assert.match(brief, /Leads dried up after the last Google update/);
+  assert.match(brief, /Why did my traffic fall off a cliff\?/);
+  assert.match(brief, /Knows traffic fell but not why\./);
+  assert.match(brief, /Diagnose the drop before selling the fix/);
+});
+
 test("a photo used twice is caught, while the logo, icons and SVGs may repeat", async () => {
   const { repeatedImages } = await import("../src/lib/pipeline/manus/imageCheck");
   const photo = `data:image/jpeg;base64,${"A".repeat(6000)}`;
