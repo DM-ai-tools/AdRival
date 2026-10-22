@@ -395,3 +395,14 @@ test("a photo used twice is caught, while the logo, icons and SVGs may repeat", 
   const carousel = `<html><body><section><h2>Projects</h2><div class="track"><img src="${photo}" alt="Project"><img src="${other}" alt="Project 2"></div><div class="track" aria-hidden="true"><img src="${photo}" alt=""><img src="${other}" alt=""></div><div class="swiper-slide swiper-slide-duplicate"><img src="${photo}" alt=""></div></section></body></html>`;
   assert.equal(repeatedImages(carousel).length, 0);
 });
+
+test("a page is reused unless a rebuild is forced or another reader is asked for", async () => {
+  const { shouldReuseCachedPage } = await import("../src/lib/pipeline/manus/reuse");
+  assert.equal(shouldReuseCachedPage({ force: false, requestedIcpId: null, storedIcpId: null }), true);
+  assert.equal(shouldReuseCachedPage({ force: false, requestedIcpId: null, storedIcpId: "icp-1" }), true);
+  assert.equal(shouldReuseCachedPage({ force: false, requestedIcpId: "icp-1", storedIcpId: "icp-1" }), true);
+  assert.equal(shouldReuseCachedPage({ force: false, requestedIcpId: "icp-2", storedIcpId: "icp-1" }), false);
+  assert.equal(shouldReuseCachedPage({ force: false, requestedIcpId: "icp-1", storedIcpId: null }), false);
+  assert.equal(shouldReuseCachedPage({ force: true, requestedIcpId: null, storedIcpId: null }), false);
+  assert.equal(shouldReuseCachedPage({ force: true, requestedIcpId: "icp-1", storedIcpId: "icp-1" }), false);
+});

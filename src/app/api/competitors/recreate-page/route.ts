@@ -16,6 +16,7 @@ import {
   undoManusChange,
 } from "@/lib/pipeline/manus/run";
 import { cleanAssets } from "@/lib/pipeline/manus/assets";
+import { shouldReuseCachedPage } from "@/lib/pipeline/manus/reuse";
 import { icpBelongsToRun } from "@/lib/pipeline/awareness/icp";
 
 export const runtime = "nodejs";
@@ -260,20 +261,6 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: `Unknown action "${action}"` }, { status: 400 });
     }
 
-    const force =
-      Boolean(body.force) ||
-      Boolean(userFeedback) ||
-      screenshots.length > 0 ||
-      assets.length > 0 ||
-      styleChanged ||
-      action !== "generate_page" && action !== "generate_content";
-    // A running build is followed; a finished page is returned unless a rebuild is asked for.
-    if (!force && isManusRunActive(existing.recreatedPage)) {
-      return NextResponse.json({ competitor: maskCompetitor(existing), cached: true, inFlight: true });
-    }
-    if (!force && existing.recreatedPage?.status === "completed" && existing.recreatedPage.html) {
-      return NextResponse.json({ competitor: maskCompetitor(existing), cached: true });
-    }
     // A page for a generated ICP: the ICP must belong to this competitor's search.
     let targetIcp: { icpId: string; stage: AwarenessStage } | undefined;
     if (body.icpId !== undefined && body.icpId !== null && body.icpId !== "") {
@@ -282,6 +269,26 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "That audience profile was not found for this search." }, { status: 400 });
       }
       targetIcp = { icpId: icp.id, stage: icp.stage };
+    }
+    const force =
+      Boolean(body.force) ||
+      Boolean(userFeedback) ||
+      screenshots.length > 0 ||
+      assets.length > 0 ||
+      styleChanged ||
+      action !== "generate_page" && action !== "generate_content";
+    // A running build is followed; a finished page is returned unless a rebuild is asked for
+    // or the page was built for a different reader (a new build replaces a running one).
+    const reuse = shouldReuseCachedPage({
+      force,
+      requestedIcpId: targetIcp?.icpId ?? null,
+      storedIcpId: existing.recreatedPage?.targetIcp?.icpId ?? null,
+    });
+    if (reuse && isManusRunActive(existing.recreatedPage)) {
+      return NextResponse.json({ competitor: maskCompetitor(existing), cached: true, inFlight: true });
+    }
+    if (reuse && existing.recreatedPage?.status === "completed" && existing.recreatedPage.html) {
+      return NextResponse.json({ competitor: maskCompetitor(existing), cached: true });
     }
     return startBuild(competitorId, () =>
       billed("recreate.generate_page", () =>
