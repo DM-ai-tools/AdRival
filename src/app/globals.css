@@ -5412,3 +5412,119 @@ select.search-input {
 .recreate-style-row .muted {
   font-size: 0.85rem;
 }
+
+/* A/B testing tab */
+.ab-picker,
+.ab-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 28rem;
+  margin-bottom: 14px;
+}
+.ab-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.ab-strip {
+  margin: 4px 0 16px;
+}
+.ab-strip-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ab-chip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 118px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-strong);
+  font-size: 0.85rem;
+}
+.ab-chip-stage {
+  font-weight: 650;
+}
+.ab-chip-detail {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+.ab-chip.is-covered {
+  background: rgba(15, 122, 108, 0.1);
+  border-color: rgba(15, 122, 108, 0.3);
+}
+.ab-chip.is-partial {
+  background: rgba(255, 244, 214, 0.8);
+  border-color: rgba(154, 107, 18, 0.35);
+}
+.ab-chip.is-missing {
+  background: transparent;
+  border: 1px dashed rgba(92, 107, 118, 0.6);
+}
+.ab-chip-btn {
+  margin-top: 4px;
+  padding: 4px 8px;
+  font-size: 0.75rem;
+}
+.ab-chip-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.ab-strip-help {
+  margin: 8px 0 0;
+  font-size: 0.85rem;
+}
+.ab-list {
+  display: grid;
+  gap: 10px;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.ab-card {
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--glass-strong);
+}
+.ab-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: baseline;
+}
+.ab-card-url {
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+.ab-card-headline {
+  margin: 6px 0 2px;
+}
+.ab-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 2px 0 6px;
+  font-size: 0.85rem;
+}
+.ab-card-badges,
+.ab-card-unlabelled {
+  margin: 4px 0;
+}
+.ab-card-reasons p {
+  margin: 4px 0;
+  font-size: 0.85rem;
+}
+.ab-card-actions {
+  margin-top: 8px;
+}
+.ab-label-banner {
+  align-items: center;
+}

@@ -1,5 +1,6 @@
 "use client";
 
+import { AbTestingPanel } from "@/components/ab/AbTestingPanel";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { SearchForm } from "@/components/SearchForm";
 import { ProgressPanel } from "@/components/ProgressPanel";
@@ -30,7 +31,7 @@ import type {
   SearchJob,
 } from "@/lib/types";
 
-type Mode = "search" | "lookup" | "history";
+type Mode = "search" | "lookup" | "ab" | "history";
 
 /** Stages in which a run is still working (mirrors the server's in-flight list). */
 const SEARCH_BUSY_STAGES = new Set([
@@ -542,7 +543,7 @@ export default function HomePage() {
   const applyViewParams = useCallback((params: URLSearchParams) => {
     applyingUrl.current = true;
     const nextMode = params.get("mode");
-    if (nextMode === "search" || nextMode === "lookup" || nextMode === "history") {
+    if (nextMode === "search" || nextMode === "lookup" || nextMode === "ab" || nextMode === "history") {
       setMode(nextMode);
     }
     const run = params.get("run");
@@ -795,6 +796,14 @@ export default function HomePage() {
         <button
           type="button"
           role="tab"
+          className={`tab-btn ${mode === "ab" ? "active" : ""}`}
+          onClick={() => setMode("ab")}
+        >
+          A/B testing
+        </button>
+        <button
+          type="button"
+          role="tab"
           className={`tab-btn ${mode === "history" ? "active" : ""}`}
           onClick={() => setMode("history")}
         >
@@ -802,7 +811,7 @@ export default function HomePage() {
         </button>
       </div>
 
-      {mode !== "history" && (
+      {mode !== "history" && mode !== "ab" && (
         <>
           <PlatformPicker
             value={platform}
@@ -814,6 +823,18 @@ export default function HomePage() {
             <strong>{meta.label}</strong> — {meta.description}
           </p>
         </>
+      )}
+
+      {mode === "ab" && (
+        <AbTestingPanel
+          defaultSource={
+            jobId
+              ? { kind: "search", id: jobId }
+              : lookupId
+                ? { kind: "lookup", id: lookupId }
+                : null
+          }
+        />
       )}
 
       {mode === "search" && (
