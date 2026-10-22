@@ -17,13 +17,21 @@ export function CoverageStrip({
   coverage,
   labelledCount,
   profileReady,
+  icpStages = [],
+  generatingStage = null,
   onGenerate,
+  onView,
 }: {
   coverage: StageCoverage[];
   labelledCount: number;
   profileReady: boolean;
-  /** Task 8 wires this to the ICP route; until then it may be a no-op. */
-  onGenerate?: (stage: StageCoverage["stage"]) => void;
+  /** Stages that already have a saved ICP; their chip shows "View ICP". */
+  icpStages?: string[];
+  generatingStage?: string | null;
+  /** Spends credits; called only from an explicit click. */
+  onGenerate?: (stage: StageCoverage["stage"], opener: HTMLElement) => void;
+  /** Opens the saved ICP; spends nothing. */
+  onView?: (stage: StageCoverage["stage"], opener: HTMLElement) => void;
 }) {
   if (labelledCount <= 0) return null;
   return (
@@ -46,15 +54,23 @@ export function CoverageStrip({
             >
               <span className="ab-chip-stage">{label}</span>
               <span className="ab-chip-detail">{detail}</span>
-              {c.status === "missing" ? (
+              {icpStages.includes(c.stage) ? (
                 <button
                   type="button"
                   className="ghost-btn ab-chip-btn"
-                  disabled={!profileReady}
-                  title={profileReady ? undefined : NO_PROFILE_TIP}
-                  onClick={() => onGenerate?.(c.stage)}
+                  onClick={(e) => onView?.(c.stage, e.currentTarget)}
                 >
-                  Generate ICP
+                  View ICP
+                </button>
+              ) : c.status === "missing" ? (
+                <button
+                  type="button"
+                  className="ghost-btn ab-chip-btn"
+                  disabled={!profileReady || generatingStage !== null}
+                  title={profileReady ? undefined : NO_PROFILE_TIP}
+                  onClick={(e) => onGenerate?.(c.stage, e.currentTarget)}
+                >
+                  {generatingStage === c.stage ? "Generating…" : "Generate ICP"}
                 </button>
               ) : null}
             </li>

@@ -5528,3 +5528,63 @@ select.search-input {
 .ab-label-banner {
   align-items: center;
 }
+
+.ab-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(15, 23, 30, 0.35);
+}
+.ab-drawer {
+  width: min(480px, 100%);
+  height: 100%;
+  overflow-y: auto;
+  padding: 18px 20px 28px;
+  background: var(--panel, #fff);
+  border-left: 1px solid var(--line-strong);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.12);
+}
+.ab-drawer:focus {
+  outline: none;
+}
+.ab-drawer-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+.ab-drawer-head h3 {
+  margin: 0;
+}
+.ab-icp-block h4 {
+  margin: 14px 0 4px;
+  font-size: 0.9rem;
+}
+.ab-icp-block ul {
+  margin: 0;
+  padding-left: 18px;
+}
+.ab-icp-block p {
+  margin: 0;
+}
+.ab-drawer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 18px;
+}
+.ab-drawer-recreate {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.ab-drawer-recreate p {
+  margin: 0 0 8px;
+}
+.ab-drawer-pages {
+  margin: 0 0 10px;
+  padding-left: 18px;
+}

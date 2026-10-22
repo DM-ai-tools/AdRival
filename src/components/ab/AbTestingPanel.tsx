@@ -3,9 +3,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { AbPage } from "@/lib/pipeline/awareness/abPages";
+import { pickDisplayedBase } from "@/lib/pipeline/awareness/icpText";
+import type { IcpRecord } from "@/lib/types";
 import type { StageCoverage } from "@/lib/pipeline/awareness/coverage";
 import { AbPageCard } from "./AbPageCard";
 import { CoverageStrip, STAGE_LABELS } from "./CoverageStrip";
+import { IcpDrawer } from "./IcpDrawer";
 
 type Source = { kind: "search" | "lookup"; id: string };
 type RunItem = {
@@ -18,6 +21,8 @@ type AbData = {
   pages: AbPage[];
   coverage: { stages: StageCoverage[]; labelledCount: number };
   profileReady: boolean;
+  icps?: IcpRecord[];
+  baseForStage?: Record<string, AbPage | null>;
 };
 
 const key = (s: Source) => `${s.kind}:${s.id}`;
@@ -36,6 +41,12 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
   const [labelCount, setLabelCount] = useState<number | null>(null);
   const [labelBusy, setLabelBusy] = useState(false);
   const [recreatingId, setRecreatingId] = useState<string | null>(null);
+  // Drawer for one stage's ICP. baseId is the user's "Change page" pick.
+  const [drawer, setDrawer] = useState<{ stage: string; baseId: string | null } | null>(null);
+  const [generatingStage, setGeneratingStage] = useState<string | null>(null);
+  const [icpError, setIcpError] = useState<string | null>(null);
+  const generatingRef = useRef(false);
+  const openerRef = useRef<HTMLElement | null>(null);
   // Bumped on every source change and every load; a response only applies
   // while its number is still current, so a slow older request is dropped.
   const loadSeq = useRef(0);
@@ -88,6 +99,10 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
     setError(null);
     setStageFilter("");
     setAudienceFilter("");
+    setDrawer(null);
+    setIcpError(null);
+    setGeneratingStage(null);
+    generatingRef.current = false;
     if (source) void load(source);
     else setLoading(false);
     return () => {
@@ -164,7 +179,7 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
     }
   }
 
-  async function recreate(page: AbPage) {
+  async function recreate(page: AbPage, icpId?: string) {
     setRecreatingId(page.id);
     setError(null);
     try {
@@ -186,13 +201,76 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
         if (!res.ok) throw new Error(body.error || "Could not start recreate");
         competitorId = body.competitorId;
       }
-      router.push(`/recreate/${encodeURIComponent(competitorId)}`);
+      router.push(
+        `/recreate/${encodeURIComponent(competitorId)}${icpId ? `?icp=${encodeURIComponent(icpId)}` : ""}`,
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not start recreate");
     } finally {
       setRecreatingId(null);
     }
   }
+
+  function openDrawer(stage: string, opener: HTMLElement) {
+    openerRef.current = opener;
+    setIcpError(null);
+    setDrawer({ stage, baseId: null });
+  }
+
+  function closeDrawer() {
+    setDrawer(null);
+    setIcpError(null);
+    const el = openerRef.current;
+    openerRef.current = null;
+    // Wait for the drawer to unmount, then hand focus back to the chip.
+    setTimeout(() => {
+      if (el && el.isConnected) el.focus();
+    }, 0);
+  }
+
+  // Spends credits. Only reached from an explicit Generate / Regenerate click.
+  async function generateIcp(stage: string) {
+    if (!source || generatingRef.current) return;
+    generatingRef.current = true;
+    const forKey = key(source);
+    setGeneratingStage(stage);
+    setIcpError(null);
+    try {
+      const res = await fetch("/api/ab-testing/icp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: source.kind, id: source.id, stage }),
+      });
+      let body: { icp?: IcpRecord; error?: string } = {};
+      try {
+        body = await res.json();
+      } catch {
+        /* non-JSON error body */
+      }
+      if (forKey !== sourceKey.current) return;
+      if (!res.ok || !body.icp) {
+        throw new Error(body.error || "Could not generate the ICP");
+      }
+      const icp = body.icp;
+      setData((d) =>
+        d ? { ...d, icps: [...(d.icps ?? []).filter((i) => i.stage !== icp.stage), icp] } : d,
+      );
+    } catch (e) {
+      if (forKey === sourceKey.current) {
+        setIcpError(e instanceof Error ? e.message : "Could not generate the ICP");
+      }
+    } finally {
+      if (forKey === sourceKey.current) {
+        generatingRef.current = false;
+        setGeneratingStage(null);
+      }
+    }
+  }
+
+  const drawerIcp = drawer ? ((data?.icps ?? []).find((i) => i.stage === drawer.stage) ?? null) : null;
+  const drawerBase = drawer
+    ? pickDisplayedBase(data?.baseForStage?.[drawer.stage], data?.pages ?? [], drawer.baseId)
+    : null;
 
   return (
     <section className="panel ab-panel">
@@ -233,8 +311,13 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
             coverage={data.coverage.stages}
             labelledCount={data.coverage.labelledCount}
             profileReady={data.profileReady}
-            // TODO(Task 8): wire to POST /api/ab-testing/icp.
-            onGenerate={undefined}
+            icpStages={(data.icps ?? []).map((i) => i.stage)}
+            generatingStage={generatingStage}
+            onGenerate={(stage, el) => {
+              openDrawer(stage, el);
+              void generateIcp(stage);
+            }}
+            onView={openDrawer}
           />
 
           {unlabelled > 0 ? (
@@ -329,6 +412,24 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
             </>
           )}
         </>
+      ) : null}
+
+      {drawer && data ? (
+        <IcpDrawer
+          stage={drawer.stage}
+          icp={drawerIcp}
+          generating={generatingStage === drawer.stage}
+          error={icpError}
+          basePage={drawerBase}
+          pages={data.pages}
+          recreating={recreatingId !== null && recreatingId === drawerBase?.id}
+          onRegenerate={() => void generateIcp(drawer.stage)}
+          onPickBase={(p) => setDrawer({ ...drawer, baseId: p.id })}
+          onRecreate={() => {
+            if (drawerBase && drawerIcp) void recreate(drawerBase, drawerIcp.id);
+          }}
+          onClose={closeDrawer}
+        />
       ) : null}
 
       {!source && !loading ? (
