@@ -128,7 +128,8 @@ function AdCard({
 
     // Poll this ad while the POST is in flight so UI unsticks if the
     // response is dropped but the store already has a terminal status.
-    const pollTimer = window.setInterval(async () => {
+    const pollTimer = window.setInterval(() => {
+      void (async () => {
       try {
         const res = await fetch(
           `/api/lookup/status?lookupId=${encodeURIComponent(ad.lookupId)}`,
@@ -155,6 +156,7 @@ function AdCard({
       } catch {
         /* ignore poll errors */
       }
+      })();
     }, 2500);
 
     try {

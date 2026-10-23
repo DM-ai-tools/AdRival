@@ -15,8 +15,19 @@ export default tseslint.config(
     plugins: { "@typescript-eslint": tseslint.plugin },
     linterOptions: { noInlineConfig: true, reportUnusedDisableDirectives: "off" },
     rules: {
-      "@typescript-eslint/no-floating-promises": "error",
-      "@typescript-eslint/no-misused-promises": "error",
+      "@typescript-eslint/no-floating-promises": [
+        "error",
+        {
+          allowForKnownSafeCalls: [
+            {
+              from: "package",
+              package: "node:test",
+              name: ["test", "describe", "it", "before", "after", "beforeEach", "afterEach"],
+            },
+          ],
+        },
+      ],
+      "@typescript-eslint/no-misused-promises": ["error", { checksVoidReturn: { attributes: false } }],
       "@typescript-eslint/await-thenable": "error",
     },
   },
