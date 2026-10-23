@@ -49,20 +49,34 @@ function createMutex() {
   };
 }
 
+const TX_MISUSE =
+  "use the tx handle passed to withTx, not getDb(), inside a transaction " +
+  "(with the real pool this would run on another connection outside the transaction, " +
+  "or deadlock waiting for a row the transaction has locked)";
+
+/** One open transaction; `open` flips to false at COMMIT/ROLLBACK. */
+interface TxState {
+  open: boolean;
+}
+
 /**
  * Wraps an in-process PGlite database as a TestClient. PGlite has a single
  * connection, so every statement and every transaction takes one mutex: a
  * transaction's BEGIN..COMMIT never interleaves with other work.
  *
- * Code running inside `tx` that calls `getDb().query` (instead of the tx
- * handle) runs on the same connection, so it joins the open transaction rather
- * than deadlocking on the mutex. A nested `tx` likewise joins the outer one.
+ * It fails loudly where the production pool would deadlock or diverge:
+ * - `getDb().query` or a nested `withTx` while a transaction is open throws;
+ *   only the handle passed to the callback may be used.
+ * - The handle throws once its transaction has finished, and work that
+ *   outlives the transaction goes back through the mutex like any caller.
  */
 export async function createPgliteClient(): Promise<PgliteTestClient> {
   const pg = new PGlite({ parsers: PG_COMPATIBLE_PARSERS });
   await pg.waitReady;
   const runExclusive = createMutex();
-  const inTx = new AsyncLocalStorage<boolean>();
+  const inTx = new AsyncLocalStorage<TxState>();
+
+  const insideOpenTx = () => inTx.getStore()?.open === true;
 
   const raw: Queryable = {
     async query<R = Record<string, unknown>>(text: string, params?: unknown[]) {
@@ -79,25 +93,40 @@ export async function createPgliteClient(): Promise<PgliteTestClient> {
   };
 
   return {
-    query<R = Record<string, unknown>>(text: string, params?: unknown[]) {
-      if (inTx.getStore()) return raw.query<R>(text, params);
+    async query<R = Record<string, unknown>>(text: string, params?: unknown[]) {
+      if (insideOpenTx()) throw new Error(TX_MISUSE);
       return runExclusive(() => raw.query<R>(text, params));
     },
-    tx<T>(fn: (t: Queryable) => Promise<T>): Promise<T> {
-      if (inTx.getStore()) return fn(raw);
-      return runExclusive(() =>
-        inTx.run(true, async () => {
+    async tx<T>(fn: (t: Queryable) => Promise<T>): Promise<T> {
+      if (insideOpenTx()) throw new Error(TX_MISUSE);
+      return runExclusive(() => {
+        const state: TxState = { open: true };
+        const handle: Queryable = {
+          async query<R = Record<string, unknown>>(text: string, params?: unknown[]) {
+            if (!state.open) {
+              throw new Error("this transaction is finished; its tx handle can no longer be used");
+            }
+            return raw.query<R>(text, params);
+          },
+        };
+        return inTx.run(state, async () => {
           await pg.exec("BEGIN");
           try {
-            const value = await fn(raw);
+            const value = await fn(handle);
+            state.open = false;
             await pg.exec("COMMIT");
             return value;
           } catch (err) {
-            await pg.exec("ROLLBACK");
+            state.open = false;
+            try {
+              await pg.exec("ROLLBACK");
+            } catch {
+              // Keep the error that caused the rollback; it is the useful one.
+            }
             throw err;
           }
-        }),
-      );
+        });
+      });
     },
     close: () => pg.close(),
   };

@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { getDb, poolConfigFor, withTx } from "../src/lib/data/client";
+import { getDb, poolConfigFor, withTx, type Queryable } from "../src/lib/data/client";
 import { migrate } from "../src/lib/data/migrate";
 import { createPgliteClient, useTestDb } from "./helpers/testDb";
 
@@ -150,6 +150,67 @@ test("withTx rolls back an insert when the callback throws", async () => {
     "select count(*)::text as n from seen_page_ids",
   );
   assert.equal(rows[0].n, "0");
+});
+
+const TX_MISUSE = /use the tx handle passed to withTx, not getDb\(\), inside a transaction/;
+
+test("inside withTx, getDb() and nested withTx throw; the tx handle works", async () => {
+  await withTx(async (tx) => {
+    await assert.rejects(getDb().query("select 1"), TX_MISUSE);
+    await assert.rejects(
+      withTx(async () => {}),
+      TX_MISUSE,
+    );
+    await tx.query("insert into seen_page_ids (id) values ($1)", ["via-handle"]);
+  });
+  const { rows } = await getDb().query<{ n: string }>(
+    "select count(*)::text as n from seen_page_ids where id = $1",
+    ["via-handle"],
+  );
+  assert.equal(rows[0].n, "1");
+  await getDb().query("delete from seen_page_ids");
+});
+
+test("work leaked past COMMIT goes through the mutex and a finished tx handle throws", async () => {
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  let handle: Queryable | null = null;
+  let leaked: Promise<{ rows: { n: string }[] }> | null = null;
+  await withTx(async (tx) => {
+    handle = tx;
+    // Deliberately not awaited: it outlives the transaction.
+    leaked = (async () => {
+      await wait(20);
+      return getDb().query<{ n: string }>("select count(*)::text as n from seen_page_ids");
+    })();
+  });
+  // A second transaction holds the connection while the leaked query fires,
+  // then rolls back. Bypassing the mutex would read its uncommitted row.
+  await assert.rejects(
+    withTx(async (tx) => {
+      await tx.query("insert into seen_page_ids (id) values ($1)", ["uncommitted"]);
+      await wait(60);
+      throw new Error("rollback on purpose");
+    }),
+    /rollback on purpose/,
+  );
+  assert.ok(leaked && handle);
+  const result = await (leaked as Promise<{ rows: { n: string }[] }>);
+  assert.equal(result.rows[0].n, "0");
+  await assert.rejects((handle as Queryable).query("select 1"), /transaction is finished/);
+});
+
+test("concurrent migrators: one applies, the other skips without error", async () => {
+  const fresh = await createPgliteClient();
+  try {
+    const [a, b] = await Promise.all([migrate(fresh), migrate(fresh)]);
+    assert.deepEqual([...a, ...b], ["001_init.sql"]);
+    const { rows } = await fresh.query<{ n: string }>(
+      "select count(*)::text as n from schema_migrations",
+    );
+    assert.equal(rows[0].n, "1");
+  } finally {
+    await fresh.close();
+  }
 });
 
 test("concurrent withTx calls serialize on the single PGlite connection", async () => {

@@ -1,4 +1,4 @@
-import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from "pg";
+import { Pool, type PoolClient, type PoolConfig, type QueryResult, type QueryResultRow } from "pg";
 
 /**
  * The one query surface every repository uses. Both the production `pg` pool
@@ -63,8 +63,12 @@ function toResult<R>(result: { rows: unknown[]; rowCount: number | null }): {
 function wrapClient(client: Pool | PoolClient): Queryable {
   return {
     async query<R = Record<string, unknown>>(text: string, params?: unknown[]) {
-      const result = await client.query<QueryResultRow>(text, params);
-      return toResult<R>(result);
+      const result: QueryResult<QueryResultRow> | QueryResult<QueryResultRow>[] =
+        await client.query<QueryResultRow>(text, params);
+      // Multi-statement text (no params) resolves to one result per statement;
+      // callers get the last one, as with PGlite's exec.
+      const last = Array.isArray(result) ? result[result.length - 1] : result;
+      return toResult<R>(last ?? { rows: [], rowCount: 0 });
     },
   };
 }
