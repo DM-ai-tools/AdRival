@@ -14,7 +14,7 @@ export const runtime = "nodejs";
 export async function GET(request: Request) {
   try {
     const admin = await requireAdmin();
-    const allowed = scopedUserIds(adminScope(admin));
+    const allowed = await scopedUserIds(adminScope(admin));
     const p = new URL(request.url).searchParams;
     const limit = Math.min(Math.max(Number(p.get("limit")) || 300, 1), 2000);
 

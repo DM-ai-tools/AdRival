@@ -1,5 +1,6 @@
 import { countActiveAdmins, createUser, listUsers, updateUser } from "@/lib/db";
 import { recordAudit } from "@/lib/accounting/records";
+import type { Queryable } from "@/lib/data/client";
 import { hashPassword } from "./password";
 import { normalizeUsername } from "./validation";
 
@@ -50,6 +51,29 @@ export function generateTemporaryPassword(): string {
     .slice(0, 20);
 }
 
+const ADMIN_EXISTS_MESSAGE =
+  "An administrator already exists. Bootstrap is disabled; remove ADMIN_BOOTSTRAP_TOKEN.";
+
+/** Thrown by the guards below when another request made an admin first. */
+class AdminAlreadyExistsError extends Error {
+  constructor() {
+    super(ADMIN_EXISTS_MESSAGE);
+    this.name = "AdminAlreadyExistsError";
+  }
+}
+
+/**
+ * Runs inside the create/promote transaction under the users lock, so of two
+ * bootstrap requests racing past the early check only the first writes.
+ */
+async function assertNoActiveAdmin(tx: Queryable): Promise<void> {
+  if ((await countActiveAdmins(tx)) > 0) throw new AdminAlreadyExistsError();
+}
+
+function adminExists(): BootstrapResult {
+  return { ok: false, action: "noop", message: ADMIN_EXISTS_MESSAGE };
+}
+
 export async function bootstrapFirstAdmin(
   providedToken: string,
 ): Promise<BootstrapResult> {
@@ -67,30 +91,33 @@ export async function bootstrapFirstAdmin(
   if (!constantTimeEquals(providedToken, expected)) {
     return { ok: false, action: "noop", message: "Invalid bootstrap token." };
   }
-  if (countActiveAdmins() > 0) {
-    return {
-      ok: false,
-      action: "noop",
-      message:
-        "An administrator already exists. Bootstrap is disabled; remove ADMIN_BOOTSTRAP_TOKEN.",
-    };
-  }
+  // Early answer; the guards below re-check atomically with the write.
+  if ((await countActiveAdmins()) > 0) return adminExists();
 
   const username = normalizeUsername(targetUsername);
-  const existing = listUsers({ includeDeleted: true }).find(
+  const existing = (await listUsers({ includeDeleted: true })).find(
     (u) => u.username === username,
   );
 
   if (existing) {
-    updateUser(existing.id, {
-      role: "admin",
-      status: "active",
-      deletedAt: null,
-      suspendedAt: null,
-      // Force a fresh login so the promoted role is reflected in the session.
-      bumpSessionEpoch: true,
-    });
-    recordAudit({
+    try {
+      await updateUser(
+        existing.id,
+        {
+          role: "admin",
+          status: "active",
+          deletedAt: null,
+          suspendedAt: null,
+          // Force a fresh login so the promoted role is reflected in the session.
+          bumpSessionEpoch: true,
+        },
+        { guard: (_prev, tx) => assertNoActiveAdmin(tx) },
+      );
+    } catch (err) {
+      if (err instanceof AdminAlreadyExistsError) return adminExists();
+      throw err;
+    }
+    await recordAudit({
       actorUserId: null,
       actorUsername: "bootstrap",
       action: "admin.bootstrap.promote",
@@ -105,15 +132,26 @@ export async function bootstrapFirstAdmin(
   }
 
   const temporaryPassword = generateTemporaryPassword();
-  const user = createUser({
-    username,
-    displayName: targetUsername,
-    passwordHash: await hashPassword(temporaryPassword),
-    role: "admin",
-    status: "active",
-    mustChangePassword: true,
-  });
-  recordAudit({
+  // Hash before the transaction: it is slow and must not run under the users lock.
+  const passwordHash = await hashPassword(temporaryPassword);
+  let user;
+  try {
+    user = await createUser(
+      {
+        username,
+        displayName: targetUsername,
+        passwordHash,
+        role: "admin",
+        status: "active",
+        mustChangePassword: true,
+      },
+      { guard: assertNoActiveAdmin },
+    );
+  } catch (err) {
+    if (err instanceof AdminAlreadyExistsError) return adminExists();
+    throw err;
+  }
+  await recordAudit({
     actorUserId: null,
     actorUsername: "bootstrap",
     action: "admin.bootstrap.create",

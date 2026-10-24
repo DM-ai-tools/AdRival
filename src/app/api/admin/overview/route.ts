@@ -5,8 +5,8 @@ import {
   currentPeriodTotals,
   listPendingReconciliation,
   queryProviderCalls,
-  usageByDate,
-  usageByProvider,
+  summarizeUsageByDate,
+  summarizeUsageByProvider,
 } from "@/lib/accounting/service";
 import { queryAudit } from "@/lib/accounting/records";
 import { getProviderBalances } from "@/lib/accounting/providerBalances";
@@ -33,7 +33,7 @@ export async function GET(request: Request) {
     const admin = await requireAdmin();
     const url = new URL(request.url);
     // null = platform admin (everything); otherwise one organisation's users.
-    const scoped = scopedUserIds(adminScope(admin));
+    const scoped = await scopedUserIds(adminScope(admin));
 
     if (url.searchParams.get("part") === "balances") {
       // Vendor account balances belong to the platform, not to a client organisation.
@@ -52,19 +52,20 @@ export async function GET(request: Request) {
     const days = daysParam === "all" ? null : Math.max(1, Math.min(Number(daysParam) || 30, 3650));
     const from = days ? new Date(Date.now() - days * 86_400_000).toISOString() : undefined;
 
-    const [users, credits, failed, timedOut, byProvider, byDate, pending, audit, calls] = await Promise.all([
+    const [users, credits, failed, timedOut, pending, audit, calls] = await Promise.all([
       countUsers(scoped),
       currentPeriodTotals(scoped),
       // Search every call by status, not just the newest few.
       queryProviderCalls({ status: "failed", from, limit: 25, chargedUserIds: scoped }),
       queryProviderCalls({ status: "timeout", from, limit: 25, chargedUserIds: scoped }),
-      usageByProvider({ from, chargedUserIds: scoped }),
-      usageByDate({ from, chargedUserIds: scoped }),
       // Billing checks against vendor dashboards are a platform task.
       scoped ? Promise.resolve([]) : listPendingReconciliation(),
       queryAudit({ limit: 25, excludeActions: ROUTINE_AUDIT_ACTIONS, userIds: scoped }),
+      // Every call in range, loaded once for the provider/date breakdowns and tracked spend.
       queryProviderCalls({ from, limit: Number.MAX_SAFE_INTEGER, chargedUserIds: scoped }),
     ]);
+    const byProvider = summarizeUsageByProvider(calls.rows);
+    const byDate = summarizeUsageByDate(calls.rows);
 
     const recentFailures = [...failed.rows, ...timedOut.rows]
       .sort((a, b) => b.startedAt.localeCompare(a.startedAt))

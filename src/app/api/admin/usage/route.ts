@@ -64,7 +64,7 @@ export async function GET(request: Request) {
     const admin = await requireAdmin();
     const url = new URL(request.url);
     // Organisation admins only ever see their organisation's usage.
-    const query: UsageQuery = { ...parseQuery(url), chargedUserIds: scopedUserIds(adminScope(admin)) };
+    const query: UsageQuery = { ...parseQuery(url), chargedUserIds: await scopedUserIds(adminScope(admin)) };
     const wantsCsv = url.searchParams.get("format") === "csv";
 
     if (wantsCsv) {

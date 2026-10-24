@@ -2,9 +2,12 @@ import { maskClientFacingText } from "@/lib/clientFacing";
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import {
+  countActiveAdmins,
+  countActiveOrgAdmins,
   getProject,
   getProjectSpace,
   getUserById,
+  getUsersByIds,
   listProjects,
   listProjectSpaces,
   listSpaceMemberships,
@@ -12,6 +15,7 @@ import {
   toPublicUser,
   type ProjectOwnership,
 } from "@/lib/db";
+import type { Queryable } from "@/lib/data/client";
 import { getMembership, listMemberships, recordAudit } from "@/lib/accounting/records";
 import { parseSessionToken, SESSION_COOKIE } from "@/lib/auth/session";
 import type {
@@ -33,7 +37,7 @@ export async function getSessionUser(): Promise<AppUser | null> {
   const jar = await cookies();
   const session = await parseSessionToken(jar.get(SESSION_COOKIE)?.value);
   if (!session) return null;
-  const user = getUserById(session.sub);
+  const user = await getUserById(session.sub);
   if (!user) return null;
   if (user.status !== "active") return null;
   if (user.sessionEpoch !== session.epoch) return null;
@@ -128,14 +132,14 @@ export function userInScope(scope: AdminScope, target: { orgId?: string | null }
 }
 
 /** Runs and spaces belong to their owner's organisation; unowned rows are platform-only. */
-export function ownerInScope(scope: AdminScope, ownerUserId: string | null | undefined): boolean {
+export async function ownerInScope(scope: AdminScope, ownerUserId: string | null | undefined): Promise<boolean> {
   if (scope.kind === "platform") return true;
   if (!ownerUserId) return false;
-  return userInScope(scope, getUserById(ownerUserId));
+  return userInScope(scope, await getUserById(ownerUserId));
 }
 
 /** User ids an admin may see, or null for all of them. */
-export function scopedUserIds(scope: AdminScope): Set<string> | null {
+export async function scopedUserIds(scope: AdminScope): Promise<Set<string> | null> {
   return scope.kind === "platform" ? null : orgUserIds(scope.orgId);
 }
 
@@ -144,6 +148,41 @@ export function assertUserInScope(admin: AppUser, target: AppUser | null | undef
   if (!target || !userInScope(adminScope(admin), target)) {
     throw new HttpError(404, "User not found", "not_found");
   }
+}
+
+/**
+ * The "last active admin" rule for demotion, suspension, deletion and moving
+ * an admin out of their organisation. Run it as `updateUser`'s guard (see
+ * `lastActiveAdminGuard`): `user` is the row updateUser has locked and `tx`
+ * its transaction, so the counts and the write cannot interleave with another
+ * admin change (all of them hold the users lock).
+ *
+ * An organisation keeps at least one admin of its own when one of its own
+ * admins acts; platform admins may override that.
+ */
+export async function assertNotLastActiveAdmin(user: AppUser, actor: AppUser, tx: Queryable): Promise<void> {
+  if (user.role !== "admin" || user.status !== "active") return;
+  if ((await countActiveAdmins(tx)) <= 1) {
+    throw new HttpError(
+      409,
+      "This is the last active administrator. Promote another admin first.",
+      "last_admin",
+    );
+  }
+  if (user.orgId && actor.orgId) {
+    if ((await countActiveOrgAdmins(user.orgId, tx)) <= 1) {
+      throw new HttpError(
+        409,
+        "This is the organisation's last active administrator. Promote another admin first.",
+        "last_org_admin",
+      );
+    }
+  }
+}
+
+/** `assertNotLastActiveAdmin` shaped as an `updateUser` guard for `actor`. */
+export function lastActiveAdminGuard(actor: AppUser): (prev: AppUser, tx: Queryable) => Promise<void> {
+  return (prev, tx) => assertNotLastActiveAdmin(prev, actor, tx);
 }
 
 /* ─────────────────────────── Project authorization ──────────────────────── */
@@ -161,32 +200,32 @@ const ACTIONS_BY_ROLE: Record<ProjectRole, ProjectAction[]> = {
   viewer: ["view"],
 };
 
-function spaceRoleFor(
+async function spaceRoleFor(
   spaceId: string | null | undefined,
   user: AppUser,
-): ProjectRole | null {
+): Promise<ProjectRole | null> {
   if (!spaceId) return null;
-  const space = getProjectSpace(spaceId);
+  const space = await getProjectSpace(spaceId);
   if (!space || space.archivedAt) return null;
   if (space.ownerUserId === user.id) return "owner";
-  const membership = listSpaceMemberships(spaceId).find((m) => m.userId === user.id);
+  const membership = (await listSpaceMemberships(spaceId)).find((m) => m.userId === user.id);
   return membership?.role ?? null;
 }
 
 /** Authorize a run or edit inside a client space. */
-export function resolveSpaceAccess(
+export async function resolveSpaceAccess(
   spaceId: string,
   user: AppUser,
   action: ProjectAction,
-): { spaceId: string; role: ProjectRole; clientName: string } {
-  const space = getProjectSpace(spaceId);
+): Promise<{ spaceId: string; role: ProjectRole; clientName: string }> {
+  const space = await getProjectSpace(spaceId);
   if (!space || space.archivedAt) {
     throw new HttpError(404, "Not found", "not_found");
   }
-  if (user.role === "admin" && ownerInScope(adminScope(user), space.ownerUserId)) {
+  if (user.role === "admin" && (await ownerInScope(adminScope(user), space.ownerUserId))) {
     return { spaceId, role: "owner", clientName: space.clientName };
   }
-  const role = spaceRoleFor(spaceId, user);
+  const role = await spaceRoleFor(spaceId, user);
   if (!role || !ACTIONS_BY_ROLE[role].includes(action)) {
     throw new HttpError(
       role ? 403 : 404,
@@ -199,22 +238,25 @@ export function resolveSpaceAccess(
   return { spaceId, role, clientName: space.clientName };
 }
 
-function jobsInVisibleSpaces(user: AppUser): VisibleProject[] {
+async function jobsInVisibleSpaces(user: AppUser): Promise<VisibleProject[]> {
   const spaces = [
-    ...listProjectSpaces({ ownerUserId: user.id }).map((space) => ({
+    ...(await listProjectSpaces({ ownerUserId: user.id })).map((space) => ({
       id: space.id,
       role: "owner" as const,
     })),
-    ...listSpaceMemberships()
+    ...(await listSpaceMemberships())
       .filter((m) => m.userId === user.id)
       .map((m) => ({ id: m.spaceId, role: m.role })),
   ];
   const bySpace = new Map(spaces.map((s) => [s.id, s.role]));
-  return listProjects()
-    .filter((project) => project.spaceId && bySpace.has(project.spaceId) && !project.archivedAt)
+  const projects = (await listProjects()).filter(
+    (project) => project.spaceId && bySpace.has(project.spaceId) && !project.archivedAt,
+  );
+  const owners = await getUsersByIds(projects.map((p) => p.ownerUserId));
+  return projects
     .map((project) => {
       const role = bySpace.get(project.spaceId!) ?? "viewer";
-      const owner = project.ownerUserId ? getUserById(project.ownerUserId) : null;
+      const owner = project.ownerUserId ? owners.get(project.ownerUserId) ?? null : null;
       return {
         ...project,
         accessRole: role,
@@ -230,13 +272,13 @@ function jobsInVisibleSpaces(user: AppUser): VisibleProject[] {
  * Unowned legacy rows are reachable only by admins, so a user who guesses a
  * project id from before the migration still gets a 404.
  */
-export function resolveProjectAccess(
+export async function resolveProjectAccess(
   kind: ProjectKind,
   projectId: string,
   user: AppUser,
   action: ProjectAction,
-): ProjectAccess {
-  const project = getProject(kind, projectId);
+): Promise<ProjectAccess> {
+  const project = await getProject(kind, projectId);
   // 404 rather than 403 so ids cannot be probed for existence.
   if (!project) throw new HttpError(404, "Not found", "not_found");
 
@@ -244,8 +286,8 @@ export function resolveProjectAccess(
     return { project, role: "owner", isAdminOverride: false };
   }
 
-  if (user.role === "admin" && ownerInScope(adminScope(user), project.ownerUserId)) {
-    recordAudit({
+  if (user.role === "admin" && (await ownerInScope(adminScope(user), project.ownerUserId))) {
+    await recordAudit({
       actorUserId: user.id,
       actorUsername: user.username,
       action: `admin.project.${action}`,
@@ -260,7 +302,7 @@ export function resolveProjectAccess(
   if (!project.ownerUserId) {
     // Legacy row awaiting owner assignment — invisible to non-admins,
     // unless it was later placed in a client space they can access.
-    const viaSpace = spaceRoleFor(project.spaceId, user);
+    const viaSpace = await spaceRoleFor(project.spaceId, user);
     if (!viaSpace) throw new HttpError(404, "Not found", "not_found");
     if (!ACTIONS_BY_ROLE[viaSpace].includes(action)) {
       throw new HttpError(
@@ -274,7 +316,7 @@ export function resolveProjectAccess(
     return { project, role: viaSpace, isAdminOverride: false };
   }
 
-  const viaSpace = spaceRoleFor(project.spaceId, user);
+  const viaSpace = await spaceRoleFor(project.spaceId, user);
   if (viaSpace) {
     if (!ACTIONS_BY_ROLE[viaSpace].includes(action)) {
       throw new HttpError(
@@ -288,7 +330,7 @@ export function resolveProjectAccess(
     return { project, role: viaSpace, isAdminOverride: false };
   }
 
-  const membership = getMembership(kind, projectId, user.id);
+  const membership = await getMembership(kind, projectId, user.id);
   if (!membership) throw new HttpError(404, "Not found", "not_found");
 
   if (!ACTIONS_BY_ROLE[membership.role].includes(action)) {
@@ -314,12 +356,23 @@ export interface VisibleProject extends ProjectOwnership {
  * ones explicitly shared with them. Admins are not special-cased here — their
  * cross-user view lives in the admin area so their own lists stay clean.
  */
-export function listVisibleProjects(user: AppUser): VisibleProject[] {
+export async function listVisibleProjects(user: AppUser): Promise<VisibleProject[]> {
+  const ownedProjects = await listProjects({ ownerUserId: user.id });
+  const sharedProjects = await Promise.all(
+    (await listMemberships({ userId: user.id })).map(async (membership) => ({
+      membership,
+      project: await getProject(membership.projectKind, membership.projectId),
+    })),
+  );
+  const owners = await getUsersByIds([
+    ...ownedProjects.map((p) => p.ownerUserId),
+    ...sharedProjects.map((s) => s.project?.ownerUserId),
+  ]);
   const decorate = (
     project: ProjectOwnership,
     accessRole: ProjectRole,
   ): VisibleProject => {
-    const owner = project.ownerUserId ? getUserById(project.ownerUserId) : null;
+    const owner = project.ownerUserId ? owners.get(project.ownerUserId) ?? null : null;
     return {
       ...project,
       accessRole,
@@ -328,18 +381,13 @@ export function listVisibleProjects(user: AppUser): VisibleProject[] {
     };
   };
 
-  const owned = listProjects({ ownerUserId: user.id }).map((p) =>
-    decorate(p, "owner"),
-  );
-  const shared = listMemberships({ userId: user.id })
-    .map((membership) => {
-      const project = getProject(membership.projectKind, membership.projectId);
-      return project ? decorate(project, membership.role) : null;
-    })
+  const owned = ownedProjects.map((p) => decorate(p, "owner"));
+  const shared = sharedProjects
+    .map(({ membership, project }) => (project ? decorate(project, membership.role) : null))
     .filter((p): p is VisibleProject => p !== null);
 
   const seen = new Set(owned.map((p) => `${p.kind}:${p.id}`));
-  const fromSpaces = jobsInVisibleSpaces(user)
+  const fromSpaces = (await jobsInVisibleSpaces(user))
     .filter((p) => !seen.has(`${p.kind}:${p.id}`))
     .map((p) => p);
   return [
@@ -352,14 +400,14 @@ export function listVisibleProjects(user: AppUser): VisibleProject[] {
 }
 
 /** Ids the user may read, as a `kind:id` set for cheap filtering. */
-export function visibleProjectKeys(user: AppUser): Set<string> {
-  return new Set(listVisibleProjects(user).map((p) => `${p.kind}:${p.id}`));
+export async function visibleProjectKeys(user: AppUser): Promise<Set<string>> {
+  return new Set((await listVisibleProjects(user)).map((p) => `${p.kind}:${p.id}`));
 }
 
 /** Search run ids the user may read — for filtering competitor-level rows. */
-export function visibleRunIds(user: AppUser, kind: ProjectKind): Set<string> {
+export async function visibleRunIds(user: AppUser, kind: ProjectKind): Promise<Set<string>> {
   return new Set(
-    listVisibleProjects(user)
+    (await listVisibleProjects(user))
       .filter((p) => p.kind === kind)
       .map((p) => p.id),
   );

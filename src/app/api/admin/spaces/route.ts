@@ -42,7 +42,7 @@ export async function GET() {
   try {
     const admin = await requireAdmin();
     const scope = adminScope(admin);
-    const allowed = scopedUserIds(scope);
+    const allowed = await scopedUserIds(scope);
     const inScope = ownerCheck(allowed);
     const users = (await listUsers()).filter((u) => u.status === "active" && userInScope(scope, u));
     const memberships = await listSpaceMemberships();
@@ -136,7 +136,7 @@ export async function POST(request: Request) {
   try {
     const admin = await requireAdmin();
     const scope = adminScope(admin);
-    const inScope = ownerCheck(scopedUserIds(scope));
+    const inScope = ownerCheck(await scopedUserIds(scope));
     let body: {
       action?: string;
       clientName?: string;

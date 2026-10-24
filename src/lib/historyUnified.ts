@@ -21,8 +21,9 @@ export type UnifiedHistoryItem = {
   clientName?: string | null;
 };
 
-export function listUnifiedHistory(limit = 150): UnifiedHistoryItem[] {
-  const searches = listHistoryRuns(limit).map((run: HistoryRunSummary) => {
+export async function listUnifiedHistory(limit = 150): Promise<UnifiedHistoryItem[]> {
+  const [searchRuns, lookupRuns] = await Promise.all([listHistoryRuns(limit), listLookupHistory(limit)]);
+  const searches = searchRuns.map((run: HistoryRunSummary) => {
     const platform = (run.platform || "facebook") as string;
     return {
       id: run.id,
@@ -55,7 +56,7 @@ export function listUnifiedHistory(limit = 150): UnifiedHistoryItem[] {
     };
   });
 
-  const lookups = listLookupHistory(limit).map((run: LookupHistorySummary) => {
+  const lookups = lookupRuns.map((run: LookupHistorySummary) => {
     const platform = (run.platform || "facebook") as string;
     return {
       id: run.id,
