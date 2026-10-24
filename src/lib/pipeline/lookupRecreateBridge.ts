@@ -7,7 +7,7 @@ import {
   listAllCompetitors,
   saveCompetitor,
   saveJob,
-  updateCompetitor,
+  updateCompetitorWith,
   updateJob,
   updateLookupAd,
   updateLookupJob,
@@ -15,6 +15,7 @@ import {
 import type {
   CompetitorRecord,
   LookupAdRecord,
+  LookupJob,
   RecreatedLandingPage,
   SearchJob,
 } from "../types";
@@ -52,7 +53,7 @@ function resolveAdLandingUrl(ad: LookupAdRecord): string | null {
 }
 
 /** Find prior recreations for the same landing-page destination. */
-export function findExistingRecreationsForUrl(
+export async function findExistingRecreationsForUrl(
   url: string | null | undefined,
   options?: {
     excludeCompetitorId?: string | null;
@@ -63,7 +64,7 @@ export function findExistingRecreationsForUrl(
      */
     visibleRunIds?: Iterable<string> | null;
   },
-): ExistingRecreationHit[] {
+): Promise<ExistingRecreationHit[]> {
   const key = landingPageMatchKey(url);
   if (!key) return [];
 
@@ -73,7 +74,7 @@ export function findExistingRecreationsForUrl(
     ? new Set(options.visibleRunIds)
     : null;
 
-  for (const c of listAllCompetitors(5000)) {
+  for (const c of await listAllCompetitors(5000)) {
     if (exclude && c.id === exclude) continue;
     if (visible && !visible.has(c.runId)) continue;
     const page = c.recreatedPage;
@@ -112,13 +113,13 @@ export function findExistingRecreationsForUrl(
  * Materialize a SearchJob + CompetitorRecord for a lookup ad so the shared
  * /recreate/[competitorId] pipeline can run unchanged.
  */
-export function ensureLookupRecreationCompetitor(adId: string): {
+export async function ensureLookupRecreationCompetitor(adId: string): Promise<{
   competitorId: string;
   competitor: CompetitorRecord;
   existingSameUrl: ExistingRecreationHit[];
   created: boolean;
-} {
-  const ad = getLookupAd(adId);
+}> {
+  const ad = await getLookupAd(adId);
   if (!ad) throw new Error("Lookup ad not found");
 
   if (ad.pageAnalysis?.status !== "completed") {
@@ -127,7 +128,7 @@ export function ensureLookupRecreationCompetitor(adId: string): {
     );
   }
 
-  const lookup = getLookupJob(ad.lookupId);
+  const lookup = await getLookupJob(ad.lookupId);
   if (!lookup) throw new Error("Lookup job not found");
 
   const businessUrl = (
@@ -153,7 +154,7 @@ export function ensureLookupRecreationCompetitor(adId: string): {
   const competitorId =
     ad.recreationCompetitorId || recreationCompetitorId(ad.id);
 
-  let job = getJob(runId);
+  let job = await getJob(runId);
   const now = new Date().toISOString();
   if (!job) {
     const newJob: SearchJob = {
@@ -181,18 +182,18 @@ export function ensureLookupRecreationCompetitor(adId: string): {
       createdAt: now,
       updatedAt: now,
     };
-    saveJob(newJob);
+    await saveJob(newJob);
     job = newJob;
   } else {
-    updateJob(runId, {
+    await updateJob(runId, {
       businessUrl: normalizedBusiness,
       businessProfile: lookup.businessProfile || job.businessProfile || null,
       keyword: job.keyword || lookup.queryName,
     });
-    job = getJob(runId)!;
+    job = (await getJob(runId))!;
   }
 
-  let competitor = getCompetitor(competitorId);
+  let competitor = await getCompetitor(competitorId);
   let created = false;
   if (!competitor) {
     competitor = {
@@ -228,29 +229,29 @@ export function ensureLookupRecreationCompetitor(adId: string): {
       recreatedPage: null,
       createdAt: now,
     };
-    const ok = saveCompetitor(competitor);
+    const ok = await saveCompetitor(competitor);
     if (!ok) throw new Error("Failed to create recreation competitor bridge");
     created = true;
   } else {
-    // Keep analysis / landing URL in sync with the lookup ad
-    updateCompetitor(competitorId, {
+    // Keep analysis / landing URL in sync with the lookup ad (built from the record as stored at the write).
+    await updateCompetitorWith(competitorId, (stored) => ({
       pageAnalysis: ad.pageAnalysis,
-      pageName: ad.pageName || competitor.pageName,
+      pageName: ad.pageName || stored.pageName,
       sampleAd: {
-        ...competitor.sampleAd,
+        ...stored.sampleAd,
         landingPageUrl: ad.landingPageUrl || sourceUrl,
-        title: ad.title || competitor.sampleAd.title,
-        body: ad.body || competitor.sampleAd.body,
+        title: ad.title || stored.sampleAd.title,
+        body: ad.body || stored.sampleAd.body,
       },
-    });
-    competitor = getCompetitor(competitorId)!;
+    }));
+    competitor = (await getCompetitor(competitorId))!;
   }
 
   if (ad.recreationCompetitorId !== competitorId) {
-    updateLookupAd(ad.id, { recreationCompetitorId: competitorId });
+    await updateLookupAd(ad.id, { recreationCompetitorId: competitorId });
   }
 
-  const existingSameUrl = findExistingRecreationsForUrl(sourceUrl, {
+  const existingSameUrl = await findExistingRecreationsForUrl(sourceUrl, {
     excludeCompetitorId: competitorId,
   });
 
@@ -281,22 +282,22 @@ export function ensureLookupRecreationCompetitor(adId: string): {
 }
 
 /** Attach / refresh brand profile on a lookup job (and its recreation bridge job). */
-export function setLookupBusinessBrand(
+export async function setLookupBusinessBrand(
   lookupId: string,
   input: {
     businessUrl: string;
     businessProfile?: SearchJob["businessProfile"];
   },
-): ReturnType<typeof getLookupJob> {
+): Promise<LookupJob | null> {
   const url = input.businessUrl.trim();
   const normalized = /^https?:\/\//i.test(url) ? url : `https://${url}`;
-  const updated = updateLookupJob(lookupId, {
+  const updated = await updateLookupJob(lookupId, {
     businessUrl: normalized,
     businessProfile: input.businessProfile || null,
   });
   const runId = recreationRunId(lookupId);
-  if (getJob(runId)) {
-    updateJob(runId, {
+  if (await getJob(runId)) {
+    await updateJob(runId, {
       businessUrl: normalized,
       businessProfile: input.businessProfile || null,
     });
@@ -304,13 +305,13 @@ export function setLookupBusinessBrand(
   return updated;
 }
 
-export function getLookupAdsSharingLandingUrl(
+export async function getLookupAdsSharingLandingUrl(
   lookupId: string,
   url: string | null | undefined,
-): LookupAdRecord[] {
+): Promise<LookupAdRecord[]> {
   const key = landingPageMatchKey(url);
   if (!key) return [];
-  return getLookupAds(lookupId).filter((ad) => {
+  return (await getLookupAds(lookupId)).filter((ad) => {
     const u =
       ad.pageAnalysis?.analyzedUrl ||
       ad.landingPageUrl ||

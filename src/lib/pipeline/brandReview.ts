@@ -295,9 +295,9 @@ async function searchSocialHrefs(
   website: string | null,
   current: SociavaultSocialParams,
   lookup: Lookup,
-  shouldAbort?: () => boolean,
+  shouldAbort?: AbortCheck,
 ): Promise<string[]> {
-  if (shouldAbort?.()) return [];
+  if (await shouldAbort?.()) return [];
   const hrefs: string[] = [];
   let slug: string | null = null;
   try {
@@ -327,7 +327,7 @@ async function searchSocialHrefs(
   if (firecrawlDown && queries.length) lookup.issues.add("Firecrawl is not configured");
   let sociavaultDown = false;
   for (const { platform, q } of queries) {
-    if (shouldAbort?.()) break;
+    if (await shouldAbort?.()) break;
     // A platform already found by an earlier query needs no second one.
     if (paramsHave(socialLinksToSociavaultParams(hrefs), platform)) {
       lookup.searched.add(platform);
@@ -369,10 +369,13 @@ async function searchSocialHrefs(
   return hrefs;
 }
 
+/** Returns true to stop a long scrape (e.g. the user hit Stop); may check the database. */
+export type AbortCheck = () => boolean | Promise<boolean>;
+
 export async function collectSocialHrefsFromWebsite(
   website: string,
   lookup: Lookup,
-  shouldAbort?: () => boolean,
+  shouldAbort?: AbortCheck,
 ): Promise<{ hrefs: string[]; markdown: string | null; canonicalWebsite: string | null }> {
   const hrefs: string[] = [];
   let markdown: string | null = null;
@@ -397,7 +400,7 @@ export async function collectSocialHrefsFromWebsite(
   let readWithoutNew = 0;
   const candidates = scrapeUrlCandidates(website);
   for (const [index, url] of candidates.entries()) {
-    if (shouldAbort?.()) break;
+    if (await shouldAbort?.()) break;
     const before = found();
     let read = false;
 
@@ -457,7 +460,7 @@ export async function collectSocialHrefsFromWebsite(
   if (!landingRead && homePage) canonicalWebsite = homePage;
 
   // A site that builds its links with JavaScript: render it once in a browser.
-  if (!found() && !shouldAbort?.()) {
+  if (!found() && !(await shouldAbort?.())) {
     hrefs.push(...(await renderedSocialLinks(homePage || canonicalWebsite || website)));
   }
 
@@ -663,9 +666,9 @@ export async function runBrandReview(input: {
   /** The ad's YouTube channel (YouTube ads). */
   adYoutubeUrl?: string | null;
   /** Return true to bail out of long scrapes (e.g. user hit Stop). */
-  shouldAbort?: () => boolean;
+  shouldAbort?: AbortCheck;
 }): Promise<BrandReview> {
-  const abort = () => Boolean(input.shouldAbort?.());
+  const abort = async () => Boolean(await input.shouldAbort?.());
   const brand: BrandReview = {
     website: normalizeWebsiteUrl(input.websiteHint) || null,
     category: input.categoryHint || null,
@@ -690,7 +693,7 @@ export async function runBrandReview(input: {
 
   // 2. Links on the brand's own website (Firecrawl, then a direct read of the page).
   let siteMarkdown: string | null = null;
-  if (brand.website && !abort()) {
+  if (brand.website && !(await abort())) {
     const collected = await collectSocialHrefsFromWebsite(brand.website, lookup, abort);
     siteMarkdown = collected.markdown;
     if (collected.canonicalWebsite) brand.website = collected.canonicalWebsite;
@@ -712,7 +715,7 @@ export async function runBrandReview(input: {
     ),
   );
 
-  if (abort()) {
+  if (await abort()) {
     brand.website = normalizeWebsiteUrl(brand.website) || null;
     return brand;
   }
@@ -734,7 +737,7 @@ export async function runBrandReview(input: {
       .sort((a, b) => RANK[a.source] - RANK[b.source])
       .slice(0, 4);
     for (const c of list) {
-      if (abort()) return;
+      if (await abort()) return;
       tried.add(`${platform}|${c.value.toLowerCase()}`);
       let profile: FetchedProfile;
       try {
@@ -767,14 +770,14 @@ export async function runBrandReview(input: {
   await resolveAll();
 
   // 4. Links on the brand's own profiles (a Facebook page listing its Instagram).
-  if (!abort() && profileLinks.length) {
+  if (!(await abort()) && profileLinks.length) {
     addCandidates(candidatesFromLinks(profileLinks, "profile"));
     await resolveAll();
   }
 
   // 5. Web search for the platforms still missing.
   const missing = () => PLATFORMS.filter((p) => !resolved.has(p));
-  if (!abort() && missing().length && input.pageName) {
+  if (!(await abort()) && missing().length && input.pageName) {
     const known: SociavaultSocialParams = {};
     for (const p of PLATFORMS) if (resolved.has(p)) (known as Record<string, unknown>)[p] = { url: "known", handle: "known" };
     const found = await searchSocialHrefs(input.pageName, brand.website ?? null, known, lookup, abort);
@@ -783,7 +786,7 @@ export async function runBrandReview(input: {
   }
 
   // 6. LinkedIn from the domain name, if it proves to be this company.
-  if (!abort() && !resolved.has("linkedin")) {
+  if (!(await abort()) && !resolved.has("linkedin")) {
     const guessed = guessLinkedInFromWebsite(brand.website);
     if (guessed) {
       addCandidates([{ platform: "linkedin", value: guessed, source: "guess" }]);
@@ -817,7 +820,7 @@ export async function runBrandReview(input: {
   brand.uncheckedPlatforms = unchecked.length ? unchecked : null;
   brand.lookupIssues = lookup.issues.size ? [...lookup.issues] : null;
 
-  if (!abort()) {
+  if (!(await abort())) {
     const revenue = await estimateCompanyRevenue({
       pageName: input.pageName,
       website: brand.website ?? null,
@@ -887,12 +890,12 @@ async function runBrandReviewBatch(
   options?: { force?: boolean },
 ): Promise<{ updated: number; skipped: number; stopped?: boolean }> {
   // Fresh run — clear any prior Stop so this batch can execute.
-  clearSearchJobSuppression(jobId);
+  await clearSearchJobSuppression(jobId);
 
-  const job = getJob(jobId);
+  const job = await getJob(jobId);
   if (!job) return { updated: 0, skipped: 0 };
 
-  const competitors = getCompetitorsByRun(jobId);
+  const competitors = await getCompetitorsByRun(jobId);
   let updated = 0;
   let skipped = 0;
   let stopped = false;
@@ -908,7 +911,7 @@ async function runBrandReviewBatch(
   job.progress.stopRequested = false;
   job.progress.message = `Brand review starting for ${total} competitors…`;
   job.updatedAt = new Date().toISOString();
-  if (!saveJob(job)) return { updated: 0, skipped: 0 };
+  if (!(await saveJob(job))) return { updated: 0, skipped: 0 };
 
   // Competitors are independent (each review writes only its own record), so
   // a few run at once. Progress counts finished competitors.
@@ -921,7 +924,8 @@ async function runBrandReviewBatch(
     job.progress.brandReviewCurrentName = inFlight.size ? [...inFlight].join(", ") : null;
     job.progress.message = message;
     job.updatedAt = new Date().toISOString();
-    saveJobProgress(job);
+    // Throttled progress, written in call order; failures are logged by the data layer.
+    void saveJobProgress(job);
   };
 
   const reviewOne = async (c: CompetitorRecord) => {
@@ -945,7 +949,7 @@ async function runBrandReviewBatch(
         sourcePlatform: c.platform,
         shouldAbort: () => isSearchJobSuppressed(jobId),
       });
-      if (isSearchJobSuppressed(jobId)) {
+      if (await isSearchJobSuppressed(jobId)) {
         stopped = true;
         return;
       }
@@ -955,7 +959,7 @@ async function runBrandReviewBatch(
         patch.locationSource = "sociavault";
         patch.locationStatus = c.locationStatus || "unknown";
       }
-      updateCompetitor(c.id, patch);
+      await updateCompetitor(c.id, patch);
       updated += 1;
       if (brand.uncheckedPlatforms?.length) uncheckedCount += 1;
       for (const issue of brand.lookupIssues || []) lookupIssues.add(issue);
@@ -974,14 +978,14 @@ async function runBrandReviewBatch(
 
   const worker = async () => {
     while (next < competitors.length) {
-      if (isSearchJobSuppressed(jobId)) {
+      if (await isSearchJobSuppressed(jobId)) {
         stopped = true;
         return;
       }
       const c = competitors[next];
       next += 1;
       await reviewOne(c);
-      if (stopped || isSearchJobSuppressed(jobId)) {
+      if (stopped || (await isSearchJobSuppressed(jobId))) {
         stopped = true;
         return;
       }
@@ -991,9 +995,9 @@ async function runBrandReviewBatch(
     Array.from({ length: Math.min(BRAND_REVIEW_CONCURRENCY, competitors.length) }, worker),
   );
 
-  const fresh = getJob(jobId);
+  const fresh = await getJob(jobId);
   if (fresh) {
-    if (stopped || isSearchJobSuppressed(jobId)) {
+    if (stopped || (await isSearchJobSuppressed(jobId))) {
       fresh.progress.stage = "done";
       fresh.progress.brandReviewCurrentName = null;
       fresh.progress.message = `Brand review stopped · ${updated} updated`;
@@ -1013,11 +1017,11 @@ async function runBrandReviewBatch(
               : "");
     }
     fresh.updatedAt = new Date().toISOString();
-    saveJob(fresh);
+    await saveJob(fresh);
   }
 
   // Score from the metrics just saved. This does not scrape or re-run review.
-  if (!stopped) applyBrandScoresForJob(jobId);
+  if (!stopped) await applyBrandScoresForJob(jobId);
 
   return { updated, skipped, stopped };
 }
@@ -1091,7 +1095,7 @@ async function reviewOneCompetitor(
     patch.locationLabel = brand.address;
     patch.locationSource = "sociavault";
   }
-  updateCompetitor(competitor.id, patch);
+  await updateCompetitor(competitor.id, patch);
   return brand;
 }
 
@@ -1100,9 +1104,9 @@ export function newId() {
 }
 
 /** Patch job progress while batch brand-reviewing (exported for pipelines). */
-export function markJobBrandReviewing(job: SearchJob, message: string) {
+export async function markJobBrandReviewing(job: SearchJob, message: string): Promise<void> {
   job.progress.stage = "brand_review";
   job.progress.message = message;
   job.updatedAt = new Date().toISOString();
-  saveJob(job);
+  await saveJob(job);
 }

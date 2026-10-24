@@ -1,4 +1,4 @@
-import { getCompetitorsByRun, updateCompetitor } from "../db";
+import { getCompetitorsByRun, updateCompetitorWith } from "../db";
 import type { BrandReview } from "../types";
 
 const AUDIENCE_CAP = 2_000_000;
@@ -133,18 +133,21 @@ export function withBrandScore(brand: BrandReview): BrandReview {
  * Recompute scores from follower and size metrics already stored on each competitor.
  * Does not scrape socials or call the brand-review pipeline.
  */
-export function applyBrandScoresForJob(jobId: string): { scored: number; skipped: number } {
-  const competitors = getCompetitorsByRun(jobId);
+export async function applyBrandScoresForJob(jobId: string): Promise<{ scored: number; skipped: number }> {
+  const competitors = await getCompetitorsByRun(jobId);
   let scored = 0;
   let skipped = 0;
   for (const competitor of competitors) {
-    const brand = competitor.brand;
-    if (!hasBrandSizeSignal(brand)) {
-      skipped += 1;
-      continue;
-    }
-    updateCompetitor(competitor.id, { brand: withBrandScore(brand) });
-    scored += 1;
+    // Scored from the brand as stored when written, so a review saved meanwhile is kept.
+    let scoredThis = false;
+    await updateCompetitorWith(competitor.id, (stored) => {
+      const brand = stored.brand;
+      if (!hasBrandSizeSignal(brand)) return null;
+      scoredThis = true;
+      return { brand: withBrandScore(brand) };
+    });
+    if (scoredThis) scored += 1;
+    else skipped += 1;
   }
   return { scored, skipped };
 }

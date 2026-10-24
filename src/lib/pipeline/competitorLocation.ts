@@ -628,7 +628,7 @@ export async function enrichCompetitorDeepLocation(input: {
         input.provisional?.locationStatus === "matched",
     });
     const loc = result.location;
-    updateCompetitor(input.competitorId, {
+    await updateCompetitor(input.competitorId, {
       locationLabel: loc.locationLabel,
       locationCity: loc.locationCity,
       locationSuburb: loc.locationSuburb,
@@ -667,7 +667,7 @@ export async function enrichCompetitorSociavaultAddress(input: {
       input.geoMode || "countrywide",
     );
     const { updateCompetitor } = await import("../db");
-    updateCompetitor(input.competitorId, {
+    await updateCompetitor(input.competitorId, {
       locationLabel: matched.locationLabel,
       locationCity: matched.locationCity,
       locationSuburb: matched.locationSuburb,
@@ -972,7 +972,7 @@ export async function enrichCompetitorFirecrawlLocation(input: {
     );
     // locationSource type may not include firecrawl yet — cast via update
     const { updateCompetitor } = await import("../db");
-    updateCompetitor(input.competitorId, {
+    await updateCompetitor(input.competitorId, {
       locationLabel: matched.locationLabel,
       locationCity: matched.locationCity,
       locationSuburb: matched.locationSuburb,
@@ -993,8 +993,8 @@ export async function enrichRunFirecrawlLocations(
   options?: { onlyUnknown?: boolean },
 ): Promise<{ updated: number; skipped: number; failed: number }> {
   const { getCompetitorsByRun, getJob } = await import("../db");
-  const job = getJob(runId);
-  const competitors = getCompetitorsByRun(runId);
+  const job = await getJob(runId);
+  const competitors = await getCompetitorsByRun(runId);
   let updated = 0;
   let skipped = 0;
   let failed = 0;

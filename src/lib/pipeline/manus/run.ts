@@ -3,11 +3,22 @@ import type {
   CompetitorRecord,
   ManusRecreationState,
   RecreatedLandingPage,
+  RecreatedPageHeavy,
+  RecreatedPageLight,
   RecreationProgressDetails,
   RecreationProgressStage,
   SearchJob,
 } from "../../types";
-import { getCompetitor, getIcp, getIcps, getJob, updateCompetitor } from "../../db";
+import { RECREATED_PAGE_HEAVY_KEYS } from "../../types";
+import {
+  getCompetitor,
+  getIcp,
+  getIcps,
+  getJob,
+  getRecreatedPage,
+  updateCompetitorWith,
+  type CompetitorUpdate,
+} from "../../db";
 import type { IcpRecord } from "../../types";
 import { LOOKUP_RECREATE_PREFIX } from "../lookupRecreateBridge";
 import { getBillingContext } from "../../accounting/context";
@@ -206,25 +217,90 @@ function stageForStep(title: string): StageId | null {
 
 // ── Saving ──────────────────────────────────────────────────────────────
 
-function latestPage(competitorId: string): RecreatedLandingPage {
-  const page = getCompetitor(competitorId)?.recreatedPage;
+/** The stored page (light: its html and other content via getRecreatedPage). */
+async function latestPage(competitorId: string): Promise<RecreatedPageLight> {
+  const page = (await getCompetitor(competitorId))?.recreatedPage;
   if (!page) throw new Error("Competitor not found");
   return page;
 }
 
-function savePage(competitorId: string, patch: Partial<RecreatedLandingPage>): RecreatedLandingPage {
-  const page = latestPage(competitorId);
-  const next: RecreatedLandingPage = { ...page, ...patch, updatedAt: new Date().toISOString() };
-  updateCompetitor(competitorId, { recreatedPage: next });
-  return next;
+/** A change to the page; html, previousHtml, generatedImages and sourceArchive are page content. */
+type PagePatch = Partial<RecreatedLandingPage>;
+
+/**
+ * The competitor update for `patch` on the stored page: light fields merge
+ * onto the page; content fields replace those fields of the stored content
+ * (the other content fields are kept), in the same write.
+ */
+function pageUpdate(
+  page: RecreatedPageLight,
+  patch: PagePatch,
+  content: RecreatedPageHeavy | null | undefined,
+): CompetitorUpdate {
+  const light: Record<string, unknown> = { ...patch };
+  const heavy: Record<string, unknown> = {};
+  let carriesHeavy = false;
+  for (const key of RECREATED_PAGE_HEAVY_KEYS) {
+    if (!(key in light)) continue;
+    carriesHeavy = true;
+    heavy[key] = light[key];
+    delete light[key];
+  }
+  const recreatedPage = { ...page, ...light, updatedAt: new Date().toISOString() } as RecreatedPageLight;
+  if (!carriesHeavy) return { recreatedPage };
+  if (content === undefined) throw new Error("Page content was not loaded for this change");
+  const merged = { ...(content || {}), ...heavy } as Partial<RecreatedPageHeavy>;
+  return { recreatedPage, recreatedPageHeavy: { ...merged, html: merged.html ?? null } };
 }
 
-function saveState(competitorId: string, patch: Partial<ManusRecreationState>): ManusRecreationState {
-  const page = latestPage(competitorId);
-  if (!page.manus) throw new Error("This page has no design agent task");
-  const manus = { ...page.manus, ...patch };
-  savePage(competitorId, { manus });
-  return manus;
+/**
+ * Applies a change to the stored page in one write. A function gets the page
+ * as stored at that moment (so a change built from it never overwrites one
+ * saved in between). Returns the saved page.
+ */
+function savePage(
+  competitorId: string,
+  patch: PagePatch | ((page: RecreatedPageLight) => PagePatch),
+): Promise<RecreatedPageLight> {
+  const withContent = typeof patch !== "function" && RECREATED_PAGE_HEAVY_KEYS.some((key) => key in patch);
+  return writePage(
+    competitorId,
+    (page, content) => pageUpdate(page, typeof patch === "function" ? patch(page) : patch, content),
+    withContent,
+  );
+}
+
+/** savePage for a change that reads the page content (html, previousHtml...). */
+function savePageWithContent(
+  competitorId: string,
+  patch: (page: RecreatedPageLight, content: RecreatedPageHeavy | null) => PagePatch,
+): Promise<RecreatedPageLight> {
+  return writePage(competitorId, (page, content) => pageUpdate(page, patch(page, content ?? null), content), true);
+}
+
+async function writePage(
+  competitorId: string,
+  update: (page: RecreatedPageLight, content: RecreatedPageHeavy | null | undefined) => CompetitorUpdate,
+  withContent: boolean,
+): Promise<RecreatedPageLight> {
+  const saved = await updateCompetitorWith(
+    competitorId,
+    (competitor, content) => {
+      if (!competitor.recreatedPage) throw new Error("Competitor not found");
+      return update(competitor.recreatedPage, content);
+    },
+    { withContent },
+  );
+  if (!saved?.recreatedPage) throw new Error("Competitor not found");
+  return saved.recreatedPage;
+}
+
+async function saveState(competitorId: string, patch: Partial<ManusRecreationState>): Promise<ManusRecreationState> {
+  const page = await savePage(competitorId, (stored) => {
+    if (!stored.manus) throw new Error("This page has no design agent task");
+    return { manus: { ...stored.manus, ...patch } };
+  });
+  return page.manus!;
 }
 
 type Activity = NonNullable<NonNullable<RecreationProgressDetails>["activity"]>;
@@ -318,20 +394,21 @@ function beginRun(competitorId: string): AbortSignal {
   return controller.signal;
 }
 
-function endRun(competitorId: string, signal: AbortSignal) {
+async function endRun(competitorId: string, signal: AbortSignal): Promise<void> {
   if (runs.get(competitorId)?.signal === signal) runs.delete(competitorId);
-  recordCredits(competitorId);
+  await recordCredits(competitorId);
 }
 
 /** The agent's credits for this page's task go to the ledger (charged to the run's owner after a restart). */
-function recordCredits(competitorId: string) {
-  const competitor = getCompetitor(competitorId);
+async function recordCredits(competitorId: string): Promise<void> {
+  const competitor = await getCompetitor(competitorId);
   const taskId = competitor?.recreatedPage?.manus?.taskId;
   if (!competitor || !taskId) return;
+  const job = await getJob(competitor.runId);
   recordManusTaskCreditsSoon({
     taskId,
     operation: "manus.recreate",
-    fallbackUserId: getJob(competitor.runId)?.ownerUserId ?? null,
+    fallbackUserId: job?.ownerUserId ?? null,
     projectKind: "search",
     projectId: competitor.runId,
     runId: competitor.runId,
@@ -438,17 +515,17 @@ function screenshotNote(shots: FeedbackScreenshot[]): string {
  * saved id can go missing: fall back to the current ICP for the same source and
  * stage, and throw (before any spend) when there is none.
  */
-export function resolveTargetIcp(
+export async function resolveTargetIcp(
   target: { icpId: string; stage: AwarenessStage } | null,
   runId: string,
-): { record: IcpRecord; target: { icpId: string; stage: AwarenessStage } } | null {
+): Promise<{ record: IcpRecord; target: { icpId: string; stage: AwarenessStage } } | null> {
   if (!target) return null;
-  const byId = getIcp(target.icpId);
+  const byId = await getIcp(target.icpId);
   if (byId) return { record: byId, target };
   const source = runId.startsWith(LOOKUP_RECREATE_PREFIX)
     ? { kind: "lookup" as const, id: runId.slice(LOOKUP_RECREATE_PREFIX.length) }
     : { kind: "search" as const, id: runId };
-  const current = getIcps(source.kind, source.id).find((i) => i.stage === target.stage);
+  const current = (await getIcps(source.kind, source.id)).find((i) => i.stage === target.stage);
   if (!current) {
     throw new Error("This page's audience profile was removed. Open it again from A/B testing.");
   }
@@ -469,12 +546,12 @@ export async function runManusRecreation(
   } = {},
 ): Promise<CompetitorRecord> {
   if (!hasManusKey()) throw new Error("The design agent is not set up yet: add MANUS_API_KEY to the environment.");
-  const competitor = getCompetitor(competitorId);
+  const competitor = await getCompetitor(competitorId);
   if (!competitor) throw new Error("Competitor not found");
   if (competitor.pageAnalysis?.status !== "completed") {
     throw new Error("Analyze the competitor landing page first (Get offer & page details).");
   }
-  const job = getJob(competitor.runId);
+  const job = await getJob(competitor.runId);
   if (!job) throw new Error("Search job not found for this competitor");
   const businessUrl = resolveBusinessUrl(job);
   if (!businessUrl) {
@@ -486,7 +563,7 @@ export async function runManusRecreation(
   // The reader this page is for: a new target from the request, else the one kept on the page.
   // Resolved before anything is stopped or spent: a page saved for an audience
   // profile must never fall back to a plain brief.
-  const resolved = resolveTargetIcp(
+  const resolved = await resolveTargetIcp(
     options.targetIcp ?? competitor.recreatedPage?.targetIcp ?? null,
     competitor.runId,
   );
@@ -509,6 +586,8 @@ export async function runManusRecreation(
     userAssets: assets.map((a) => ({ name: a.name, caption: a.caption })),
   };
   const existing = competitor.recreatedPage;
+  // The content as it was when this build was asked for (the light page above is from then too).
+  const existingContent = await getRecreatedPage(competitorId);
   const now = new Date().toISOString();
   const base: RecreatedLandingPage = {
     createdAt: existing?.createdAt || now,
@@ -528,9 +607,9 @@ export async function runManusRecreation(
     },
     // The last page stays visible until the new one is ready, and Undo brings it
     // back afterwards (so a built-in page can be compared with the agent's).
-    html: existing?.html || null,
-    previousHtml: existing?.html || existing?.previousHtml || null,
-    generatedImages: existing?.generatedImages || [],
+    html: existingContent?.html || null,
+    previousHtml: existingContent?.html || existingContent?.previousHtml || null,
+    generatedImages: existingContent?.generatedImages || [],
     pipelineVersion: MANUS_PIPELINE_VERSION,
     styleDirection,
     userFeedback: feedback,
@@ -542,7 +621,12 @@ export async function runManusRecreation(
     manus: null,
     progress: progress("send", "Sending the brief to the design agent…", 2),
   };
-  updateCompetitor(competitorId, { recreatedPage: base });
+  // The new page replaces the old one whole (its source archive is not carried over).
+  const { html: baseHtml, previousHtml: basePrevious, generatedImages: baseImages, ...baseLight } = base;
+  await updateCompetitorWith(competitorId, () => ({
+    recreatedPage: baseLight as RecreatedPageLight,
+    recreatedPageHeavy: { html: baseHtml ?? null, previousHtml: basePrevious, generatedImages: baseImages },
+  }));
 
   try {
     const brief = buildManusBrief(input);
@@ -580,7 +664,7 @@ export async function runManusRecreation(
     console.info(
       `[manus] task ${created.task_id} started for competitor ${competitorId}${project ? ` in project "${project.name}"` : ""}: ${created.task_url || ""}`,
     );
-    savePage(competitorId, {
+    await savePage(competitorId, {
       manus: {
         taskId: created.task_id,
         taskUrl: created.task_url || null,
@@ -598,12 +682,12 @@ export async function runManusRecreation(
       },
       progress: progress("study", "The design agent is studying the competitor page and your brand…", 6),
     });
-    saveState(competitorId, { turnStartedAt: await anchorTurn(created.task_id, taskMessage, sentAt, signal) });
+    await saveState(competitorId, { turnStartedAt: await anchorTurn(created.task_id, taskMessage, sentAt, signal) });
     return await follow(competitorId, signal);
   } catch (err) {
-    return fail(competitorId, err, signal);
+    return await fail(competitorId, err, signal);
   } finally {
-    endRun(competitorId, signal);
+    await endRun(competitorId, signal);
   }
 }
 
@@ -617,15 +701,15 @@ export async function editManusRecreation(
   request: string,
   screenshots: FeedbackScreenshot[] = [],
 ): Promise<CompetitorRecord> {
-  const competitor = getCompetitor(competitorId);
+  const competitor = await getCompetitor(competitorId);
   const page = competitor?.recreatedPage;
   if (!competitor || !page) throw new Error("Competitor not found");
-  if (!page.manus?.taskId || !page.html) {
+  if (!page.manus?.taskId || !(await getRecreatedPage(competitorId))?.html) {
     return runManusRecreation(competitorId, { userFeedback: request, styleDirection: page.styleDirection || null, screenshots });
   }
   const signal = beginRun(competitorId);
   const taskId = page.manus.taskId;
-  savePage(competitorId, {
+  await savePage(competitorId, {
     status: "design_pending",
     error: null,
     progress: progress("build", "The design agent is making your changes…", 10),
@@ -641,14 +725,14 @@ export async function editManusRecreation(
       );
     } catch (err) {
       console.warn("[manus] could not continue the task; starting a new build", (err as Error).message);
-      endRun(competitorId, signal);
+      await endRun(competitorId, signal);
       return runManusRecreation(competitorId, {
         userFeedback: [page.userFeedback, request].filter(Boolean).join("\n"),
         styleDirection: page.styleDirection || null,
         screenshots,
       });
     }
-    saveState(competitorId, {
+    await saveState(competitorId, {
       mode: "edit",
       editRequest: request,
       nudges: 0,
@@ -658,23 +742,24 @@ export async function editManusRecreation(
     });
     return await follow(competitorId, signal);
   } catch (err) {
-    return fail(competitorId, err, signal);
+    return await fail(competitorId, err, signal);
   } finally {
-    endRun(competitorId, signal);
+    await endRun(competitorId, signal);
   }
 }
 
 /** Puts back the page from before the last change or rebuild (and makes that one the Undo). */
-export function undoManusChange(competitorId: string): CompetitorRecord {
-  const page = latestPage(competitorId);
-  if (!page.previousHtml) throw new Error("There is no earlier version to go back to.");
-  savePage(competitorId, {
-    html: page.previousHtml,
-    previousHtml: page.html || null,
-    lastEdit: page.lastEdit ? { ...page.lastEdit, summary: `Undone: ${page.lastEdit.summary}` } : null,
-    progress: progress("deliver", "The last change was undone.", 100, { done: true }),
+export async function undoManusChange(competitorId: string): Promise<CompetitorRecord> {
+  await savePageWithContent(competitorId, (page, content) => {
+    if (!content?.previousHtml) throw new Error("There is no earlier version to go back to.");
+    return {
+      html: content.previousHtml,
+      previousHtml: content.html || null,
+      lastEdit: page.lastEdit ? { ...page.lastEdit, summary: `Undone: ${page.lastEdit.summary}` } : null,
+      progress: progress("deliver", "The last change was undone.", 100, { done: true }),
+    };
   });
-  const latest = getCompetitor(competitorId);
+  const latest = await getCompetitor(competitorId);
   if (!latest) throw new Error("Competitor not found");
   return latest;
 }
@@ -683,16 +768,16 @@ export function undoManusChange(competitorId: string): CompetitorRecord {
 export async function stopManusRecreation(competitorId: string, reason = "Recreation stopped"): Promise<CompetitorRecord> {
   runs.get(competitorId)?.abort();
   runs.delete(competitorId);
-  const page = latestPage(competitorId);
+  const page = await latestPage(competitorId);
   if (page.manus?.taskId) await stopManusTask(page.manus.taskId).catch(() => undefined);
-  recordCredits(competitorId);
+  await recordCredits(competitorId);
   const stage = (STAGES.find((s) => s.id === page.progress?.phase)?.id || "build") as StageId;
-  savePage(competitorId, {
-    status: page.html ? "completed" : "failed",
+  await savePageWithContent(competitorId, (_stored, content) => ({
+    status: content?.html ? "completed" : "failed",
     error: reason,
     progress: progress(stage, reason, page.progress?.pct || 0, { blocked: reason }),
-  });
-  const latest = getCompetitor(competitorId);
+  }));
+  const latest = await getCompetitor(competitorId);
   if (!latest) throw new Error("Failed to stop recreation");
   return latest;
 }
@@ -702,16 +787,24 @@ export async function stopManusRecreation(competitorId: string, reason = "Recrea
  * server, so polling simply carries on. No-op when this process already
  * follows the run.
  */
-export function resumeManusRecreation(competitorId: string): void {
+export async function resumeManusRecreation(competitorId: string): Promise<void> {
   if (runs.has(competitorId)) return;
-  const page = getCompetitor(competitorId)?.recreatedPage;
+  const page = (await getCompetitor(competitorId))?.recreatedPage;
   if (!page?.manus?.taskId || !isManusPage(page)) return;
   if (page.status !== "pending" && page.status !== "design_pending") return;
+  // Another call may have picked the run up while the page was read.
+  if (runs.has(competitorId)) return;
   const signal = beginRun(competitorId);
   console.info(`[manus] resuming task ${page.manus.taskId} for competitor ${competitorId}`);
-  void follow(competitorId, signal)
-    .catch((err) => fail(competitorId, err, signal))
-    .finally(() => endRun(competitorId, signal));
+  void (async () => {
+    try {
+      await follow(competitorId, signal);
+    } catch (err) {
+      await fail(competitorId, err, signal);
+    } finally {
+      await endRun(competitorId, signal);
+    }
+  })();
 }
 
 // ── Following the task ──────────────────────────────────────────────────
@@ -726,15 +819,15 @@ function hostOf(url: string): string {
 
 /** Polls the task until it delivers the page, fails, is stopped or times out. */
 async function follow(competitorId: string, signal: AbortSignal): Promise<CompetitorRecord> {
-  const startedAt = Date.parse(latestPage(competitorId).manus?.startedAt || "") || Date.now();
+  const startedAt = Date.parse((await latestPage(competitorId)).manus?.startedAt || "") || Date.now();
   const deadline = Date.now() + timeoutMs();
   let lastSaved = 0;
   let lastMessage = "";
   let lastTouch = Date.now();
   // The bar only moves forward: the furthest stage seen and the highest percentage shown.
   let stageAt = STAGES.findIndex((s) => s.id === "study");
-  let shownPct = latestPage(competitorId).progress?.pct || 6;
-  let activity: Activity = latestPage(competitorId).progress?.details?.activity || [];
+  let shownPct = (await latestPage(competitorId)).progress?.pct || 6;
+  let activity: Activity = (await latestPage(competitorId)).progress?.details?.activity || [];
   let lastActivityId = "";
   /** When this turn was first seen stopped; the page is collected from then on. */
   let stoppedAt: number | null = null;
@@ -742,18 +835,18 @@ async function follow(competitorId: string, signal: AbortSignal): Promise<Compet
   for (;;) {
     if (signal.aborted) throw new StoppedError();
     if (Date.now() > deadline) {
-      const taskId = latestPage(competitorId).manus?.taskId;
+      const taskId = (await latestPage(competitorId)).manus?.taskId;
       if (taskId) await stopManusTask(taskId).catch(() => undefined);
       throw new Error(`The design agent did not finish within ${Math.round(timeoutMs() / 60_000)} minutes, so it was stopped.`);
     }
     // Keep the run's credit hold alive while the agent works.
     const reservationId = getBillingContext()?.reservationId;
     if (reservationId && Date.now() - lastTouch > RESERVATION_TOUCH_MS) {
-      touchReservation(reservationId);
+      await touchReservation(reservationId);
       lastTouch = Date.now();
     }
 
-    const state = latestPage(competitorId).manus;
+    const state = (await latestPage(competitorId)).manus;
     if (!state) throw new Error("This page has no design agent task");
     let events: ManusEvent[];
     try {
@@ -804,7 +897,7 @@ async function follow(competitorId: string, signal: AbortSignal): Promise<Compet
     );
     const changed = message !== lastMessage || (latest?.id || "") !== lastActivityId;
     if (agentStatus === "running" && (changed || Date.now() - lastSaved > HEARTBEAT_MS)) {
-      savePage(competitorId, {
+      await savePage(competitorId, {
         progress: progress(stage, editing ? `Making your changes: ${message}` : message, shownPct, { activity }),
       });
       lastSaved = Date.now();
@@ -830,7 +923,7 @@ async function follow(competitorId: string, signal: AbortSignal): Promise<Compet
       // (its report, follow-up suggestions) do not hold the page back.
       if (stoppedAt == null) {
         stoppedAt = Date.now();
-        savePage(competitorId, {
+        await savePage(competitorId, {
           progress: progress("deliver", "Collecting the finished page…", Math.max(shownPct, 95), { activity }),
         });
       }
@@ -845,7 +938,7 @@ async function follow(competitorId: string, signal: AbortSignal): Promise<Compet
       }
       if (done && "fixMessage" in done) {
         // The page repeats an image: one round back to the agent before it is shown.
-        savePage(competitorId, {
+        await savePage(competitorId, {
           progress: progress("check", "Replacing images used more than once…", Math.max(shownPct, 93), { activity }),
         });
         const sentAt = Date.now();
@@ -854,7 +947,7 @@ async function follow(competitorId: string, signal: AbortSignal): Promise<Compet
           { content: done.fixMessage },
           MANUS_RESULT_SCHEMA as unknown as Record<string, unknown>,
         );
-        saveState(competitorId, {
+        await saveState(competitorId, {
           imageFixes: (state.imageFixes || 0) + 1,
           nudges: 0,
           report: (done.report as unknown as Record<string, unknown> | null) ?? null,
@@ -879,7 +972,7 @@ async function follow(competitorId: string, signal: AbortSignal): Promise<Compet
         { content: NUDGE_MESSAGE },
         MANUS_RESULT_SCHEMA as unknown as Record<string, unknown>,
       );
-      saveState(competitorId, { nudges: state.nudges + 1, turnStartedAt: await anchorTurn(state.taskId, NUDGE_MESSAGE, sentAt, signal) });
+      await saveState(competitorId, { nudges: state.nudges + 1, turnStartedAt: await anchorTurn(state.taskId, NUDGE_MESSAGE, sentAt, signal) });
       continue;
     }
 
@@ -906,12 +999,11 @@ async function handleWaiting(
       events.find((e) => e.type === "assistant_message");
     const question = asked?.assistant_message?.content?.trim() || detail?.waiting_description || "The agent is waiting for your input.";
     const expectation = asked?.assistant_message?.question_expectation || null;
-    const current = latestPage(competitorId).progress;
-    savePage(competitorId, {
-      progress: current
-        ? { ...current, message: "Answering a question from the design agent…" }
+    await savePage(competitorId, (page) => ({
+      progress: page.progress
+        ? { ...page.progress, message: "Answering a question from the design agent…" }
         : progress("study", "Answering a question from the design agent…", 10),
-    });
+    }));
     const modelAnswers = state.questions.filter((q) => q.byModel).length;
     const { answer, byModel } =
       modelAnswers < MAX_MODEL_ANSWERS
@@ -928,7 +1020,7 @@ async function handleWaiting(
           };
     await sendManusMessage(state.taskId, { content: answer });
     console.info(`[manus] answered a question on task ${state.taskId}${byModel ? "" : " (default answer)"}`);
-    handled({
+    await handled({
       questions: [
         ...state.questions,
         { eventId, question: question.slice(0, 2000), answer, byModel, at: new Date().toISOString() },
@@ -944,7 +1036,7 @@ async function handleWaiting(
       return false;
     });
     if (confirmed) {
-      handled();
+      await handled();
       return;
     }
   }
@@ -952,7 +1044,7 @@ async function handleWaiting(
   await sendManusMessage(state.taskId, {
     content: `Skip that step (${detail?.waiting_description || type}). ${decision.reason} Carry on with the brief and deliver ${MANUS_HTML_FILENAME}.`,
   });
-  handled();
+  await handled();
 }
 
 
@@ -1093,7 +1185,7 @@ async function collectResult(
     /* remote images stay linked */
   }
 
-  const page = latestPage(competitorId);
+  const page = await latestPage(competitorId);
   const repeats = repeatedImages(html);
   if (repeats.length && (state.imageFixes || 0) < MAX_IMAGE_FIXES) {
     console.info(`[manus] task ${state.taskId}: ${repeats.length} image(s) used more than once; asking for a fix`);
@@ -1140,11 +1232,11 @@ async function collectResult(
   const summary = [result?.summary, result?.verification?.notes, colourNote, imageNote].filter(Boolean).join(" ");
   const editing = state.mode === "edit";
 
-  savePage(competitorId, {
+  await savePageWithContent(competitorId, (stored, content) => ({
     status: "completed",
     html,
     // An edit keeps the page it changed for Undo; a build already set previousHtml when it started.
-    previousHtml: editing ? page.html || page.previousHtml || null : page.previousHtml || null,
+    previousHtml: editing ? content?.html || content?.previousHtml || null : content?.previousHtml || null,
     lastEdit: editing
       ? {
           at: new Date().toISOString(),
@@ -1154,34 +1246,36 @@ async function collectResult(
           repaired: [],
           summary: sanitizeClientFacingText(result?.summary || "The design agent applied your changes."),
         }
-      : page.lastEdit || null,
+      : stored.lastEdit || null,
     differentiationNotes: sanitizeClientFacingText(`Design agent build ${MANUS_PIPELINE_VERSION}. ${summary}`.trim()),
     publishReady: publishBlockers.length === 0,
     publishBlockers,
     error: null,
     manus: { ...state, creditUsage: creditUsage ?? state.creditUsage ?? null },
     progress: progress("deliver", editing ? "Your changes are ready" : "Ready", 100, { done: true }),
-  });
+  }));
   console.info(`[manus] task ${state.taskId} delivered ${pick.filename || "the page"} (${Math.round(html.length / 1024)} KB)`);
-  return getCompetitor(competitorId) || null;
+  return (await getCompetitor(competitorId)) || null;
 }
 
 /** Saves why a run ended without a page; a stop or a kept earlier page is not an error. */
-function fail(competitorId: string, err: unknown, signal: AbortSignal): CompetitorRecord {
+async function fail(competitorId: string, err: unknown, signal: AbortSignal): Promise<CompetitorRecord> {
   // A stop saves its own state, and a run replaced by a newer one must not touch the page.
   const stopped = signal.aborted || (err as { name?: string })?.name === "AbortError";
-  const page = getCompetitor(competitorId)?.recreatedPage;
+  const page = (await getCompetitor(competitorId))?.recreatedPage;
   if (page && !stopped) {
     const message = sanitizeClientFacingText((err as Error)?.message || "Recreation failed");
-    const stage = (STAGES.find((s) => s.id === page.progress?.phase)?.id || "build") as StageId;
-    savePage(competitorId, {
-      status: page.html ? "completed" : "failed",
-      error: message,
-      progress: progress(stage, message, page.progress?.pct || 0, { blocked: message }),
+    await savePageWithContent(competitorId, (stored, content) => {
+      const stage = (STAGES.find((s) => s.id === stored.progress?.phase)?.id || "build") as StageId;
+      return {
+        status: content?.html ? "completed" : "failed",
+        error: message,
+        progress: progress(stage, message, stored.progress?.pct || 0, { blocked: message }),
+      };
     });
   }
   if (!stopped) console.error("[manus] run failed", err);
-  const latest = getCompetitor(competitorId);
+  const latest = await getCompetitor(competitorId);
   if (!latest) throw err;
   return latest;
 }

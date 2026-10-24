@@ -17,7 +17,9 @@ import {
   getLookupAds,
   getSearchCompetitorAdsByCompetitor,
   updateCompetitor,
+  updateCompetitorWith,
   updateLookupAd,
+  updateLookupAdWith,
 } from "../db";
 import { enrichCompetitorDeepLocation } from "./competitorLocation";
 import {
@@ -608,7 +610,7 @@ export function shouldWriteLevels(input: { before: StoredAnalysis; current: Stor
 
 /** Adds levels to an already analysed competitor page without redoing the offer. */
 export async function labelCompetitorLevels(competitorId: string): Promise<CompetitorRecord> {
-  const competitor = getCompetitor(competitorId);
+  const competitor = await getCompetitor(competitorId);
   const analysis = competitor?.pageAnalysis;
   if (!competitor || analysis?.status !== "completed") {
     throw new Error("Analyze this page before labelling it.");
@@ -619,20 +621,19 @@ export async function labelCompetitorLevels(competitorId: string): Promise<Compe
   const page = await fetchLandingPage(url);
   const result = await analyzeLevels(levelsInput(page.outline));
   const levels = buildLevels(analysis.pageArchitecture?.sections ?? [], result);
-  const fresh = getCompetitor(competitorId);
-  const current = fresh?.pageAnalysis;
-  if (!fresh || !current || !shouldWriteLevels({ before: analysis, current })) {
-    if (!fresh) throw new Error("Competitor no longer exists");
-    return fresh;
-  }
-  const updated = updateCompetitor(competitorId, { pageAnalysis: { ...current, levels } });
-  if (!updated) throw new Error("Failed to save levels");
-  return updated;
+  // Checked and written in one step against the analysis as stored then.
+  const saved = await updateCompetitorWith(competitorId, (fresh) => {
+    const current = fresh.pageAnalysis;
+    if (!current || !shouldWriteLevels({ before: analysis, current })) return null;
+    return { pageAnalysis: { ...current, levels } };
+  });
+  if (!saved) throw new Error("Competitor no longer exists");
+  return saved;
 }
 
 /** Adds levels to an already analysed lookup ad page without redoing the offer. */
 export async function labelLookupAdLevels(adId: string): Promise<LookupAdRecord> {
-  const ad = getLookupAd(adId);
+  const ad = await getLookupAd(adId);
   const analysis = ad?.pageAnalysis;
   if (!ad || analysis?.status !== "completed") {
     throw new Error("Analyze this page before labelling it.");
@@ -643,15 +644,14 @@ export async function labelLookupAdLevels(adId: string): Promise<LookupAdRecord>
   const page = await fetchLandingPage(url);
   const result = await analyzeLevels(levelsInput(page.outline));
   const levels = buildLevels(analysis.pageArchitecture?.sections ?? [], result);
-  const fresh = getLookupAd(adId);
-  const current = fresh?.pageAnalysis;
-  if (!fresh || !current || !shouldWriteLevels({ before: analysis, current })) {
-    if (!fresh) throw new Error("Ad no longer exists");
-    return fresh;
-  }
-  const updated = updateLookupAd(adId, { pageAnalysis: { ...current, levels } });
-  if (!updated) throw new Error("Failed to save levels");
-  return updated;
+  // Checked and written in one step against the analysis as stored then.
+  const saved = await updateLookupAdWith(adId, (fresh) => {
+    const current = fresh.pageAnalysis;
+    if (!current || !shouldWriteLevels({ before: analysis, current })) return null;
+    return { pageAnalysis: { ...current, levels } };
+  });
+  if (!saved) throw new Error("Ad no longer exists");
+  return saved;
 }
 
 /** What the offers report is researching, passed to the page analysis. */
@@ -1152,7 +1152,7 @@ export async function analyzeLookupAdLandingPage(
     offersReport?: { service: OfferServiceContext | null } | null;
   },
 ): Promise<LookupAdRecord> {
-  const ad = getLookupAd(adId);
+  const ad = await getLookupAd(adId);
   if (!ad) throw new Error("Lookup ad not found");
 
   const url = resolveLookupAdUrl(ad);
@@ -1162,7 +1162,7 @@ export async function analyzeLookupAdLandingPage(
     );
   }
 
-  updateLookupAd(adId, {
+  await updateLookupAd(adId, {
     pageAnalysis: {
       status: "pending",
       analyzedUrl: url,
@@ -1245,7 +1245,7 @@ export async function analyzeLookupAdLandingPage(
     let sameLandingPageAds = null;
     if (!forOffers) {
       try {
-        const siblings = getLookupAds(ad.lookupId);
+        const siblings = await getLookupAds(ad.lookupId);
         sameLandingPageAds = await collectSameLandingPageAdsFromLookup({
           ad,
           siblings,
@@ -1280,7 +1280,7 @@ export async function analyzeLookupAdLandingPage(
       serviceOffers: service ? toServiceOffers(llm.serviceOffers) : null,
     };
 
-    const updated = updateLookupAd(adId, { pageAnalysis: analysis });
+    const updated = await updateLookupAd(adId, { pageAnalysis: analysis });
     if (!updated) throw new Error("Failed to save page analysis");
     return updated;
   } catch (err) {
@@ -1289,7 +1289,7 @@ export async function analyzeLookupAdLandingPage(
       "Analysis failed";
     // Keep prior completed analysis visible; only stamp error if nothing useful exists
     if (ad.pageAnalysis?.status === "completed" && ad.pageAnalysis.offer) {
-      updateLookupAd(adId, {
+      await updateLookupAd(adId, {
         pageAnalysis: {
           ...ad.pageAnalysis,
           error: `Refresh failed: ${message}`,
@@ -1302,7 +1302,7 @@ export async function analyzeLookupAdLandingPage(
         analyzedAt: new Date().toISOString(),
         error: message,
       };
-      updateLookupAd(adId, { pageAnalysis: failed });
+      await updateLookupAd(adId, { pageAnalysis: failed });
     }
     throw err;
   }
@@ -1314,7 +1314,7 @@ export async function analyzeLookupAdLandingPage(
 export async function analyzeCompetitorLandingPage(
   competitorId: string,
 ): Promise<CompetitorRecord> {
-  const competitor = getCompetitor(competitorId);
+  const competitor = await getCompetitor(competitorId);
   if (!competitor) throw new Error("Competitor not found");
 
   const url = resolveCompetitorUrl(competitor);
@@ -1324,7 +1324,7 @@ export async function analyzeCompetitorLandingPage(
     );
   }
 
-  updateCompetitor(competitorId, {
+  await updateCompetitor(competitorId, {
     pageAnalysis: {
       status: "pending",
       analyzedUrl: url,
@@ -1376,8 +1376,8 @@ export async function analyzeCompetitorLandingPage(
     let sameLandingPageAds = null;
     // A page opened from the offers dashboard already lists its ads there.
     if (!competitor.recreateOnly) try {
-      const job = getJob(competitor.runId);
-      const cachedAds = getSearchCompetitorAdsByCompetitor(
+      const job = await getJob(competitor.runId);
+      const cachedAds = await getSearchCompetitorAdsByCompetitor(
         competitor.runId,
         competitor.id,
       );
@@ -1421,13 +1421,13 @@ export async function analyzeCompetitorLandingPage(
       sameLandingPageAds,
     };
 
-    const updated = updateCompetitor(competitorId, { pageAnalysis: analysis });
+    const updated = await updateCompetitor(competitorId, { pageAnalysis: analysis });
     if (!updated) throw new Error("Failed to save page analysis");
 
     // Deep location runs here (not during keyword search accept); a page held
     // only for recreation is not a competitor, so it has no location to find.
     if (!competitor.recreateOnly) try {
-      const job = getJob(competitor.runId);
+      const job = await getJob(competitor.runId);
       await enrichCompetitorDeepLocation({
         competitorId,
         pageName: competitor.pageName,
@@ -1452,7 +1452,7 @@ export async function analyzeCompetitorLandingPage(
       console.warn("[page-analysis] location enrich failed", err);
     }
 
-    return getCompetitor(competitorId) || updated;
+    return (await getCompetitor(competitorId)) || updated;
   } catch (err) {
     const message =
       maskClientFacingText(err instanceof Error ? err.message : String(err)) ||
@@ -1462,7 +1462,7 @@ export async function analyzeCompetitorLandingPage(
       competitor.pageAnalysis?.status === "completed" &&
       competitor.pageAnalysis.offer
     ) {
-      updateCompetitor(competitorId, {
+      await updateCompetitor(competitorId, {
         pageAnalysis: {
           ...competitor.pageAnalysis,
           error: `Refresh failed: ${message}`,
@@ -1475,7 +1475,7 @@ export async function analyzeCompetitorLandingPage(
         analyzedAt: new Date().toISOString(),
         error: message,
       };
-      updateCompetitor(competitorId, { pageAnalysis: failed });
+      await updateCompetitor(competitorId, { pageAnalysis: failed });
     }
     throw err;
   }
