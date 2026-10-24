@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
-import { getUserById, listUsers, readDb } from "@/lib/db";
+import { countUsers, getUsersByIds } from "@/lib/db";
 import { adminScope, errorResponse, requireAdmin, scopedUserIds } from "@/lib/authz";
 import {
+  currentPeriodTotals,
   listPendingReconciliation,
   queryProviderCalls,
   usageByDate,
@@ -51,51 +52,42 @@ export async function GET(request: Request) {
     const days = daysParam === "all" ? null : Math.max(1, Math.min(Number(daysParam) || 30, 3650));
     const from = days ? new Date(Date.now() - days * 86_400_000).toISOString() : undefined;
 
-    const db = readDb();
-    const users = listUsers({ includeDeleted: true }).filter((u) => !scoped || scoped.has(u.id));
-    const periods = (db.creditPeriods ?? []).filter(
-      (p) => p.status === "current" && (!scoped || scoped.has(p.userId)),
-    );
+    const [users, credits, failed, timedOut, byProvider, byDate, pending, audit, calls] = await Promise.all([
+      countUsers(scoped),
+      currentPeriodTotals(scoped),
+      // Search every call by status, not just the newest few.
+      queryProviderCalls({ status: "failed", from, limit: 25, chargedUserIds: scoped }),
+      queryProviderCalls({ status: "timeout", from, limit: 25, chargedUserIds: scoped }),
+      usageByProvider({ from, chargedUserIds: scoped }),
+      usageByDate({ from, chargedUserIds: scoped }),
+      // Billing checks against vendor dashboards are a platform task.
+      scoped ? Promise.resolve([]) : listPendingReconciliation(),
+      queryAudit({ limit: 25, excludeActions: ROUTINE_AUDIT_ACTIONS, userIds: scoped }),
+      queryProviderCalls({ from, limit: Number.MAX_SAFE_INTEGER, chargedUserIds: scoped }),
+    ]);
 
-    const allocated = periods.reduce((s, p) => s + p.allowanceSubunits, 0);
-    const consumed = periods.reduce((s, p) => s + p.consumedSubunits, 0);
-    const reserved = periods.reduce((s, p) => s + p.reservedSubunits, 0);
-
-    // Search every call by status, not just the newest few.
-    const recentFailures = [
-      ...queryProviderCalls({ status: "failed", from, limit: 25, chargedUserIds: scoped }).rows,
-      ...queryProviderCalls({ status: "timeout", from, limit: 25, chargedUserIds: scoped }).rows,
-    ]
+    const recentFailures = [...failed.rows, ...timedOut.rows]
       .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
       .slice(0, 25);
 
-    const username = (id?: string | null) => (id ? getUserById(id)?.username ?? null : null);
+    const named = await getUsersByIds([...pending.map((r) => r.userId), ...audit.map((e) => e.targetUserId)]);
+    const username = (id?: string | null) => (id ? named.get(id)?.username ?? null : null);
 
     return NextResponse.json({
       range: { days, from: from ?? null },
-      users: {
-        total: users.filter((u) => u.status !== "deleted").length,
-        active: users.filter((u) => u.status === "active").length,
-        suspended: users.filter((u) => u.status === "suspended").length,
-        deleted: users.filter((u) => u.status === "deleted").length,
-        admins: users.filter((u) => u.role === "admin" && u.status === "active")
-          .length,
-      },
+      users,
       credits: {
-        allocatedSubunits: allocated,
-        consumedSubunits: consumed,
-        reservedSubunits: reserved,
-        remainingSubunits: allocated - consumed - reserved,
+        ...credits,
+        remainingSubunits: credits.allocatedSubunits - credits.consumedSubunits - credits.reservedSubunits,
       },
-      usageByProvider: usageByProvider({ from, chargedUserIds: scoped }),
-      usageByDate: usageByDate({ from, chargedUserIds: scoped }).slice(0, days ?? 90),
+      usageByProvider: byProvider,
+      usageByDate: byDate.slice(0, days ?? 90),
       recentFailures,
-      // Billing checks against vendor dashboards are a platform task.
-      pendingReconciliation: (scoped ? [] : listPendingReconciliation()).map((r) => ({
+      pendingReconciliation: pending.map((r) => ({
         ...r,
         username: username(r.userId),
       })),
-      recentAudit: queryAudit({ limit: 25, excludeActions: ROUTINE_AUDIT_ACTIONS, userIds: scoped }).map((e) => ({
+      recentAudit: audit.map((e) => ({
         ...e,
         actionLabel: auditActionLabel(e.action),
         targetUsername: username(e.targetUserId),
@@ -105,9 +97,7 @@ export async function GET(request: Request) {
        * Local running total: tokens stored on each call, priced from the
        * documented per-million rate for that model. Not a live vendor balance.
        */
-      trackedSpend: summarizeTrackedSpend(
-        queryProviderCalls({ from, limit: Number.MAX_SAFE_INTEGER, chargedUserIds: scoped }).rows,
-      ),
+      trackedSpend: summarizeTrackedSpend(calls.rows),
       /** Prices for providers billed per credit or request (env overrides applied). */
       unitPrices: UNIT_LIST_PRICES.map((p) => unitListPrice(p.provider)!).map((p) => ({
         provider: p.provider,

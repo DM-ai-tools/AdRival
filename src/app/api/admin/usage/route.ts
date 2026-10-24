@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
-import { getUserById, readDb } from "@/lib/db";
+import { getUsersByIds } from "@/lib/db";
 import { adminScope, errorResponse, requireAdmin, scopedUserIds } from "@/lib/authz";
 import {
+  listRunReservations,
   queryProviderCalls,
   usageByProvider,
   type UsageQuery,
@@ -67,20 +68,20 @@ export async function GET(request: Request) {
     const wantsCsv = url.searchParams.get("format") === "csv";
 
     if (wantsCsv) {
-      const { rows } = queryProviderCalls({
+      const { rows } = await queryProviderCalls({
         ...query,
         limit: Number.MAX_SAFE_INTEGER,
         offset: 0,
       });
+      const users = await getUsersByIds(rows.flatMap((call) => [call.chargedUserId, call.initiatedByUserId]));
       const lines = [CSV_COLUMNS.join(",")];
       for (const call of rows) {
         lines.push(
           [
             call.startedAt,
             call.completedAt,
-            getUserById(call.chargedUserId)?.username ?? call.chargedUserId,
-            getUserById(call.initiatedByUserId)?.username ??
-              call.initiatedByUserId,
+            users.get(call.chargedUserId)?.username ?? call.chargedUserId,
+            users.get(call.initiatedByUserId)?.username ?? call.initiatedByUserId,
             call.provider,
             call.model ?? call.endpoint ?? "",
             call.operation,
@@ -114,20 +115,17 @@ export async function GET(request: Request) {
       });
     }
 
-    const { rows, total } = queryProviderCalls(query);
-    const reservations = readDb().creditReservations ?? [];
+    const { rows, total } = await queryProviderCalls(query);
+    const users = await getUsersByIds(rows.flatMap((call) => [call.chargedUserId, call.initiatedByUserId]));
     return NextResponse.json({
       rows: rows.map((call) => ({
         ...call,
-        chargedUsername: getUserById(call.chargedUserId)?.username ?? null,
-        initiatedByUsername:
-          getUserById(call.initiatedByUserId)?.username ?? null,
+        chargedUsername: users.get(call.chargedUserId)?.username ?? null,
+        initiatedByUsername: users.get(call.initiatedByUserId)?.username ?? null,
       })),
       total,
-      byProvider: usageByProvider(query),
-      reservations: query.runId
-        ? reservations.filter((r) => r.runId === query.runId && (!query.chargedUserIds || query.chargedUserIds.has(r.userId)))
-        : [],
+      byProvider: await usageByProvider(query),
+      reservations: query.runId ? await listRunReservations(query.runId, query.chargedUserIds) : [],
     });
   } catch (err) {
     return errorResponse(err, { audience: "admin" });

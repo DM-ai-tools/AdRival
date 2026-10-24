@@ -1,5 +1,5 @@
 import { recordIncurredUsage } from "../accounting/meter";
-import { readDb } from "../db";
+import { sumProviderRequestUsage } from "../accounting/service";
 import type { ProjectKind } from "../types";
 import { getManusTask } from "./client";
 
@@ -9,13 +9,6 @@ import { getManusTask } from "./client";
  * for it go to the ledger, so a task that is continued later (page edits, the
  * next ring of a search) is never counted twice.
  */
-
-/** Credits already recorded for a task. */
-function recordedCredits(taskId: string): number {
-  return (readDb().providerCalls ?? [])
-    .filter((c) => c.provider === "manus" && c.providerRequestId === taskId)
-    .reduce((sum, c) => sum + (c.usage.requests ?? 0), 0);
-}
 
 export async function recordManusTaskCredits(input: {
   taskId: string;
@@ -34,7 +27,9 @@ export async function recordManusTaskCredits(input: {
     return 0;
   }
   if (!Number.isFinite(total) || total <= 0) return 0;
-  const delta = Math.round((total - recordedCredits(input.taskId)) * 100) / 100;
+  // Credits already recorded for this task.
+  const recorded = await sumProviderRequestUsage("manus", input.taskId);
+  const delta = Math.round((total - recorded) * 100) / 100;
   if (delta <= 0) return 0;
   recordIncurredUsage({
     provider: "manus",
