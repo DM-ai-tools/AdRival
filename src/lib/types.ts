@@ -1285,6 +1285,36 @@ export interface RecreatedLandingPage {
   error?: string | null;
 }
 
+/** The large fields of a recreated page, stored apart from the competitor row (recreated_pages). */
+export type RecreatedPageHeavyKey = "html" | "sourceArchive" | "generatedImages" | "previousHtml";
+export const RECREATED_PAGE_HEAVY_KEYS: readonly RecreatedPageHeavyKey[] = [
+  "html",
+  "sourceArchive",
+  "generatedImages",
+  "previousHtml",
+];
+
+export type RecreatedPageHeavy = {
+  /** Empty string when the page has no HTML yet (e.g. only an Undo copy is kept). */
+  html: string;
+  sourceArchive?: StoredPageArchive | null;
+  previousHtml?: string | null;
+  generatedImages?: GeneratedLandingImage[] | null;
+};
+
+/**
+ * A recreated page as the competitor row keeps it: every field except the
+ * heavy ones, plus a marker for the content stored in recreated_pages.
+ * `hasPage` is false while no content is stored (e.g. a page still pending).
+ */
+export type RecreatedPageLight = Omit<RecreatedLandingPage, RecreatedPageHeavyKey> & {
+  hasPage: boolean;
+  /** Uncompressed size of the stored content (JSON bytes); 0 without content. */
+  pageBytes: number;
+  /** When the content was last written; null without content. */
+  pageUpdatedAt: string | null;
+};
+
 export type LookupHistorySummary = LookupJob & {
   adCount: number;
 };

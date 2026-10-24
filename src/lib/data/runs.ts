@@ -32,6 +32,23 @@ const suppressedSearchJobIds = new Set<string>();
 const suppressedLookupJobIds = new Set<string>();
 
 /**
+ * The in-process tombstones, for repositories that write rows a run owns
+ * (competitors, ads). They check and set these the way saveJob does.
+ */
+export function searchRunSuppressedHere(id: string): boolean {
+  return suppressedSearchJobIds.has(id);
+}
+export function suppressSearchRunHere(id: string): void {
+  suppressedSearchJobIds.add(id);
+}
+export function lookupRunSuppressedHere(id: string): boolean {
+  return suppressedLookupJobIds.has(id);
+}
+export function suppressLookupRunHere(id: string): void {
+  suppressedLookupJobIds.add(id);
+}
+
+/**
  * Writes to one run go out one at a time, in call order. With the file store
  * each write finished before the next began; over a pool two writes for the
  * same run could commit out of order and an older snapshot could land last.
@@ -95,7 +112,8 @@ async function lockRunIds(tx: Queryable, ids: string[]): Promise<void> {
   for (const id of [...new Set(ids)].sort()) await lockRunId(tx, id);
 }
 
-async function runWasDeleted(q: Queryable, id: string): Promise<boolean> {
+/** True when this run id has a deletion tombstone (`deleted_run_ids`). */
+export async function runWasDeleted(q: Queryable, id: string): Promise<boolean> {
   if (!id) return false;
   const { rows } = await q.query<{ found: number }>(
     "select 1 as found from deleted_run_ids where id = $1",
@@ -124,9 +142,17 @@ async function rememberDeletedRuns(tx: Queryable, ids: string[]): Promise<void> 
 }
 
 /** The record's ISO time, or null when it is missing or unparsable. */
-function isoOrNull(value: string | null | undefined): string | null {
+export function isoOrNull(value: string | null | undefined): string | null {
   if (!value) return null;
   return Number.isNaN(Date.parse(value)) ? null : value;
+}
+
+/**
+ * SQL that is true when a competitor's `recreateOnly` is set (truthy in JS
+ * terms; it is an object when set). `data` is the competitors.data column.
+ */
+export function recreateOnlySql(data: string): string {
+  return `coalesce(${data}->'recreateOnly' not in ('null', 'false', '0', '""'), false)`;
 }
 
 async function upsertRun(tx: Queryable, table: RunTable, row: SearchJob | LookupJob): Promise<void> {
@@ -595,7 +621,7 @@ export async function listHistoryRuns(limit = 100): Promise<HistoryRunSummary[]>
     `select j.data,
             (select count(*) from competitors c
               where c.run_id = j.id
-                and (c.data->>'recreateOnly') is distinct from 'true')::int as found
+                and not ${recreateOnlySql("c.data")})::int as found
        from jobs j
       order by j.created_at desc, j.id desc
       limit $1`,
