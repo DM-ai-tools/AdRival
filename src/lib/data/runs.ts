@@ -16,8 +16,9 @@ import { MAX_DELETED_RUN_IDS } from "./legacyStore";
  * Deletion and stop are durable: a deleted run leaves its id in
  * `deleted_run_ids`, a stopped run has `progress.stopRequested`. Every write
  * checks both inside the same transaction as the upsert, under a per-run
- * advisory lock, so a pipeline still running cannot write a deleted or
- * stopped run back. The suppressed-id sets and progress throttle below are
+ * advisory lock (after the global runs key, held shared; bulk clears hold it
+ * exclusive), so a pipeline still running cannot write a deleted or stopped
+ * run back. The suppressed-id sets and progress throttle below are
  * per process, which is correct for the single instance this app runs.
  */
 
@@ -55,9 +56,38 @@ function serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
 
 type RunTable = "jobs" | "lookup_jobs";
 
-/** Serializes every transaction that writes this run (search or lookup id). */
+/**
+ * One advisory key guards all run rows as a whole. Every per-run writer holds
+ * it shared; clearAllHistory / clearAllLookupHistory / markInterruptedJobs
+ * hold it exclusive, so a bulk clear never interleaves with a save. It uses
+ * the two-int4 key form, a key space separate from the bigint per-run keys.
+ *
+ * Lock order (always): this global key, then the run id, then other run ids
+ * sorted. Writers of run-owned rows elsewhere (competitors, ads) take the
+ * shared key and the run id the same way.
+ */
+export const RUNS_LOCK_CLASS = 7302;
+export const RUNS_LOCK_ID = 3;
+
+/** Shared hold on the global runs key: many per-run writers at once. */
+export async function lockRunsShared(tx: Queryable): Promise<void> {
+  await tx.query("select pg_advisory_xact_lock_shared($1::int, $2::int)", [RUNS_LOCK_CLASS, RUNS_LOCK_ID]);
+}
+
+/** Exclusive hold on the global runs key: waits out and blocks every per-run writer. */
+async function lockRunsExclusive(tx: Queryable): Promise<void> {
+  await tx.query("select pg_advisory_xact_lock($1::int, $2::int)", [RUNS_LOCK_CLASS, RUNS_LOCK_ID]);
+}
+
+/** Serializes every transaction that writes this run (search or lookup id). Take lockRunsShared first. */
 export async function lockRunId(tx: Queryable, id: string): Promise<void> {
   await tx.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`run:${id}`]);
+}
+
+/** The global key shared, then this run: the first locks of every per-run write. */
+export async function lockRun(tx: Queryable, id: string): Promise<void> {
+  await lockRunsShared(tx);
+  await lockRunId(tx, id);
 }
 
 /** Locks several run ids in one fixed order, so two callers cannot deadlock. */
@@ -131,6 +161,15 @@ async function selectRun<T>(q: Queryable, table: RunTable, id: string, forUpdate
 async function selectIds(q: Queryable, sql: string, params: unknown[] = []): Promise<string[]> {
   const { rows } = await q.query<{ id: string }>(sql, params);
   return rows.map((r) => r.id);
+}
+
+/** Deletes every row of a run table; returns their ids oldest first (tombstone order). */
+function deletedIds(tx: Queryable, table: RunTable): Promise<string[]> {
+  return selectIds(
+    tx,
+    `with gone as (delete from ${table} returning id, created_at)
+     select id from gone order by created_at asc, id asc`,
+  );
 }
 
 /** The offers report a stop leaves behind when it cut off offers analysis. */
@@ -268,7 +307,7 @@ export async function isLookupJobSuppressed(lookupId: string): Promise<boolean> 
 export async function clearSearchJobSuppression(jobId: string): Promise<SearchJob | null> {
   suppressedSearchJobIds.delete(jobId);
   return withTx(async (tx) => {
-    await lockRunId(tx, jobId);
+    await lockRun(tx, jobId);
     const prev = await selectRun<SearchJob>(tx, "jobs", jobId, true);
     if (!prev) return null;
     if (!prev.progress?.stopRequested && !suppressedSearchJobIds.has(jobId)) return prev;
@@ -286,7 +325,7 @@ export async function clearSearchJobSuppression(jobId: string): Promise<SearchJo
 export async function clearLookupJobSuppression(lookupId: string): Promise<LookupJob | null> {
   suppressedLookupJobIds.delete(lookupId);
   return withTx(async (tx) => {
-    await lockRunId(tx, lookupId);
+    await lockRun(tx, lookupId);
     const prev = await selectRun<LookupJob>(tx, "lookup_jobs", lookupId, true);
     if (!prev) return null;
     if (!prev.progress?.stopRequested) return prev;
@@ -310,7 +349,7 @@ function offersLookupIds(q: Queryable, runId: string): Promise<string[]> {
 export async function stopSearchJob(jobId: string, reason = "Stopped by user"): Promise<SearchJob | null> {
   suppressedSearchJobIds.add(jobId);
   return withTx(async (tx) => {
-    await lockRunId(tx, jobId);
+    await lockRun(tx, jobId);
     const now = new Date().toISOString();
     const lookupIds = await offersLookupIds(tx, jobId);
     await lockRunIds(tx, lookupIds);
@@ -362,7 +401,7 @@ export async function stopSearchJob(jobId: string, reason = "Stopped by user"): 
 export async function stopLookupJob(lookupId: string, reason = "Stopped by user"): Promise<LookupJob | null> {
   suppressedLookupJobIds.add(lookupId);
   return withTx(async (tx) => {
-    await lockRunId(tx, lookupId);
+    await lockRun(tx, lookupId);
     const prev = await selectRun<LookupJob>(tx, "lookup_jobs", lookupId, true);
     if (!prev) return null;
     const hasAds = (prev.adIds?.length || 0) > 0;
@@ -481,12 +520,17 @@ export async function saveJob(job: SearchJob): Promise<boolean> {
 function writeSearchJob(job: SearchJob): Promise<boolean> {
   return serial(`search:${job.id}`, () =>
     withTx(async (tx) => {
-      await lockRunId(tx, job.id);
+      await lockRun(tx, job.id);
       if (suppressedSearchJobIds.has(job.id) || (await runWasDeleted(tx, job.id))) {
         suppressedSearchJobIds.add(job.id);
         return false;
       }
       const existing = await selectRun<SearchJob>(tx, "jobs", job.id, true);
+      if (!existing && (await runWasDeleted(tx, job.id))) {
+        // The row went away while we waited for it: look at the tombstone again.
+        suppressedSearchJobIds.add(job.id);
+        return false;
+      }
       let next = job;
       if (existing) {
         if (existing.progress?.stopRequested) {
@@ -520,7 +564,7 @@ export async function updateJob(id: string, patch: Partial<SearchJob>): Promise<
   settleProgress(pendingSearchProgress, id, { status: patch.status ?? "running", progress: patch.progress });
   return serial(`search:${id}`, () =>
     withTx(async (tx) => {
-      await lockRunId(tx, id);
+      await lockRun(tx, id);
       const existing = await selectRun<SearchJob>(tx, "jobs", id, true);
       if (!existing) return null;
       if (
@@ -571,7 +615,7 @@ export async function listHistoryRuns(limit = 100): Promise<HistoryRunSummary[]>
 export async function deleteHistoryRun(runId: string): Promise<{ ok: boolean; removedCompetitors: number }> {
   suppressedSearchJobIds.add(runId);
   return withTx(async (tx) => {
-    await lockRunId(tx, runId);
+    await lockRun(tx, runId);
     const lookupIds = await offersLookupIds(tx, runId);
     await lockRunIds(tx, lookupIds);
     for (const id of lookupIds) suppressedLookupJobIds.add(id);
@@ -610,17 +654,18 @@ export async function deleteHistoryRun(runId: string): Promise<{ ok: boolean; re
 /** Delete every run + competitor + clear seen page ids. */
 export async function clearAllHistory(): Promise<{ removedRuns: number; removedCompetitors: number }> {
   return withTx(async (tx) => {
-    // Tombstones first: a save that committed before this point is deleted
-    // below; one that runs after it sees the tombstone and is refused.
-    const ids = await selectIds(tx, "select id from jobs order by created_at asc, id asc");
+    // Exclusive: every per-run writer holds this key shared until it commits,
+    // so all saves that started earlier have committed (their rows are deleted
+    // here) and every later save waits, then finds the tombstone and is refused.
+    await lockRunsExclusive(tx);
+    const ids = await deletedIds(tx, "jobs");
     for (const id of ids) suppressedSearchJobIds.add(id);
     await rememberDeletedRuns(tx, ids);
     const competitors = await tx.query("delete from competitors");
     await tx.query("delete from search_competitor_ads");
     await tx.query("delete from icps where source_kind = 'search'");
     await tx.query("delete from seen_page_ids");
-    const jobs = await tx.query("delete from jobs");
-    return { removedRuns: jobs.rowCount, removedCompetitors: competitors.rowCount };
+    return { removedRuns: ids.length, removedCompetitors: competitors.rowCount };
   });
 }
 
@@ -634,12 +679,17 @@ export async function saveLookupJob(job: LookupJob): Promise<boolean> {
 function writeLookupJob(job: LookupJob): Promise<boolean> {
   return serial(`lookup:${job.id}`, () =>
     withTx(async (tx) => {
-      await lockRunId(tx, job.id);
+      await lockRun(tx, job.id);
       if (suppressedLookupJobIds.has(job.id) || (await runWasDeleted(tx, job.id))) {
         suppressedLookupJobIds.add(job.id);
         return false;
       }
       const existing = await selectRun<LookupJob>(tx, "lookup_jobs", job.id, true);
+      if (!existing && (await runWasDeleted(tx, job.id))) {
+        // The row went away while we waited for it: look at the tombstone again.
+        suppressedLookupJobIds.add(job.id);
+        return false;
+      }
       let next = job;
       if (existing) {
         // Refuse to revive a stopped run.
@@ -675,7 +725,7 @@ export async function updateLookupJob(id: string, patch: Partial<LookupJob>): Pr
   settleProgress(pendingLookupProgress, id, { status: patch.status ?? "running", progress: patch.progress });
   return serial(`lookup:${id}`, () =>
     withTx(async (tx) => {
-      await lockRunId(tx, id);
+      await lockRun(tx, id);
       const existing = await selectRun<LookupJob>(tx, "lookup_jobs", id, true);
       if (!existing) return null;
       if (
@@ -720,7 +770,7 @@ export async function listLookupHistory(limit = 100): Promise<LookupHistorySumma
 export async function deleteLookupHistoryRun(lookupId: string): Promise<{ ok: boolean; removedAds: number }> {
   suppressedLookupJobIds.add(lookupId);
   return withTx(async (tx) => {
-    await lockRunId(tx, lookupId);
+    await lockRun(tx, lookupId);
     await rememberDeletedRuns(tx, [lookupId]);
     const { rows } = await tx.query("select 1 from lookup_jobs where id = $1 for update", [lookupId]);
     if (!rows.length) return { ok: true, removedAds: 0 };
@@ -733,13 +783,14 @@ export async function deleteLookupHistoryRun(lookupId: string): Promise<{ ok: bo
 
 export async function clearAllLookupHistory(): Promise<{ removedRuns: number; removedAds: number }> {
   return withTx(async (tx) => {
-    const ids = await selectIds(tx, "select id from lookup_jobs order by created_at asc, id asc");
+    // See clearAllHistory for why the global key is taken exclusive.
+    await lockRunsExclusive(tx);
+    const ids = await deletedIds(tx, "lookup_jobs");
     for (const id of ids) suppressedLookupJobIds.add(id);
     await rememberDeletedRuns(tx, ids);
     const ads = await tx.query("delete from lookup_ads");
     await tx.query("delete from icps where source_kind = 'lookup'");
-    const jobs = await tx.query("delete from lookup_jobs");
-    return { removedRuns: jobs.rowCount, removedAds: ads.rowCount };
+    return { removedRuns: ids.length, removedAds: ads.rowCount };
   });
 }
 
@@ -749,25 +800,41 @@ export const INTERRUPTED_MESSAGE = "Interrupted by restart";
 
 /**
  * On startup no pipeline of this (single) instance is running yet, so any job
- * or lookup still marked `running` was cut off: mark it failed. Returns how
- * many rows changed.
+ * or lookup still marked `running` was cut off: mark it failed, with its
+ * progress ended the way a stop ends it (stage failed, offers phase failed when
+ * it was in offers analysis), so the in-flight checks no longer count it.
+ * Returns how many rows changed.
  */
 export async function markInterruptedJobs(): Promise<number> {
   return withTx(async (tx) => {
+    await lockRunsExclusive(tx);
     const now = new Date().toISOString();
     let changed = 0;
     for (const table of ["jobs", "lookup_jobs"] as const) {
-      const result = await tx.query(
-        `update ${table}
-            set status = 'failed',
-                data = jsonb_set(
-                  jsonb_set(data || jsonb_build_object('status', 'failed', 'updatedAt', $2::text),
-                            '{progress}', coalesce(data->'progress', '{}'::jsonb), true),
-                  '{progress,message}', to_jsonb($1::text), true)
-          where status = 'running'`,
-        [INTERRUPTED_MESSAGE, now],
+      const { rows } = await tx.query<{ data: SearchJob | LookupJob }>(
+        `select data from ${table} where status = 'running' for update`,
       );
-      changed += result.rowCount;
+      for (const { data } of rows) {
+        // `progress` can be missing or JSON null in old rows.
+        const prev: Partial<SearchJob["progress"] & LookupJob["progress"]> =
+          data.progress && typeof data.progress === "object" ? data.progress : {};
+        const inOffers = prev.stage === "analyzing_offers";
+        const next = {
+          ...data,
+          status: "failed",
+          offersReport: inOffers ? failedOffersReport(data.offersReport, INTERRUPTED_MESSAGE, now) : data.offersReport,
+          progress: {
+            ...prev,
+            stage: "failed",
+            message: INTERRUPTED_MESSAGE,
+            offersPhase: inOffers ? "failed" : prev.offersPhase,
+            offersCurrentName: null,
+          },
+          updatedAt: now,
+        } as SearchJob | LookupJob;
+        await upsertRun(tx, table, next);
+        changed += 1;
+      }
     }
     return changed;
   });

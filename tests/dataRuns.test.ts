@@ -359,8 +359,39 @@ test("markInterruptedJobs fails one running job and leaves finished jobs untouch
   const failed = await runs.getJob(running.id);
   assert.equal(failed?.status, "failed");
   assert.equal(failed?.progress.message, "Interrupted by restart");
+  assert.equal(failed?.progress.stage, "failed");
+  assert.equal(await runs.isSearchWorkInFlight(failed!), false, "an interrupted job is not in flight");
   assert.deepEqual(await runs.getJob(finished.id), finished);
   assert.equal(await runs.markInterruptedJobs(), 0);
+});
+
+test("markInterruptedJobs ends offers analysis and copes with a null progress", async () => {
+  const inOffers = makeJob({
+    competitorIds: ["c1"],
+    progress: { ...makeJob().progress, stage: "analyzing_offers", offersPhase: "landing_pages", offersCurrentName: "Acme" },
+  });
+  await runs.saveJob(inOffers);
+  const nullProgress = makeLookup();
+  await getDb().query(
+    "insert into lookup_jobs (id, status, created_at, data) values ($1, 'running', $2, $3::jsonb)",
+    [nullProgress.id, nullProgress.createdAt, JSON.stringify({ ...nullProgress, progress: null })],
+  );
+
+  assert.equal(await runs.markInterruptedJobs(), 2);
+
+  const job = await runs.getJob(inOffers.id);
+  assert.equal(job?.status, "failed");
+  assert.equal(job?.progress.stage, "failed");
+  assert.equal(job?.progress.offersPhase, "failed");
+  assert.equal(job?.progress.offersCurrentName, null);
+  assert.equal(job?.offersReport?.status, "failed");
+  assert.equal(await runs.isSearchWorkInFlight(job!), false);
+
+  const lookup = await runs.getLookupJob(nullProgress.id);
+  assert.equal(lookup?.status, "failed");
+  assert.equal(lookup?.progress.stage, "failed");
+  assert.equal(lookup?.progress.message, "Interrupted by restart");
+  assert.equal(await runs.isLookupWorkInFlight(lookup!), false);
 });
 
 test("markInterruptedJobs also covers lookup jobs", async () => {
