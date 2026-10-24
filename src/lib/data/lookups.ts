@@ -21,7 +21,7 @@ import {
  * Last record per id, ordered by each id's last occurrence (one upsert cannot
  * touch a row twice).
  */
-function lastPerId<T extends { id: string }>(records: T[]): T[] {
+export function lastPerId<T extends { id: string }>(records: T[]): T[] {
   const byId = new Map<string, T>();
   for (const r of records) {
     byId.delete(r.id);
@@ -35,7 +35,8 @@ const NEWEST_FIRST = "order by (data->>'createdAt') desc nulls last, id desc";
 
 /* ── lookup ads ── */
 
-async function upsertLookupAds(tx: Queryable, ads: LookupAdRecord[]): Promise<void> {
+/** Inserts or replaces lookup ads (the caller holds lockRun on their lookup, or the exclusive key). */
+export async function upsertLookupAds(tx: Queryable, ads: LookupAdRecord[]): Promise<void> {
   await tx.query(
     `insert into lookup_ads (id, lookup_id, data)
      select x->>'id', x->>'lookupId', x from jsonb_array_elements($1::jsonb) as t(x)
@@ -168,19 +169,23 @@ export async function saveSearchCompetitorAds(
         [runId, options.replaceCompetitorId, records.map((a) => a.id)],
       );
     }
-    if (records.length) {
-      await tx.query(
-        `insert into search_competitor_ads (id, run_id, competitor_id, data)
-         select x->>'id', x->>'runId', x->>'competitorId', x from jsonb_array_elements($1::jsonb) as t(x)
-         on conflict (id) do update set
-           run_id        = excluded.run_id,
-           competitor_id = excluded.competitor_id,
-           data          = excluded.data`,
-        [JSON.stringify(records)],
-      );
-    }
+    await upsertSearchCompetitorAds(tx, records);
     return true;
   });
+}
+
+/** Inserts or replaces cached search ads (the caller holds lockRun on their run, or the exclusive key). */
+export async function upsertSearchCompetitorAds(tx: Queryable, ads: SearchCompetitorAdRecord[]): Promise<void> {
+  if (!ads.length) return;
+  await tx.query(
+    `insert into search_competitor_ads (id, run_id, competitor_id, data)
+     select x->>'id', x->>'runId', x->>'competitorId', x from jsonb_array_elements($1::jsonb) as t(x)
+     on conflict (id) do update set
+       run_id        = excluded.run_id,
+       competitor_id = excluded.competitor_id,
+       data          = excluded.data`,
+    [JSON.stringify(lastPerId(ads))],
+  );
 }
 
 export async function getSearchCompetitorAdsByRun(runId: string): Promise<SearchCompetitorAdRecord[]> {

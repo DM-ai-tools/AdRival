@@ -71,8 +71,6 @@ function serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
 
 /* ── shared SQL helpers ── */
 
-type RunTable = "jobs" | "lookup_jobs";
-
 /**
  * One advisory key guards all run rows as a whole. Every per-run writer holds
  * it shared; clearAllHistory / clearAllLookupHistory / markInterruptedJobs
@@ -91,8 +89,8 @@ export async function lockRunsShared(tx: Queryable): Promise<void> {
   await tx.query("select pg_advisory_xact_lock_shared($1::int, $2::int)", [RUNS_LOCK_CLASS, RUNS_LOCK_ID]);
 }
 
-/** Exclusive hold on the global runs key: waits out and blocks every per-run writer. */
-async function lockRunsExclusive(tx: Queryable): Promise<void> {
+/** Exclusive hold on the global runs key: waits out and blocks every per-run writer (bulk writers). */
+export async function lockRunsExclusive(tx: Queryable): Promise<void> {
   await tx.query("select pg_advisory_xact_lock($1::int, $2::int)", [RUNS_LOCK_CLASS, RUNS_LOCK_ID]);
 }
 
@@ -123,7 +121,7 @@ export async function runWasDeleted(q: Queryable, id: string): Promise<boolean> 
 }
 
 /** Remember deleted run ids (in order), keeping the newest MAX_DELETED_RUN_IDS. */
-async function rememberDeletedRuns(tx: Queryable, ids: string[]): Promise<void> {
+export async function rememberDeletedRuns(tx: Queryable, ids: string[]): Promise<void> {
   const wanted = ids.filter(Boolean);
   if (!wanted.length) return;
   await tx.query(
@@ -155,7 +153,10 @@ export function recreateOnlySql(data: string): string {
   return `coalesce(${data}->'recreateOnly' not in ('null', 'false', '0', '""'), false)`;
 }
 
-async function upsertRun(tx: Queryable, table: RunTable, row: SearchJob | LookupJob): Promise<void> {
+export type RunTable = "jobs" | "lookup_jobs";
+
+/** Inserts or replaces one run row (the caller holds its run lock or the exclusive key). */
+export async function upsertRun(tx: Queryable, table: RunTable, row: SearchJob | LookupJob): Promise<void> {
   await tx.query(
     `insert into ${table} (id, owner_user_id, space_id, status, created_at, data)
      values ($1, $2, $3, $4, coalesce($5::timestamptz, now()), $6::jsonb)

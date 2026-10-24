@@ -25,7 +25,8 @@ import {
  */
 export type CompetitorInput = CompetitorRecord & { recreatedPageHeavy?: RecreatedPageHeavy };
 
-async function upsertCompetitor(tx: Queryable, row: CompetitorRecord, ownerUserId: string | null): Promise<void> {
+/** Inserts or replaces one competitor row (the caller holds lockRun on its run, or the exclusive key). */
+export async function upsertCompetitor(tx: Queryable, row: CompetitorRecord, ownerUserId: string | null): Promise<void> {
   await tx.query(
     `insert into competitors (id, run_id, owner_user_id, created_at, data)
      values ($1, $2, $3, coalesce($4::timestamptz, now()), $5::jsonb)

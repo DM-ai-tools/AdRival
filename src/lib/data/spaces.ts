@@ -104,6 +104,118 @@ export async function listProjects(options?: {
   return rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
+/** One search or lookup as the admin run lists show it (no heavy run fields). */
+export interface RunOverviewRow {
+  kind: ProjectKind;
+  id: string;
+  title: string;
+  platform: string | null;
+  status: string;
+  stage: string | null;
+  ownerUserId: string | null;
+  spaceId: string | null;
+  archivedAt: string | null;
+  /** Competitors found (search) or ads saved (lookup). */
+  results: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Pipeline helper records (offers lookups, recreate and ad lookups), not user runs. */
+const INTERNAL_RUN_ID = "^(search-offers:|lookup-recreate-|lookup-ad-)";
+
+function arrayLengthSql(field: string): string {
+  return `case jsonb_typeof(${field}) when 'array' then jsonb_array_length(${field}) else 0 end`;
+}
+
+/**
+ * Searches and lookups across all users, newest first, with the total that
+ * matched before `limit`. `ownerUserIds` limits them to runs owned by those
+ * users (unowned runs are left out); `excludeInternal` leaves out pipeline
+ * helper records; `activeOnly` leaves out archived runs; `titleContains` is
+ * matched case-insensitively.
+ */
+export async function listRunOverview(filter: {
+  ownerUserIds?: Set<string> | null;
+  ownerUserId?: string;
+  kind?: string;
+  status?: string;
+  titleContains?: string;
+  excludeInternal?: boolean;
+  activeOnly?: boolean;
+  limit?: number;
+} = {}): Promise<{ rows: RunOverviewRow[]; total: number }> {
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+  const param = (value: unknown) => {
+    params.push(value);
+    return `$${params.length}`;
+  };
+  if (filter.ownerUserIds) conditions.push(`owner_user_id = any(${param([...filter.ownerUserIds])}::text[])`);
+  if (filter.ownerUserId) conditions.push(`owner_user_id = ${param(filter.ownerUserId)}`);
+  if (filter.kind) conditions.push(`kind = ${param(filter.kind)}`);
+  if (filter.status) conditions.push(`status = ${param(filter.status)}`);
+  if (filter.titleContains) conditions.push(`strpos(lower(title), ${param(filter.titleContains.toLowerCase())}) > 0`);
+  if (filter.excludeInternal) conditions.push(`not internal and id !~ ${param(INTERNAL_RUN_ID)}`);
+  if (filter.activeOnly) conditions.push("coalesce(archived_at, '') = ''");
+  const limit = filter.limit === undefined ? "" : `limit ${param(filter.limit)}`;
+  const { rows } = await getDb().query<{
+    kind: ProjectKind;
+    id: string;
+    title: string;
+    platform: string | null;
+    status: string;
+    stage: string | null;
+    owner_user_id: string | null;
+    space_id: string | null;
+    archived_at: string | null;
+    results: number;
+    created: string;
+    updated: string;
+    total: number;
+  }>(
+    `with runs as (
+       select 'search' as kind, id, created_at, status, owner_user_id, space_id,
+              coalesce(nullif(data->>'keyword', ''), 'Keyword search') as title,
+              data->>'platform' as platform, data->'progress'->>'stage' as stage,
+              data->>'archivedAt' as archived_at, ${arrayLengthSql("data->'competitorIds'")} as results,
+              data->>'createdAt' as created, data->>'updatedAt' as updated, false as internal
+         from jobs
+       union all
+       select 'lookup', id, created_at, status, owner_user_id, space_id,
+              coalesce(nullif(data->>'queryName', ''), 'Competitor lookup'),
+              data->>'platform', data->'progress'->>'stage',
+              data->>'archivedAt', ${arrayLengthSql("data->'adIds'")},
+              data->>'createdAt', data->>'updatedAt', ${truthySql("data->'internalOnly'")}
+         from lookup_jobs
+     )
+     select kind, id, title, platform, status, stage, owner_user_id, space_id, archived_at, results::int,
+            created, updated, (count(*) over ())::int as total
+       from runs
+      ${conditions.length ? `where ${conditions.join(" and ")}` : ""}
+      order by created_at desc, id desc
+      ${limit}`,
+    params,
+  );
+  return {
+    rows: rows.map((r) => ({
+      kind: r.kind,
+      id: r.id,
+      title: r.title,
+      platform: r.platform,
+      status: r.status,
+      stage: r.stage,
+      ownerUserId: r.owner_user_id,
+      spaceId: r.space_id,
+      archivedAt: r.archived_at,
+      results: r.results,
+      createdAt: r.created,
+      updatedAt: r.updated,
+    })),
+    total: rows[0]?.total ?? 0,
+  };
+}
+
 /** Change one run in place under its locks; false when the run is missing. */
 async function changeRun(kind: ProjectKind, id: string, change: (row: RunRow) => RunRow): Promise<boolean> {
   return withTx(async (tx) => {
@@ -173,6 +285,17 @@ export async function listProjectSpaces(options?: {
 export async function getProjectSpace(id: string): Promise<ProjectSpace | null> {
   const { rows } = await getDb().query<{ data: ProjectSpace }>("select data from project_spaces where id = $1", [id]);
   return rows[0]?.data ?? null;
+}
+
+/** Spaces by id (missing ids are left out). */
+export async function getProjectSpacesByIds(ids: Iterable<string | null | undefined>): Promise<Map<string, ProjectSpace>> {
+  const wanted = [...new Set([...ids].filter((id): id is string => Boolean(id)))];
+  if (!wanted.length) return new Map();
+  const { rows } = await getDb().query<{ data: ProjectSpace }>(
+    "select data from project_spaces where id = any($1::text[])",
+    [wanted],
+  );
+  return new Map(rows.map((r) => [r.data.id, r.data]));
 }
 
 export async function createProjectSpace(input: { clientName: string; ownerUserId: string }): Promise<ProjectSpace> {

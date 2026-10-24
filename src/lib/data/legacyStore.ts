@@ -5,8 +5,7 @@ import { creditsToSubunits } from "../accounting/units";
 /*
  * Pure helpers for the legacy store.json shape (DatabaseShape): building an
  * empty store, forward migrations and owner remapping for imports. No file or
- * database access here, so both the file store (db.ts) and the Postgres import
- * can use them.
+ * database access here; the history import (importHistory.ts) uses them.
  */
 
 /** Current store shape. Bump whenever migrateDb() gains a step. */

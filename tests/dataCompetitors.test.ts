@@ -12,10 +12,12 @@ import * as runs from "../src/lib/data/runs";
 import type {
   CompetitorRecord,
   IcpRecord,
+  LegacyCompetitorRecord,
   LookupAdRecord,
   LookupJob,
   RecreatedLandingPage,
   RecreatedPageHeavy,
+  RecreatedPageLight,
   SearchCompetitorAdRecord,
   SearchJob,
 } from "../src/lib/types";
@@ -100,7 +102,11 @@ function makeLookup(overrides: Partial<LookupJob> = {}): LookupJob {
   };
 }
 
-function makeCompetitor(runId: string, overrides: Partial<CompetitorRecord> = {}): CompetitorRecord {
+/**
+ * A competitor; `overrides.recreatedPage` may be a legacy full page (with
+ * html etc.), which saveCompetitor / updateCompetitor still split at runtime.
+ */
+function makeCompetitor(runId: string, overrides: Partial<LegacyCompetitorRecord> = {}): CompetitorRecord {
   seq += 1;
   return {
     id: `comp-${seq}`,
@@ -115,7 +121,12 @@ function makeCompetitor(runId: string, overrides: Partial<CompetitorRecord> = {}
     brand: { website: "https://x.invalid" },
     createdAt: new Date(Date.UTC(2026, 0, 3, 0, 0, seq)).toISOString(),
     ...overrides,
-  };
+  } as CompetitorRecord;
+}
+
+/** A legacy full page passed where the type now says light (still accepted at runtime). */
+function legacy(page: RecreatedLandingPage): RecreatedPageLight {
+  return page as unknown as RecreatedPageLight;
 }
 
 function makePage(overrides: Partial<RecreatedLandingPage> = {}): RecreatedLandingPage {
@@ -336,7 +347,7 @@ test("a full legacy page (no marker keys) still replaces the whole stored conten
   await runs.saveJob(job);
   const c = makeCompetitor(job.id, { recreatedPage: makePage() });
   await competitors.saveCompetitor({ ...c, recreatedPageHeavy: { html: "<p>old</p>", sourceArchive: SOURCE_ARCHIVE } });
-  await competitors.updateCompetitor(c.id, { recreatedPage: makePage({ html: "<p>legacy</p>" }) });
+  await competitors.updateCompetitor(c.id, { recreatedPage: legacy(makePage({ html: "<p>legacy</p>" })) });
   assert.deepEqual(await pages.getRecreatedPage(c.id), { html: "<p>legacy</p>" });
 });
 

@@ -369,8 +369,13 @@ export interface CompetitorRecord {
   brand: BrandReview;
   /** Landing-page offer + architecture analysis (persisted for history) */
   pageAnalysis?: LandingPageOfferAnalysis | null;
-  /** Recreated landing page HTML for the user's brand (separate viewer page) */
-  recreatedPage?: RecreatedLandingPage | null;
+  /**
+   * Recreated landing page for the user's brand (separate viewer page), light:
+   * its content (html, sourceArchive, generatedImages, previousHtml) is read
+   * with getRecreatedPage and written with setRecreatedPage. A page saved as
+   * content alone can be marker-only (just hasPage, pageBytes, pageUpdatedAt).
+   */
+  recreatedPage?: RecreatedPageLight | null;
   createdAt: string;
   /**
    * Set when this record was made from the offers dashboard to recreate one
@@ -1320,16 +1325,21 @@ export type RecreatedPageLight = Omit<RecreatedLandingPage, RecreatedPageHeavyKe
   pageUpdatedAt: string | null;
 };
 
+/** A competitor as store.json kept it, with the whole page inline (history imports). */
+export type LegacyCompetitorRecord = Omit<CompetitorRecord, "recreatedPage"> & {
+  recreatedPage?: RecreatedLandingPage | RecreatedPageLight | null;
+};
+
 export type LookupHistorySummary = LookupJob & {
   adCount: number;
 };
 
 export interface DatabaseShape {
   icps?: IcpRecord[];
-  /** Bumped by src/lib/db.ts migrations; see docs/MULTI_USER.md. */
+  /** Bumped by migrateDb (src/lib/data/legacyStore.ts); see docs/MULTI_USER.md. */
   schemaVersion?: number;
   jobs: SearchJob[];
-  competitors: CompetitorRecord[];
+  competitors: LegacyCompetitorRecord[];
   seenPageIds: string[];
   lookupJobs?: LookupJob[];
   lookupAds?: LookupAdRecord[];
@@ -1374,7 +1384,7 @@ export interface Organization {
 }
 export type UserStatus = "active" | "suspended" | "deleted";
 
-/** Stored in data/store.json — passwordHash never sent to clients. */
+/** Stored in the users table — passwordHash never sent to clients. */
 export interface AppUser {
   id: string;
   username: string;

@@ -1103,6 +1103,64 @@ export async function countOpenReservations(userId: string): Promise<number> {
   return rows[0]?.n ?? 0;
 }
 
+/** Credits charged per run id (calls without a run id are not counted). */
+export async function creditsByRun(runIds: string[]): Promise<Map<string, number>> {
+  if (!runIds.length) return new Map();
+  const { rows } = await getDb().query<{ run_id: string; credits: string | number }>(
+    `select run_id, coalesce(sum((data->>'creditsCharged')::numeric), 0) as credits
+       from provider_calls
+      where run_id = any($1::text[])
+      group by run_id`,
+    [runIds],
+  );
+  return new Map(rows.map((r) => [r.run_id, Number(r.credits)]));
+}
+
+/** Sum of `usage.requests` over a provider's calls for one provider request (e.g. a Manus task). */
+export async function sumProviderRequestUsage(provider: ProviderId, providerRequestId: string): Promise<number> {
+  const { rows } = await getDb().query<{ total: string | number | null }>(
+    `select coalesce(sum((data->'usage'->>'requests')::numeric), 0) as total
+       from provider_calls
+      where provider = $1 and data->>'providerRequestId' = $2`,
+    [provider, providerRequestId],
+  );
+  return Number(rows[0]?.total ?? 0);
+}
+
+export interface PeriodTotals {
+  allocatedSubunits: number;
+  consumedSubunits: number;
+  reservedSubunits: number;
+}
+
+/** Totals over current periods; `userIds` limits them to those users (an organisation). */
+export async function currentPeriodTotals(userIds?: Set<string> | null): Promise<PeriodTotals> {
+  const { rows } = await getDb().query<{ allocated: string | number; consumed: string | number; reserved: string | number }>(
+    `select coalesce(sum(allowance), 0) as allocated,
+            coalesce(sum(consumed), 0)  as consumed,
+            coalesce(sum(reserved), 0)  as reserved
+       from credit_periods
+      where status = 'current'${userIds ? " and user_id = any($1::text[])" : ""}`,
+    userIds ? [[...userIds]] : [],
+  );
+  return {
+    allocatedSubunits: Number(rows[0]?.allocated ?? 0),
+    consumedSubunits: Number(rows[0]?.consumed ?? 0),
+    reservedSubunits: Number(rows[0]?.reserved ?? 0),
+  };
+}
+
+/** Reservations held for one run, oldest first; `userIds` limits them to those users. */
+export async function listRunReservations(runId: string, userIds?: Set<string> | null): Promise<CreditReservation[]> {
+  const { rows } = await getDb().query<{ data: CreditReservation }>(
+    `select data from credit_reservations
+      where data->>'runId' = $1${userIds ? " and user_id = any($2::text[])" : ""}
+      order by (data->>'createdAt') collate "C" asc, id asc`,
+    userIds ? [runId, [...userIds]] : [runId],
+  );
+  return rows.map((r) => r.data);
+}
+
 /** Reservations an admin still needs to resolve. */
 export async function listPendingReconciliation(): Promise<CreditReservation[]> {
   const rows = await selectReservations(getDb(), { status: "pending_reconciliation" });

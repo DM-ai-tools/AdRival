@@ -56,6 +56,38 @@ export async function getUserById(id: string): Promise<AppUser | null> {
   return rows[0]?.data ?? null;
 }
 
+/** Users by id, for showing names next to many rows at once (missing ids are left out). */
+export async function getUsersByIds(ids: Iterable<string | null | undefined>): Promise<Map<string, AppUser>> {
+  const wanted = [...new Set([...ids].filter((id): id is string => Boolean(id)))];
+  if (!wanted.length) return new Map();
+  const { rows } = await getDb().query<{ data: AppUser }>("select data from users where id = any($1::text[])", [wanted]);
+  return new Map(rows.map((r) => [r.data.id, r.data]));
+}
+
+export interface UserCounts {
+  /** Every account that is not deleted. */
+  total: number;
+  active: number;
+  suspended: number;
+  deleted: number;
+  /** Active admins. */
+  admins: number;
+}
+
+/** Account counts by status; `userIds` limits them to those users (an organisation). */
+export async function countUsers(userIds?: Set<string> | null): Promise<UserCounts> {
+  const { rows } = await getDb().query<UserCounts>(
+    `select count(*) filter (where status <> 'deleted')::int                   as "total",
+            count(*) filter (where status = 'active')::int                     as "active",
+            count(*) filter (where status = 'suspended')::int                  as "suspended",
+            count(*) filter (where status = 'deleted')::int                    as "deleted",
+            count(*) filter (where role = 'admin' and status = 'active')::int  as "admins"
+       from users ${userIds ? "where id = any($1::text[])" : ""}`,
+    userIds ? [[...userIds]] : [],
+  );
+  return rows[0];
+}
+
 /** Case-insensitive (usernames are stored lowercased; the unique index is on lower(username)). */
 export async function getUserByUsername(username: string): Promise<AppUser | null> {
   const key = username.trim().toLowerCase();
