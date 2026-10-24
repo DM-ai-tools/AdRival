@@ -439,12 +439,24 @@ export type ReserveResult =
       reason: "insufficient_credits" | "account_not_active";
       requiredSubunits: number;
       availableSubunits: number;
+    }
+  | {
+      ok: false;
+      reason: "too_many_concurrent_runs";
+      /** The `maxOpenReservations` that was reached. */
+      limit: number;
+      requiredSubunits: number;
+      availableSubunits: number;
     };
 
 /**
  * Atomically hold credits. The balance read and the hold run under the user's
  * credits lock, so two concurrent runs cannot both see the same available
  * balance and overspend it.
+ *
+ * With `maxOpenReservations`, the user's open reservations are counted under
+ * the same lock and the hold is refused when the count has reached it, so two
+ * runs started at once cannot both pass a concurrency limit of one.
  */
 export async function reserveCredits(input: {
   userId: string;
@@ -455,10 +467,25 @@ export async function reserveCredits(input: {
   runId?: string | null;
   note?: string | null;
   ttlMs?: number;
+  maxOpenReservations?: number;
 }): Promise<ReserveResult> {
   return withTx(async (tx): Promise<ReserveResult> => {
     // Locks this user together with any user whose holds it recovers.
     await recoverAbandoned(tx, [input.userId]);
+
+    if (input.maxOpenReservations !== undefined) {
+      // Counted after recovery, as runBillable did after its sweep.
+      const open = await countOpenReservationsIn(tx, input.userId);
+      if (open >= input.maxOpenReservations) {
+        return {
+          ok: false,
+          reason: "too_many_concurrent_runs",
+          limit: input.maxOpenReservations,
+          requiredSubunits: input.amountSubunits,
+          availableSubunits: 0,
+        };
+      }
+    }
 
     const user = await readUser(tx, input.userId);
     if (!user || user.status !== "active") {
@@ -557,6 +584,42 @@ export async function touchReservation(reservationId: string, ttlMs = RESERVATIO
   });
 }
 
+/**
+ * Adds `additionalSubunits` to a locked open reservation and its period (both
+ * mutated in place and saved) with the ledger hold entry. `ttlMs` also renews
+ * the reservation's heartbeat in the same write.
+ */
+async function applyExtension(
+  tx: Queryable,
+  reservation: CreditReservation,
+  period: CreditPeriod,
+  additionalSubunits: number,
+  ttlMs?: number,
+): Promise<void> {
+  reservation.amountSubunits += additionalSubunits;
+  reservation.updatedAt = now();
+  if (ttlMs !== undefined) reservation.expiresAt = new Date(Date.now() + ttlMs).toISOString();
+  period.reservedSubunits += additionalSubunits;
+  period.updatedAt = now();
+  await updateReservation(tx, reservation);
+  await savePeriod(tx, period);
+  await appendLedgerEntries(tx, [
+    draft({
+      userId: reservation.userId,
+      periodId: period.id,
+      type: "reservation_hold",
+      deltaSubunits: -additionalSubunits,
+      balanceAfterSubunits: availableSubunits(period),
+      reason: `Incremental hold for ${reservation.operation}`,
+      actorUserId: reservation.userId,
+      reservationId: reservation.id,
+      projectKind: reservation.projectKind,
+      projectId: reservation.projectId,
+      runId: reservation.runId,
+    }),
+  ]);
+}
+
 /** Grow an existing hold for a workflow whose size was not known up front. */
 export async function extendReservation(
   reservationId: string,
@@ -575,28 +638,77 @@ export async function extendReservation(
     if (!unlimited && additionalSubunits > available) {
       return { ok: false, availableSubunits: available };
     }
-    reservation.amountSubunits += additionalSubunits;
-    reservation.updatedAt = now();
-    period.reservedSubunits += additionalSubunits;
-    period.updatedAt = now();
-    await updateReservation(tx, reservation);
-    await savePeriod(tx, period);
-    await appendLedgerEntries(tx, [
-      draft({
-        userId: reservation.userId,
-        periodId: period.id,
-        type: "reservation_hold",
-        deltaSubunits: -additionalSubunits,
-        balanceAfterSubunits: availableSubunits(period),
-        reason: `Incremental hold for ${reservation.operation}`,
-        actorUserId: reservation.userId,
-        reservationId: reservation.id,
-        projectKind: reservation.projectKind,
-        projectId: reservation.projectId,
-        runId: reservation.runId,
-      }),
-    ]);
+    await applyExtension(tx, reservation, period, additionalSubunits);
     return { ok: true, availableSubunits: availableSubunits(period) };
+  });
+}
+
+export type StepHoldResult =
+  | { ok: true; addedSubunits: number }
+  | { ok: false; reason: "reservation_inactive" }
+  | { ok: false; reason: "insufficient_credits"; requiredSubunits: number; availableSubunits: number };
+
+/**
+ * Make sure a run's reservation still holds at least `ceilingSubunits` for its
+ * next provider call, topping it up when it does not, and renew its heartbeat.
+ *
+ * One transaction under the owner's credits lock and the reservation row lock:
+ * the read of the current hold and the top-up cannot interleave with another
+ * call of the same run doing the same, so parallel steps never top up twice
+ * past the run budget (the file store got this from running synchronously).
+ *
+ * Top-up rule (as meter.ts had it): grow to `ceiling * topUpMultiple`, capped
+ * by the room left in `runBudgetSubunits` (unlimited for active admins); when
+ * the balance cannot cover that, grow by the bare minimum; otherwise refuse.
+ */
+export async function ensureReservationHold(input: {
+  reservationId: string;
+  ceilingSubunits: number;
+  runBudgetSubunits: number;
+  topUpMultiple: number;
+  ttlMs?: number;
+}): Promise<StepHoldResult> {
+  const ttlMs = input.ttlMs ?? RESERVATION_TTL_MS;
+  const ceiling = input.ceilingSubunits;
+  return withTx(async (tx): Promise<StepHoldResult> => {
+    const reservation = await lockReservation(tx, input.reservationId);
+    if (!reservation || reservation.status !== "open") return { ok: false, reason: "reservation_inactive" };
+
+    if (reservation.amountSubunits >= ceiling) {
+      await updateReservation(tx, {
+        ...reservation,
+        expiresAt: new Date(Date.now() + ttlMs).toISOString(),
+        updatedAt: now(),
+      });
+      return { ok: true, addedSubunits: 0 };
+    }
+
+    const alreadyCommitted = reservation.settledSubunits + reservation.amountSubunits;
+    const unlimited = userHasUnlimitedCredits(await readUser(tx, reservation.userId));
+    const roomInBudget = unlimited
+      ? Number.MAX_SAFE_INTEGER
+      : Math.max(0, input.runBudgetSubunits - alreadyCommitted);
+    if (!unlimited && roomInBudget < ceiling) {
+      // The configured per-run cap, not the balance, is the binding limit.
+      return { ok: false, reason: "insufficient_credits", requiredSubunits: ceiling, availableSubunits: roomInBudget };
+    }
+
+    const want = Math.min(ceiling * input.topUpMultiple, roomInBudget);
+    const topUp = Math.max(ceiling, want) - reservation.amountSubunits;
+    // The bare minimum, tried when the balance cannot cover the batched top-up.
+    const minimum = ceiling - reservation.amountSubunits;
+
+    const period = await selectPeriodById(tx, reservation.periodId, true);
+    if (!period) {
+      return { ok: false, reason: "insufficient_credits", requiredSubunits: minimum, availableSubunits: 0 };
+    }
+    const available = availableSubunits(period);
+    const add = unlimited || topUp <= available ? topUp : minimum <= available ? minimum : null;
+    if (add === null) {
+      return { ok: false, reason: "insufficient_credits", requiredSubunits: minimum, availableSubunits: available };
+    }
+    await applyExtension(tx, reservation, period, add, ttlMs);
+    return { ok: true, addedSubunits: add };
   });
 }
 
@@ -976,6 +1088,14 @@ export interface ProviderBreakdownRow {
 
 export async function usageByProvider(query: UsageQuery = {}): Promise<ProviderBreakdownRow[]> {
   const { rows } = await queryProviderCalls({ ...query, limit: Number.MAX_SAFE_INTEGER });
+  return summarizeUsageByProvider(rows);
+}
+
+/**
+ * Per-provider totals of calls already loaded (usageByProvider without the
+ * query). Pass rows in queryProviderCalls order for identical output.
+ */
+export function summarizeUsageByProvider(rows: readonly ProviderCallRecord[]): ProviderBreakdownRow[] {
   const map = new Map<ProviderId, ProviderBreakdownRow>();
   for (const call of rows) {
     const row =
@@ -1007,12 +1127,19 @@ export async function usageByProvider(query: UsageQuery = {}): Promise<ProviderB
   return [...map.values()].sort((a, b) => b.creditsCharged - a.creditsCharged);
 }
 
-export async function usageByDate(query: UsageQuery = {}): Promise<Array<{
+export interface DateUsageRow {
   date: string;
   calls: number;
   creditsCharged: number;
-}>> {
+}
+
+export async function usageByDate(query: UsageQuery = {}): Promise<DateUsageRow[]> {
   const { rows } = await queryProviderCalls({ ...query, limit: Number.MAX_SAFE_INTEGER });
+  return summarizeUsageByDate(rows);
+}
+
+/** Per-day totals (UTC date of startedAt), newest first, of calls already loaded. */
+export function summarizeUsageByDate(rows: readonly ProviderCallRecord[]): DateUsageRow[] {
   const map = new Map<string, { date: string; calls: number; creditsCharged: number }>();
   for (const call of rows) {
     const date = call.startedAt.slice(0, 10);
@@ -1095,12 +1222,16 @@ export async function creditsForRun(
   };
 }
 
-export async function countOpenReservations(userId: string): Promise<number> {
-  const { rows } = await getDb().query<{ n: number }>(
+async function countOpenReservationsIn(q: Queryable, userId: string): Promise<number> {
+  const { rows } = await q.query<{ n: number }>(
     "select count(*)::int as n from credit_reservations where user_id = $1 and status = 'open'",
     [userId],
   );
   return rows[0]?.n ?? 0;
+}
+
+export async function countOpenReservations(userId: string): Promise<number> {
+  return countOpenReservationsIn(getDb(), userId);
 }
 
 /** Credits charged per run id (calls without a run id are not counted). */

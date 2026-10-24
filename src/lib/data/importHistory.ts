@@ -18,6 +18,8 @@ import {
   rememberDeletedRuns,
   suppressLookupRunHere,
   suppressSearchRunHere,
+  unsuppressLookupRunHere,
+  unsuppressSearchRunHere,
   upsertRun,
 } from "./runs";
 
@@ -122,11 +124,35 @@ function newestIcpPerStage(icps: IcpRecord[]): IcpRecord[] {
   return [...byStage.values()];
 }
 
+/** Run ids an import made live or removed, applied to this process once it commits. */
+interface RunChanges {
+  liveSearch: string[];
+  liveLookup: string[];
+  removedSearch: string[];
+  removedLookup: string[];
+}
+
 async function importHistory(
   mode: "replace" | "merge",
   payload: Partial<DatabaseShape>,
   options: ImportOwnerOptions,
 ): Promise<ImportResult> {
+  const { result, runs } = await importInTx(mode, payload, options);
+  // Only after the commit: a rolled-back import changes nothing here. Runs the
+  // import wrote are live, so this process may write them again; runs a
+  // replace removed are refused from now on (a pipeline may still hold one).
+  for (const id of runs.liveSearch) unsuppressSearchRunHere(id);
+  for (const id of runs.liveLookup) unsuppressLookupRunHere(id);
+  for (const id of runs.removedSearch) suppressSearchRunHere(id);
+  for (const id of runs.removedLookup) suppressLookupRunHere(id);
+  return result;
+}
+
+function importInTx(
+  mode: "replace" | "merge",
+  payload: Partial<DatabaseShape>,
+  options: ImportOwnerOptions,
+): Promise<{ result: ImportResult; runs: RunChanges }> {
   return withTx(async (tx) => {
     await lockRunsExclusive(tx);
     const before = await getStoreStats(tx);
@@ -165,7 +191,7 @@ async function importHistory(
       await tx.query("insert into seen_page_ids (id) select unnest($1::text[]) on conflict (id) do nothing", [part]);
     }
 
-    const removed =
+    const gone =
       mode === "replace"
         ? await deleteOthers(tx, {
             jobs: jobs.map((r) => r.id),
@@ -176,7 +202,8 @@ async function importHistory(
             icps: icps.map((r) => r.id),
             seenPageIds,
           })
-        : [];
+        : { search: [], lookup: [] };
+    const removed = [...gone.search, ...gone.lookup];
 
     // Tombstones: the import's, then every run a replace removed. A run that
     // is live after the import never has one.
@@ -194,19 +221,27 @@ async function importHistory(
     }
     await rememberDeletedRuns(tx, tombstones);
 
-    return { before, after: await getStoreStats(tx), owners };
+    return {
+      result: { before, after: await getStoreStats(tx), owners },
+      runs: {
+        liveSearch: jobs.map((j) => j.id),
+        liveLookup: lookupJobs.map((j) => j.id),
+        removedSearch: gone.search,
+        removedLookup: gone.lookup,
+      },
+    };
   });
 }
 
 /**
  * Replace: deletes every history row the import did not write (ids kept per
- * table). Returns the removed run ids, oldest first; this process stops
- * writing them at once.
+ * table). Returns the removed run ids per table, oldest first; the caller
+ * suppresses them in this process once the transaction has committed.
  */
 async function deleteOthers(
   tx: Queryable,
   keep: Record<"jobs" | "lookupJobs" | "competitors" | "lookupAds" | "searchAds" | "icps" | "seenPageIds", string[]>,
-): Promise<string[]> {
+): Promise<{ search: string[]; lookup: string[] }> {
   const removedRuns = (table: "jobs" | "lookup_jobs", ids: string[]) =>
     selectIds(
       tx,
@@ -222,9 +257,7 @@ async function deleteOthers(
   await tx.query("delete from search_competitor_ads where not (id = any($1::text[]))", [keep.searchAds]);
   await tx.query("delete from icps where not (id = any($1::text[]))", [keep.icps]);
   await tx.query("delete from seen_page_ids where not (id = any($1::text[]))", [keep.seenPageIds]);
-  for (const id of searchGone) suppressSearchRunHere(id);
-  for (const id of lookupGone) suppressLookupRunHere(id);
-  return [...searchGone, ...lookupGone];
+  return { search: searchGone, lookup: lookupGone };
 }
 
 /**

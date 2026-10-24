@@ -47,6 +47,13 @@ export function lookupRunSuppressedHere(id: string): boolean {
 export function suppressLookupRunHere(id: string): void {
   suppressedLookupJobIds.add(id);
 }
+/** Lift this process's tombstone, e.g. for a run a history import made live again. */
+export function unsuppressSearchRunHere(id: string): void {
+  suppressedSearchJobIds.delete(id);
+}
+export function unsuppressLookupRunHere(id: string): void {
+  suppressedLookupJobIds.delete(id);
+}
 
 /**
  * Writes to one run go out one at a time, in call order. With the file store

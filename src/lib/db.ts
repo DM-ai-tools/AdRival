@@ -73,6 +73,7 @@ export {
   getUsersByIds,
   getUserByUsername,
   countActiveAdmins,
+  countActiveOrgAdmins,
   countUsers,
   createUser,
   updateUser,

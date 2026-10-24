@@ -106,6 +106,15 @@ export async function countActiveAdmins(q: Queryable = getDb()): Promise<number>
   return rows[0]?.n ?? 0;
 }
 
+/** Active admins of one organisation. Pass the transaction handle inside a `guard`. */
+export async function countActiveOrgAdmins(orgId: string, q: Queryable = getDb()): Promise<number> {
+  const { rows } = await q.query<{ n: number }>(
+    "select count(*)::int as n from users where org_id = $1 and role = 'admin' and status = 'active'",
+    [orgId],
+  );
+  return rows[0]?.n ?? 0;
+}
+
 export async function createUser(
   input: {
     username: string;
