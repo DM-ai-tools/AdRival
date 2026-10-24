@@ -180,9 +180,18 @@ function decode(gz: Buffer | Uint8Array): RecreatedPageHeavy {
  * archived page is fetched from Storage; when that fails this throws
  * ArchivedPageUnavailableError.
  */
-export async function getRecreatedPage(competitorId: string): Promise<RecreatedPageHeavy | null> {
-  const { rows } = await getDb().query<{ content: Buffer | Uint8Array | null; archive_path: string | null }>(
-    "select content, archive_path from recreated_pages where competitor_id = $1",
+export function getRecreatedPage(competitorId: string): Promise<RecreatedPageHeavy | null> {
+  return readRecreatedPage(getDb(), competitorId, false);
+}
+
+/** getRecreatedPage on a given handle; `forUpdate` locks the content row (inside a transaction). */
+export async function readRecreatedPage(
+  q: Queryable,
+  competitorId: string,
+  forUpdate: boolean,
+): Promise<RecreatedPageHeavy | null> {
+  const { rows } = await q.query<{ content: Buffer | Uint8Array | null; archive_path: string | null }>(
+    `select content, archive_path from recreated_pages where competitor_id = $1${forUpdate ? " for update" : ""}`,
     [competitorId],
   );
   const row = rows[0];

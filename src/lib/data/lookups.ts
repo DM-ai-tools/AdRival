@@ -82,7 +82,20 @@ export async function getLookupAd(adId: string): Promise<LookupAdRecord | null> 
   return rows[0]?.data ?? null;
 }
 
-export async function updateLookupAd(adId: string, patch: Partial<LookupAdRecord>): Promise<LookupAdRecord | null> {
+export function updateLookupAd(adId: string, patch: Partial<LookupAdRecord>): Promise<LookupAdRecord | null> {
+  return updateLookupAdWith(adId, () => patch);
+}
+
+/**
+ * Atomic read-modify-write of one lookup ad. `updater` runs inside the write
+ * transaction with the stored ad (row locked) and returns the patch to apply
+ * (updateLookupAd's rules), or null to write nothing (the stored ad is
+ * returned). It must be synchronous. Null when the ad does not exist.
+ */
+export async function updateLookupAdWith(
+  adId: string,
+  updater: (existing: LookupAdRecord) => Partial<LookupAdRecord> | null,
+): Promise<LookupAdRecord | null> {
   return withTx(async (tx) => {
     const owner = await tx.query<{ lookup_id: string }>("select lookup_id from lookup_ads where id = $1", [adId]);
     const lookupId = owner.rows[0]?.lookup_id;
@@ -93,6 +106,8 @@ export async function updateLookupAd(adId: string, patch: Partial<LookupAdRecord
     ]);
     const prev = rows[0]?.data;
     if (!prev) return null;
+    const patch = updater(prev);
+    if (!patch) return prev;
     let next: LookupAdRecord = { ...prev, ...patch };
     // Never let a stale "pending" clobber a completed/failed analysis
     if (

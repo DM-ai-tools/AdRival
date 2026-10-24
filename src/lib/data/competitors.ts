@@ -1,6 +1,6 @@
 import type { CompetitorRecord, RecreatedPageHeavy, SearchJob } from "../types";
 import { getDb, withTx, type Queryable } from "./client";
-import { applyHeavy, planPage } from "./recreatedPages";
+import { applyHeavy, planPage, readRecreatedPage } from "./recreatedPages";
 import {
   isoOrNull,
   lockRun,
@@ -151,6 +151,62 @@ export async function updateCompetitor(id: string, patch: Partial<CompetitorReco
     if ("recreatedPage" in patch) {
       const plan = planPage(patch.recreatedPage, undefined, existing.recreatedPage, true);
       next.recreatedPage = plan.page as CompetitorRecord["recreatedPage"];
+      action = plan.action;
+    }
+    await tx.query(
+      `update competitors
+          set run_id = $2, created_at = coalesce($3::timestamptz, created_at), data = $4::jsonb
+        where id = $1`,
+      [id, next.runId, isoOrNull(next.createdAt), JSON.stringify(next)],
+    );
+    await applyHeavy(tx, id, action);
+    return next;
+  });
+}
+
+/** What an updateCompetitorWith updater returns: a patch, with optional page content apart. */
+export type CompetitorUpdate = Partial<CompetitorRecord> & { recreatedPageHeavy?: RecreatedPageHeavy };
+
+/**
+ * Atomic read-modify-write of one competitor. `updater` runs inside the write
+ * transaction with the stored record (row locked), so a concurrent update can
+ * never be lost between the read and the write. It must be synchronous and
+ * returns the patch to apply (updateCompetitor's rules for recreatedPage), or
+ * null to write nothing (the stored record is returned).
+ *
+ * With `withContent`, the updater also gets the page content (null when none
+ * is stored; an archived page is fetched and may throw
+ * ArchivedPageUnavailableError). Without it the content argument is undefined.
+ * `recreatedPageHeavy` in the patch replaces the whole stored content in the
+ * same transaction, so pass every field to keep.
+ */
+export async function updateCompetitorWith(
+  id: string,
+  updater: (existing: CompetitorRecord, content: RecreatedPageHeavy | null | undefined) => CompetitorUpdate | null,
+  options: { withContent?: boolean } = {},
+): Promise<CompetitorRecord | null> {
+  return withTx(async (tx) => {
+    const owner = await tx.query<{ run_id: string }>("select run_id from competitors where id = $1", [id]);
+    const runId = owner.rows[0]?.run_id;
+    if (runId === undefined) return null;
+    await lockRun(tx, runId);
+    const existing = await storedCompetitor(tx, id, true);
+    if (!existing) return null;
+    const content = options.withContent ? await readRecreatedPage(tx, id, true) : undefined;
+    const update = updater(existing, content);
+    if (!update) return existing;
+    const { recreatedPageHeavy, ...patch } = update;
+    const next: CompetitorRecord = { ...existing, ...patch };
+    let action: Parameters<typeof applyHeavy>[2] = { kind: "keep" };
+    if ("recreatedPage" in patch || recreatedPageHeavy) {
+      const plan = planPage(
+        "recreatedPage" in patch ? patch.recreatedPage : undefined,
+        recreatedPageHeavy,
+        existing.recreatedPage,
+        true,
+      );
+      next.recreatedPage = plan.page as CompetitorRecord["recreatedPage"];
+      if (plan.page === undefined) delete next.recreatedPage;
       action = plan.action;
     }
     await tx.query(

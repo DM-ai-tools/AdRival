@@ -47,9 +47,10 @@ export {
   getRecreateOnlyPagesByRun,
   getCompetitor,
   updateCompetitor,
+  updateCompetitorWith,
   listAllCompetitors,
 } from "./data/competitors";
-export type { CompetitorInput } from "./data/competitors";
+export type { CompetitorInput, CompetitorUpdate } from "./data/competitors";
 
 export { getRecreatedPage, setRecreatedPage } from "./data/recreatedPages";
 
@@ -60,6 +61,7 @@ export {
   saveLookupAds,
   getLookupAd,
   updateLookupAd,
+  updateLookupAdWith,
   getLookupAds,
   saveSearchCompetitorAd,
   saveSearchCompetitorAds,
