@@ -53,11 +53,11 @@ export interface RunPrecheck {
  * Cheap read-only check so the UI can warn before a run is attempted. The
  * authoritative check is the atomic reservation inside `runBillable`.
  */
-export function precheckRun(
+export async function precheckRun(
   user: AppUser,
   initialHoldSubunits = DEFAULT_INITIAL_HOLD,
-): RunPrecheck {
-  const summary = getCreditSummary(user.id);
+): Promise<RunPrecheck> {
+  const summary = await getCreditSummary(user.id);
   if (user.status !== "active") {
     return {
       ok: false,
@@ -67,9 +67,9 @@ export function precheckRun(
       availableSubunits: summary.availableSubunits,
     };
   }
-  const settings = getAppSettings();
+  const settings = await getAppSettings();
   const limit = user.maxConcurrentRuns ?? settings.maxConcurrentRunsPerUser;
-  if (countOpenReservations(user.id) >= limit) {
+  if ((await countOpenReservations(user.id)) >= limit) {
     return {
       ok: false,
       reason: "too_many_concurrent_runs",
@@ -109,6 +109,9 @@ export function precheckRun(
  * contacted for a run that could not be funded. Whatever is left of the hold is
  * released when `fn` settles, unless the run parked a call as pending
  * reconciliation.
+ *
+ * The concurrency check runs inside the reservation's transaction (under the
+ * user's credits lock), so two runs started at once cannot both pass it.
  */
 export async function runBillable<T>(
   options: BillableRunOptions,
@@ -122,14 +125,11 @@ export async function runBillable<T>(
   }
 
   // Reclaim holds abandoned by a crashed process before measuring the balance.
-  sweepAbandonedReservations();
+  await sweepAbandonedReservations();
 
-  const settings = getAppSettings();
+  const settings = await getAppSettings();
   const concurrencyLimit =
     user.maxConcurrentRuns ?? settings.maxConcurrentRunsPerUser;
-  if (countOpenReservations(user.id) >= concurrencyLimit) {
-    throw new TooManyConcurrentRunsError(concurrencyLimit);
-  }
 
   const runBudget = Math.min(
     options.runBudgetSubunits ?? settings.maxRunReservationSubunits,
@@ -140,15 +140,20 @@ export async function runBillable<T>(
     runBudget,
   );
 
-  const reserved = reserveCredits({
+  const reserved = await reserveCredits({
     userId: user.id,
     amountSubunits: initialHold,
     operation: options.operation,
     projectKind: options.projectKind,
     projectId: options.projectId,
     runId: options.runId,
+    // Counted under the credits lock, before the account and balance checks.
+    maxOpenReservations: concurrencyLimit,
   });
   if (!reserved.ok) {
+    if (reserved.reason === "too_many_concurrent_runs") {
+      throw new TooManyConcurrentRunsError(reserved.limit);
+    }
     if (reserved.reason === "account_not_active") {
       throw new SpendAuthorizationRevokedError();
     }
@@ -175,7 +180,7 @@ export async function runBillable<T>(
     );
   } finally {
     // No-op when the run already parked the reservation for reconciliation.
-    releaseReservation(reservationId, "Run finished", "settled");
+    await releaseReservation(reservationId, "Run finished", "settled");
   }
 }
 
@@ -186,13 +191,13 @@ export interface RunCreditReport {
 }
 
 /** Numbers behind "This run used X credits. You have Y credits available." */
-export function reportRunCredits(userId: string, runId: string): RunCreditReport {
+export async function reportRunCredits(userId: string, runId: string): Promise<RunCreditReport> {
   // Scoped to this payer: inside a shared project each user sees only their own
   // charges, never the project owner's.
-  const { creditsCharged, pendingCalls } = creditsForRun(runId, userId);
+  const { creditsCharged, pendingCalls } = await creditsForRun(runId, userId);
   return {
     runCreditsCharged: creditsCharged,
-    availableSubunits: getCreditSummary(userId).availableSubunits,
+    availableSubunits: (await getCreditSummary(userId)).availableSubunits,
     pendingCalls,
   };
 }

@@ -31,7 +31,7 @@ export async function recordManusTaskCredits(input: {
   const recorded = await sumProviderRequestUsage("manus", input.taskId);
   const delta = Math.round((total - recorded) * 100) / 100;
   if (delta <= 0) return 0;
-  recordIncurredUsage({
+  await recordIncurredUsage({
     provider: "manus",
     operation: input.operation,
     usage: { requests: delta },

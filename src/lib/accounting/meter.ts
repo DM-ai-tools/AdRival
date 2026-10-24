@@ -21,12 +21,10 @@ import {
 } from "./errors";
 import { priceTokenUsage, priceUnitUsage } from "./priceBook";
 import {
-  extendReservation,
-  getReservation,
+  ensureReservationHold,
   releaseReservation,
   reserveCredits,
   settleProviderCall,
-  touchReservation,
   userHasUnlimitedCredits,
 } from "./service";
 import { USD_MICROS } from "./units";
@@ -98,8 +96,8 @@ function safeErrorMessage(err: unknown): string {
   return raw.replace(/(key|token|secret|authorization)[^,;\s]*/gi, "[redacted]").slice(0, 300);
 }
 
-function assertProviderPermitted(provider: ProviderId, model: string | null, userId: string) {
-  const settings = getAppSettings();
+async function assertProviderPermitted(provider: ProviderId, model: string | null, userId: string): Promise<void> {
+  const settings = await getAppSettings();
   if (settings.disabledProviders.includes(provider)) {
     throw new ProviderNotPermittedError(
       "This capability is currently disabled by your administrator.",
@@ -110,7 +108,7 @@ function assertProviderPermitted(provider: ProviderId, model: string | null, use
       "This capability is currently disabled by your administrator.",
     );
   }
-  const user = getUserById(userId);
+  const user = await getUserById(userId);
   if (!user) throw new SpendAuthorizationRevokedError("Account not found.");
   if (user.status !== "active") {
     throw new SpendAuthorizationRevokedError(
@@ -135,50 +133,28 @@ function assertProviderPermitted(provider: ProviderId, model: string | null, use
  * Make sure at least `ceiling` subunits are still held for this run, topping up
  * the reservation when they are not. Throws before the provider is contacted
  * when the next step cannot be funded.
+ *
+ * The read of the hold and the top-up are one transaction
+ * (ensureReservationHold), so parallel steps of one run cannot both top up.
  */
-function ensureHoldForStep(
+async function ensureHoldForStep(
   reservationId: string,
   ceiling: number,
   runBudgetSubunits: number,
-) {
-  const reservation = getReservation(reservationId);
-  if (!reservation) {
+): Promise<void> {
+  const result = await ensureReservationHold({
+    reservationId,
+    ceilingSubunits: ceiling,
+    runBudgetSubunits,
+    topUpMultiple: TOPUP_MULTIPLE,
+  });
+  if (result.ok) return;
+  if (result.reason === "reservation_inactive") {
     throw new SpendAuthorizationRevokedError(
       "The credit reservation for this task is no longer active.",
     );
   }
-  if (reservation.status !== "open") {
-    throw new SpendAuthorizationRevokedError(
-      "The credit reservation for this task is no longer active.",
-    );
-  }
-  if (reservation.amountSubunits >= ceiling) {
-    touchReservation(reservationId);
-    return;
-  }
-
-  const alreadyCommitted = reservation.settledSubunits + reservation.amountSubunits;
-  const unlimited = userHasUnlimitedCredits(getUserById(reservation.userId));
-  const roomInBudget = unlimited
-    ? Number.MAX_SAFE_INTEGER
-    : Math.max(0, runBudgetSubunits - alreadyCommitted);
-  if (!unlimited && roomInBudget < ceiling) {
-    // The configured per-run cap, not the balance, is the binding limit.
-    throw new InsufficientCreditsError(ceiling, roomInBudget);
-  }
-
-  const want = Math.min(ceiling * TOPUP_MULTIPLE, roomInBudget);
-  const topUp = Math.max(ceiling, want) - reservation.amountSubunits;
-  const result = extendReservation(reservationId, topUp);
-  if (!result.ok) {
-    // Retry with the bare minimum before giving up.
-    const minimum = ceiling - reservation.amountSubunits;
-    const retry = extendReservation(reservationId, minimum);
-    if (!retry.ok) {
-      throw new InsufficientCreditsError(minimum, retry.availableSubunits);
-    }
-  }
-  touchReservation(reservationId);
+  throw new InsufficientCreditsError(result.requiredSubunits, result.availableSubunits);
 }
 
 /**
@@ -203,9 +179,9 @@ export async function meterProviderCall<T>(
   }
 
   const model = spec.model ?? null;
-  assertProviderPermitted(spec.provider, model, context.chargedUserId);
+  await assertProviderPermitted(spec.provider, model, context.chargedUserId);
 
-  const ruleSet = getActiveConversionRuleSet();
+  const ruleSet = await getActiveConversionRuleSet();
   const ceiling = reservationCeiling(ruleSet, spec.provider);
   if (ceiling <= 0) throw new UnboundedOperationError(spec.provider);
 
@@ -213,7 +189,7 @@ export async function meterProviderCall<T>(
   let reservationId = context.reservationId;
   let adHocReservation = false;
   if (!reservationId) {
-    const reserved = reserveCredits({
+    const reserved = await reserveCredits({
       userId: context.chargedUserId,
       amountSubunits: ceiling,
       operation: spec.operation,
@@ -234,7 +210,7 @@ export async function meterProviderCall<T>(
     reservationId = reserved.reservation.id;
     adHocReservation = true;
   } else {
-    ensureHoldForStep(reservationId, ceiling, context.runBudgetSubunits);
+    await ensureHoldForStep(reservationId, ceiling, context.runBudgetSubunits);
   }
 
   const idempotencyKey = crypto.randomUUID();
@@ -242,7 +218,7 @@ export async function meterProviderCall<T>(
   const startedMs = Date.now();
   const rateKey = model ?? spec.endpoint ?? null;
 
-  const settle = (
+  const settle = async (
     status: ProviderCallStatus,
     reported: ReportedUsage | null,
     errorMessage: string | null,
@@ -283,7 +259,7 @@ export async function meterProviderCall<T>(
         priceUnitUsage(spec.provider, usage).usdMicros;
     }
 
-    const result = settleProviderCall({
+    const result = await settleProviderCall({
       idempotencyKey,
       initiatedByUserId: context.initiatedByUserId,
       chargedUserId: context.chargedUserId,
@@ -310,7 +286,7 @@ export async function meterProviderCall<T>(
     context.chargedSubunits.value += result.call.creditsCharged;
 
     if (adHocReservation && confidence !== "pending_reconciliation") {
-      releaseReservation(reservationId!, "Single-call hold settled", "settled");
+      await releaseReservation(reservationId!, "Single-call hold settled", "settled");
     }
     return result;
   };
@@ -318,19 +294,19 @@ export async function meterProviderCall<T>(
   try {
     const result = await fn();
     const reported = spec.extractUsage ? spec.extractUsage(result) : null;
-    settle("succeeded", reported, null);
+    await settle("succeeded", reported, null);
     return result;
   } catch (err) {
     const status = classifyFailure(err);
-    settle(status, null, safeErrorMessage(err));
+    await settle(status, null, safeErrorMessage(err));
     if (
       looksLikeProviderCreditFailure(err) &&
       !(err instanceof ProviderCreditsExhaustedError) &&
       !(err instanceof InsufficientCreditsError)
     ) {
-      const user = getUserById(context.chargedUserId);
+      const user = await getUserById(context.chargedUserId);
       if (user) {
-        recordProviderCreditAlert({
+        await recordProviderCreditAlert({
           userId: user.id,
           username: user.username,
           displayName: user.displayName,
@@ -358,7 +334,7 @@ export async function meterProviderCall<T>(
  * again after a restart has no context). Returns null when nobody can be
  * charged; a repeated idempotency key is recorded once.
  */
-export function recordIncurredUsage(input: {
+export async function recordIncurredUsage(input: {
   provider: ProviderId;
   operation: string;
   usage: ProviderUsageUnits;
@@ -369,17 +345,17 @@ export function recordIncurredUsage(input: {
   projectId?: string | null;
   runId?: string | null;
   startedAt?: string;
-}): ProviderCallRecord | null {
+}): Promise<ProviderCallRecord | null> {
   const context = getBillingContext();
   const userId = context?.chargedUserId ?? input.fallbackUserId ?? null;
-  if (!userId || !getUserById(userId)) {
+  if (!userId || !(await getUserById(userId))) {
     console.warn(`[accounting] ${input.operation}: no user to record ${input.provider} usage against`);
     return null;
   }
-  const ruleSet = getActiveConversionRuleSet();
+  const ruleSet = await getActiveConversionRuleSet();
   const converted = convertUsage(ruleSet, input.provider, null, input.usage);
   const startedAt = input.startedAt ?? new Date().toISOString();
-  const result = settleProviderCall({
+  const result = await settleProviderCall({
     idempotencyKey: input.idempotencyKey,
     initiatedByUserId: context?.initiatedByUserId ?? userId,
     chargedUserId: userId,
