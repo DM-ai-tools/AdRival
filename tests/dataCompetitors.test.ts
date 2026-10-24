@@ -306,6 +306,76 @@ test("re-saving or patching a competitor without heavy fields keeps its page", a
   assert.equal(await pages.getRecreatedPage(c.id), null);
 });
 
+const SOURCE_ARCHIVE = {
+  html: "<html>source</html>",
+  finalUrl: "https://rival.invalid",
+  title: "Rival",
+  capturedAt: "2026-01-01T00:00:00.000Z",
+  source: "playwright" as const,
+  nodeCount: 3,
+};
+
+test("a light page carrying some heavy keys is refused and the stored content is unchanged", async () => {
+  const job = makeJob();
+  await runs.saveJob(job);
+  const c = makeCompetitor(job.id, { recreatedPage: makePage() });
+  const original: RecreatedPageHeavy = { html: "<p>old</p>", sourceArchive: SOURCE_ARCHIVE, previousHtml: "<p>prev</p>" };
+  await competitors.saveCompetitor({ ...c, recreatedPageHeavy: original });
+  const light = await competitors.getCompetitor(c.id);
+  assert.ok(light?.recreatedPage);
+  const partial = { ...light.recreatedPage, html: "<p>new</p>" };
+
+  await assert.rejects(competitors.updateCompetitor(c.id, { recreatedPage: partial }), /setRecreatedPage/);
+  await assert.rejects(competitors.saveCompetitor({ ...c, recreatedPage: partial }), /setRecreatedPage/);
+  assert.deepEqual(await pages.getRecreatedPage(c.id), original);
+  assert.deepEqual(await competitors.getCompetitor(c.id), light);
+});
+
+test("a full legacy page (no marker keys) still replaces the whole stored content", async () => {
+  const job = makeJob();
+  await runs.saveJob(job);
+  const c = makeCompetitor(job.id, { recreatedPage: makePage() });
+  await competitors.saveCompetitor({ ...c, recreatedPageHeavy: { html: "<p>old</p>", sourceArchive: SOURCE_ARCHIVE } });
+  await competitors.updateCompetitor(c.id, { recreatedPage: makePage({ html: "<p>legacy</p>" }) });
+  assert.deepEqual(await pages.getRecreatedPage(c.id), { html: "<p>legacy</p>" });
+});
+
+test("heavy content without a light page still gets a marker, and a later save without recreatedPage keeps it", async () => {
+  const job = makeJob();
+  await runs.saveJob(job);
+  const c = makeCompetitor(job.id);
+  await competitors.saveCompetitor({ ...c, recreatedPageHeavy: { html: "<p>bare</p>" } });
+  const marked = (await competitors.getCompetitor(c.id))?.recreatedPage as unknown as Record<string, unknown>;
+  assert.equal(marked?.hasPage, true);
+  assert.ok((marked.pageBytes as number) > 0);
+  assert.equal(typeof marked.pageUpdatedAt, "string");
+
+  assert.equal(await competitors.saveCompetitor({ ...c, pageName: "Again" }), true);
+  assert.equal((await pages.getRecreatedPage(c.id))?.html, "<p>bare</p>");
+  const kept = (await competitors.getCompetitor(c.id))?.recreatedPage as unknown as Record<string, unknown>;
+  assert.equal(kept?.hasPage, true);
+
+  const other = makeCompetitor(job.id);
+  await competitors.saveCompetitor(other);
+  assert.equal(await pages.setRecreatedPage(other.id, { html: "<p>set</p>" }), true);
+  const set = (await competitors.getCompetitor(other.id))?.recreatedPage as unknown as Record<string, unknown>;
+  assert.equal(set?.hasPage, true);
+});
+
+test("html null and html empty string round-trip as stored", async () => {
+  const job = makeJob();
+  await runs.saveJob(job);
+  const a = makeCompetitor(job.id, { recreatedPage: makePage() });
+  await competitors.saveCompetitor({ ...a, recreatedPageHeavy: { html: null, previousHtml: "<p>undo</p>" } });
+  assert.deepEqual(await pages.getRecreatedPage(a.id), { html: null, previousHtml: "<p>undo</p>" });
+  const b = makeCompetitor(job.id, { recreatedPage: makePage({ html: "", previousHtml: "<p>undo</p>" }) });
+  await competitors.saveCompetitor(b);
+  assert.deepEqual(await pages.getRecreatedPage(b.id), { html: "", previousHtml: "<p>undo</p>" });
+  const d = makeCompetitor(job.id, { recreatedPage: makePage({ html: null, previousHtml: "<p>undo</p>" }) });
+  await competitors.saveCompetitor(d);
+  assert.deepEqual(await pages.getRecreatedPage(d.id), { html: null, previousHtml: "<p>undo</p>" });
+});
+
 /* ── (b) list and history queries never touch recreated_pages ── */
 
 test("(b) list/history functions and updateCompetitor never reference recreated_pages", async () => {

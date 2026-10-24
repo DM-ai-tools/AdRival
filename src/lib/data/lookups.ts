@@ -17,7 +17,10 @@ import {
  * write ads back for it.
  */
 
-/** Last record per id, in first-seen order (one upsert cannot touch a row twice). */
+/**
+ * Last record per id, ordered by each id's last occurrence (one upsert cannot
+ * touch a row twice).
+ */
 function lastPerId<T extends { id: string }>(records: T[]): T[] {
   const byId = new Map<string, T>();
   for (const r of records) {

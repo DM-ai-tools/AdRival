@@ -19,7 +19,10 @@ import {
  * the run's own saves, deletion and the bulk clears.
  */
 
-/** A competitor to save, with its page content passed apart (the new API). */
+/**
+ * A competitor to save, with its page content passed apart (the new API).
+ * `recreatedPageHeavy` replaces the whole stored content: pass every field to keep.
+ */
 export type CompetitorInput = CompetitorRecord & { recreatedPageHeavy?: RecreatedPageHeavy };
 
 async function upsertCompetitor(tx: Queryable, row: CompetitorRecord, ownerUserId: string | null): Promise<void> {
@@ -53,6 +56,10 @@ async function selectCompetitors(sql: string, params: unknown[]): Promise<Compet
  * the run is missing, deleted, or suppressed in this process. A found
  * competitor joins the seen-page list and the job's competitorIds; a page
  * held for recreation (recreateOnly) joins neither.
+ *
+ * Page content: `recreatedPageHeavy` replaces the whole stored content. Without
+ * it, `recreatedPage` follows updateCompetitor's rules (a light page with heavy
+ * fields throws; no recreatedPage keeps the stored page and content).
  */
 export async function saveCompetitor(input: CompetitorInput): Promise<boolean> {
   const { recreatedPageHeavy, ...competitor } = input;
@@ -77,7 +84,7 @@ export async function saveCompetitor(input: CompetitorInput): Promise<boolean> {
       existing !== null,
     );
     const row = { ...competitor, recreatedPage: page } as CompetitorRecord;
-    if (competitor.recreatedPage === undefined && page === null) delete row.recreatedPage;
+    if (page === undefined) delete row.recreatedPage;
     await upsertCompetitor(tx, row, job.ownerUserId ?? null);
     await applyHeavy(tx, competitor.id, action);
 
@@ -124,9 +131,11 @@ export function listAllCompetitors(limit = 100): Promise<CompetitorRecord[]> {
 }
 
 /**
- * Patch a competitor. A patched recreatedPage without heavy fields keeps the
- * stored content; one with heavy fields (today's callers) replaces it; null
- * removes it. Never reads page content.
+ * Patch a competitor. Never reads page content. For `recreatedPage`:
+ * - a light page (no heavy fields) keeps the stored content and marker;
+ * - a full legacy page (heavy fields, no marker keys) replaces the whole content;
+ * - a light page carrying heavy fields throws: use setRecreatedPage;
+ * - undefined keeps the stored page; null removes page and content.
  */
 export async function updateCompetitor(id: string, patch: Partial<CompetitorRecord>): Promise<CompetitorRecord | null> {
   return withTx(async (tx) => {

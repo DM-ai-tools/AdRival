@@ -1294,9 +1294,14 @@ export const RECREATED_PAGE_HEAVY_KEYS: readonly RecreatedPageHeavyKey[] = [
   "previousHtml",
 ];
 
+/**
+ * The whole stored content of a recreated page. Writing one (setRecreatedPage,
+ * saveCompetitor's recreatedPageHeavy) replaces all of it: a field left out is
+ * gone afterwards, so pass every field to keep.
+ */
 export type RecreatedPageHeavy = {
-  /** Empty string when the page has no HTML yet (e.g. only an Undo copy is kept). */
-  html: string;
+  /** Null (or "") while the page has no HTML yet, e.g. when only an Undo copy is kept; stored as given. */
+  html: string | null;
   sourceArchive?: StoredPageArchive | null;
   previousHtml?: string | null;
   generatedImages?: GeneratedLandingImage[] | null;
