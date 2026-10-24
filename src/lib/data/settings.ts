@@ -6,8 +6,9 @@ import { defaultAppSettings } from "./legacyStore";
 
 /* ── app settings ── */
 
-export async function getAppSettings(): Promise<AppSettings> {
-  const { rows } = await getDb().query<{ data: AppSettings }>("select data from app_settings where id = 'singleton'");
+/** Pass the transaction handle to read the settings inside a transaction. */
+export async function getAppSettings(q: Queryable = getDb()): Promise<AppSettings> {
+  const { rows } = await q.query<{ data: AppSettings }>("select data from app_settings where id = 'singleton'");
   return rows[0]?.data ?? defaultAppSettings();
 }
 
