@@ -65,7 +65,7 @@ export async function loadStore(file: string): Promise<DatabaseShape> {
 export function connectDirect(url: string): { client: TestClient; close(): Promise<void> } {
   if (isTransactionPooler(url)) {
     throw new Error(
-      "this URL is the transaction pooler (port 6543): use the direct connection (DATABASE_DIRECT_URL, port 5432)",
+      "this URL is the transaction pooler (port 6543 or pgbouncer=true): use the direct connection (DATABASE_DIRECT_URL) or the session pooler on port 5432",
     );
   }
   const pool = new Pool({
@@ -86,10 +86,15 @@ export function connectDirect(url: string): { client: TestClient; close(): Promi
   };
 }
 
-/** Supabase's transaction pooler listens on 6543; it cannot hold a session or a 120 s statement timeout. */
-function isTransactionPooler(url: string): boolean {
+/**
+ * Supabase's transaction pooler (port 6543, also on *.pooler.supabase.com) or
+ * any URL marked pgbouncer=true: it cannot hold a session or a 120 s statement
+ * timeout. The session pooler (pooler host, port 5432) is allowed.
+ */
+export function isTransactionPooler(url: string): boolean {
   try {
-    return new URL(url).port === "6543";
+    const u = new URL(url);
+    return u.port === "6543" || u.searchParams.get("pgbouncer")?.toLowerCase() === "true";
   } catch {
     return false;
   }

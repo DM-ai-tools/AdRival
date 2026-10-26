@@ -11,8 +11,9 @@
  *   parameter all need a session connection).
  * - --dry-run parses and migrates the file and prints the counts and warnings,
  *   without connecting to any database.
- * - The target's migrations are applied first. The import refuses a database
- *   that already has users (a live database) unless --allow-existing is passed;
+ * - The import refuses a database that already has users (a live database)
+ *   unless --allow-existing is passed (checked before anything is written,
+ *   migrations included; the target's migrations are applied next);
  *   re-running into a rehearsal database needs that flag (the import is
  *   idempotent: the same file gives the same rows).
  * - --archive-days N moves page content older than N days to Storage after the
@@ -55,6 +56,8 @@ async function main(): Promise<void> {
     console.log(`running jobs/lookups to import as failed ("Interrupted by cutover"): ${plan.interruptedJobs}`);
     console.log(`ledgerSeq ${plan.prepared.ledgerSeq}, auditSeq ${plan.prepared.auditSeq}`);
     printWarnings(plan.warnings);
+    const lost = plan.drops.filter((d) => d.lost).length;
+    console.log(`records left out: ${plan.drops.length} (${lost} lost, ${plan.drops.length - lost} collapsed duplicates)`);
     console.log(`done in ${elapsed(started)}`);
     return;
   }
@@ -63,9 +66,10 @@ async function main(): Promise<void> {
   console.log(`target ${describeUrl(args.url)}`);
   const conn = connectDirect(args.url);
   try {
+    // Before anything is written (migrations included): a live database is refused.
+    await assertEmptyTarget(conn.client, args.allowExisting);
     const applied = await migrate(conn.client);
     console.log(applied.length ? `applied migrations: ${applied.join(", ")}` : "schema is current");
-    await assertEmptyTarget(conn.client, args.allowExisting);
     const report = await importStore(conn.client, store, {
       archiveOlderThanDays: args.archiveDays ?? undefined,
       log: (message) => console.log(`[${elapsed(started)}] ${message}`),
@@ -80,6 +84,11 @@ async function main(): Promise<void> {
       );
     }
     printWarnings(report.warnings);
+    const lost = report.drops.filter((d) => d.lost);
+    if (lost.length) {
+      console.log(`records NOT imported (lost; verify will fail): ${lost.length}`);
+      process.exitCode = 1;
+    }
     const { rows } = await conn.client.query<{ size: string }>("select pg_size_pretty(pg_database_size(current_database())) as size");
     console.log(`database size: ${rows[0]?.size}`);
     console.log(`import finished in ${elapsed(started)}; now run scripts/verify-import.ts`);

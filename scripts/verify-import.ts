@@ -28,6 +28,10 @@ async function main(): Promise<void> {
     const result = await verifyImport(conn.client, store, {
       log: (message) => console.log(`[${elapsed(started)}] ${message}`),
     });
+    if (result.skipped.length) {
+      console.log(`left out by the import on purpose (collapsed duplicates): ${result.skipped.length}`);
+      for (const line of result.skipped) console.log(`  - ${line}`);
+    }
     if (result.ok) {
       console.log(`ok: no mismatches (${elapsed(started)})`);
     } else {
