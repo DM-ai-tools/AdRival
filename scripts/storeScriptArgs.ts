@@ -63,6 +63,11 @@ export async function loadStore(file: string): Promise<DatabaseShape> {
  * timeout, installed behind getDb()/withTx so every repository uses it.
  */
 export function connectDirect(url: string): { client: TestClient; close(): Promise<void> } {
+  if (isTransactionPooler(url)) {
+    throw new Error(
+      "this URL is the transaction pooler (port 6543): use the direct connection (DATABASE_DIRECT_URL, port 5432)",
+    );
+  }
   const pool = new Pool({
     ...poolConfigFor(url),
     max: 2,
@@ -79,6 +84,15 @@ export function connectDirect(url: string): { client: TestClient; close(): Promi
       await pool.end().catch(() => {});
     },
   };
+}
+
+/** Supabase's transaction pooler listens on 6543; it cannot hold a session or a 120 s statement timeout. */
+function isTransactionPooler(url: string): boolean {
+  try {
+    return new URL(url).port === "6543";
+  } catch {
+    return false;
+  }
 }
 
 /** Host and database name of a connection URL, without credentials (for logs). */

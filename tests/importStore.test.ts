@@ -10,6 +10,7 @@ import { seedConversionRuleSet } from "../src/lib/accounting/conversion";
 import * as svc from "../src/lib/data/accountingService";
 import { getActiveConversionRuleSet, recordAudit } from "../src/lib/data/audit";
 import { getRecreatedPage } from "../src/lib/data/recreatedPages";
+import { createMemoryStorage, setStorageForTests } from "../src/lib/data/storageClient";
 import { getCompetitor, getCompetitorsByRun } from "../src/lib/data/competitors";
 import { countActiveAdmins, getUserById } from "../src/lib/data/identity";
 import { getJob, getLookupJob, getSeenPageIds } from "../src/lib/data/runs";
@@ -586,6 +587,22 @@ describe("store quirks", () => {
     const result = await verifyImport(getDb(), store as unknown as DatabaseShape);
     assert.equal(result.ok, false);
     assert.ok(result.mismatches.some((m) => m.includes("jobs")), result.mismatches.join("\n"));
+  });
+
+  test("archiving after the import moves old content to Storage and verify reads it back", async () => {
+    await freshDb("import-store-archive");
+    const storage = createMemoryStorage();
+    setStorageForTests(storage);
+    try {
+      const report = await importStore(getDb(), fixtureStore(), { archiveOlderThanDays: 1 });
+      assert.deepEqual(report.archive, { archived: 1, failed: 0, leftInDatabase: 0 });
+      assert.equal(storage.objects.size, 1);
+      const page = await getRecreatedPage("c-1");
+      assert.equal(page?.html, HTML);
+      assert.deepEqual((await verifyImport(getDb(), fixtureStore())).mismatches, []);
+    } finally {
+      setStorageForTests(null);
+    }
   });
 
   test("assertEmptyTarget refuses a database that already has users unless allowed", async () => {
