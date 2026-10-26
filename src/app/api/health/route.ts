@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 
-/** Lightweight readiness probe for Railway / container health checks. */
+import { checkHealth } from "@/lib/data/health";
+
+export const dynamic = "force-dynamic";
+
+/** Readiness probe for Railway / container health checks: 503 when the database is down. */
 export async function GET() {
-  return NextResponse.json(
-    { ok: true, service: "adrival" },
-    { status: 200 },
-  );
+  const { status, body } = await checkHealth();
+  return NextResponse.json(body, { status });
 }

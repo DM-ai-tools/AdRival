@@ -54,6 +54,9 @@ COPY --from=builder /app/node_modules/playwright-core ./node_modules/playwright-
 # Design skills for landing-page recreation, and Impeccable's detector engine
 # (a platform binary the design check runs; the standalone trace cannot see it).
 COPY --from=builder --chown=nextjs:nodejs /app/skills ./skills
+# SQL migrations are read from disk at start (process.cwd()/db/migrations);
+# the standalone trace cannot see them. WORKDIR /app and `node server.js` keep cwd=/app.
+COPY --from=builder --chown=nextjs:nodejs /app/db ./db
 COPY --from=builder /app/node_modules/@impeccable ./node_modules/@impeccable
 RUN chmod a+rx node_modules/@impeccable/*/bin/impeccable 2>/dev/null || true
 

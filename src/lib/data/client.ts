@@ -16,7 +16,13 @@ export type TestClient = Queryable & {
   tx<T>(fn: (t: Queryable) => Promise<T>): Promise<T>;
 };
 
-const STATEMENT_TIMEOUT_MS = 30_000;
+/**
+ * Ceiling for any one query. `query_timeout` is enforced client-side by pg.
+ * The `statement_timeout` config option is deliberately not used: pg sends it
+ * as a startup parameter, which the Supabase transaction pooler (pgbouncer
+ * style) may reject or ignore, failing connections or giving false safety.
+ */
+const QUERY_TIMEOUT_MS = 30_000;
 const POOL_MAX = 10;
 
 let pool: Pool | null = null;
@@ -48,7 +54,7 @@ export function poolConfigFor(connectionString: string): PoolConfig {
   return {
     connectionString: url.toString(),
     max: POOL_MAX,
-    statement_timeout: STATEMENT_TIMEOUT_MS,
+    query_timeout: QUERY_TIMEOUT_MS,
     ssl,
   };
 }

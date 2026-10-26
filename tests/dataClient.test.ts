@@ -74,7 +74,8 @@ test("production pool config: max 10, 30 s statement timeout, TLS off only for l
     "postgresql://u:p@aws-0-ap-south-1.pooler.supabase.com:6543/postgres?sslmode=require",
   );
   assert.equal(remote.max, 10);
-  assert.equal(remote.statement_timeout, 30_000);
+  assert.equal(remote.query_timeout, 30_000);
+  assert.equal(remote.statement_timeout, undefined, "startup param would be rejected by the transaction pooler");
   assert.deepEqual(remote.ssl, { rejectUnauthorized: false });
   assert.ok(!String(remote.connectionString).includes("sslmode"));
 
