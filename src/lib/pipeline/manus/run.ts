@@ -10,6 +10,7 @@ import type {
   SearchJob,
 } from "../../types";
 import { RECREATED_PAGE_HEAVY_KEYS } from "../../types";
+import { ArchivedPageUnavailableError } from "../../data/archive";
 import {
   getCompetitor,
   getIcp,
@@ -276,6 +277,25 @@ function savePageWithContent(
   patch: (page: RecreatedPageLight, content: RecreatedPageHeavy | null) => PagePatch,
 ): Promise<RecreatedPageLight> {
   return writePage(competitorId, (page, content) => pageUpdate(page, patch(page, content ?? null), content), true);
+}
+
+/**
+ * Records how a run ended (a failure or a stop). `hasHtml` says whether a page
+ * is still there to show, from the stored content; when that content is
+ * archived and Storage cannot be read, the light page's marker (hasPage)
+ * decides, so recording the outcome never fails because Storage is down.
+ */
+async function saveOutcome(
+  competitorId: string,
+  patch: (stored: RecreatedPageLight, hasHtml: boolean) => PagePatch,
+): Promise<RecreatedPageLight> {
+  try {
+    return await savePageWithContent(competitorId, (stored, content) => patch(stored, Boolean(content?.html)));
+  } catch (err) {
+    if (!(err instanceof ArchivedPageUnavailableError)) throw err;
+    console.warn(`[manus] page content of competitor ${competitorId} unavailable (${err.message}); using its marker`);
+    return savePage(competitorId, (stored) => patch(stored, Boolean(stored.hasPage)));
+  }
 }
 
 async function writePage(
@@ -779,8 +799,8 @@ export async function stopManusRecreation(competitorId: string, reason = "Recrea
   if (page.manus?.taskId) await stopManusTask(page.manus.taskId).catch(() => undefined);
   await recordCredits(competitorId);
   const stage = (STAGES.find((s) => s.id === page.progress?.phase)?.id || "build") as StageId;
-  await savePageWithContent(competitorId, (_stored, content) => ({
-    status: content?.html ? "completed" : "failed",
+  await saveOutcome(competitorId, (_stored, hasHtml) => ({
+    status: hasHtml ? "completed" : "failed",
     error: reason,
     progress: progress(stage, reason, page.progress?.pct || 0, { blocked: reason }),
   }));
@@ -1272,10 +1292,10 @@ async function fail(competitorId: string, err: unknown, signal: AbortSignal): Pr
   const page = (await getCompetitor(competitorId))?.recreatedPage;
   if (page && !stopped) {
     const message = sanitizeClientFacingText((err as Error)?.message || "Recreation failed");
-    await savePageWithContent(competitorId, (stored, content) => {
+    await saveOutcome(competitorId, (stored, hasHtml) => {
       const stage = (STAGES.find((s) => s.id === stored.progress?.phase)?.id || "build") as StageId;
       return {
-        status: content?.html ? "completed" : "failed",
+        status: hasHtml ? "completed" : "failed",
         error: message,
         progress: progress(stage, message, stored.progress?.pct || 0, { blocked: message }),
       };

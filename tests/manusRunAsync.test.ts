@@ -221,3 +221,49 @@ test("a failure recording credits after a resumed run is logged, not an unhandle
     agentStatus = "running";
   }
 });
+
+/** Marks the page's content as archived to Storage that cannot be read (no Storage configured here). */
+async function archiveUnreadable(competitorId: string, hasPage: boolean): Promise<void> {
+  await base.query(
+    `insert into recreated_pages (competitor_id, archive_path, archived_at, bytes) values ($1, 'recreated-pages-archive/gone.json.gz', now(), 10)
+     on conflict (competitor_id) do update set content = null, archive_path = excluded.archive_path, archived_at = now()`,
+    [competitorId],
+  );
+  await base.query(
+    "update competitors set data = jsonb_set(data, '{recreatedPage,hasPage}', $2::jsonb) where id = $1",
+    [competitorId, JSON.stringify(hasPage)],
+  );
+}
+
+test("a run failure is recorded even when the archived page cannot be read (falls back to the marker)", async () => {
+  const c = await savedCompetitor(manusPage("T-fail-archived"));
+  await archiveUnreadable(c.id, true);
+  agentStatus = "error";
+  try {
+    await resumeManusRecreation(c.id);
+    let page: RecreatedPageLight | null | undefined;
+    for (let i = 0; i < 50; i += 1) {
+      await settle(20);
+      page = (await competitors.getCompetitor(c.id))?.recreatedPage;
+      if (page?.error) break;
+    }
+    assert.match(page?.error || "", /agent broke/);
+    // The marker says a page exists, so the earlier page stays shown.
+    assert.equal(page?.status, "completed");
+  } finally {
+    agentStatus = "running";
+  }
+});
+
+test("stop is recorded even when the archived page cannot be read", async () => {
+  const c = await savedCompetitor(manusPage("T-stop-archived"));
+  await archiveUnreadable(c.id, false);
+  const stopped = await stopManusRecreation(c.id, "Stopped by user");
+  assert.equal(stopped.recreatedPage?.status, "failed");
+  assert.equal(stopped.recreatedPage?.error, "Stopped by user");
+
+  const kept = await savedCompetitor(manusPage("T-stop-archived-kept"));
+  await archiveUnreadable(kept.id, true);
+  const stoppedKept = await stopManusRecreation(kept.id, "Stopped by user");
+  assert.equal(stoppedKept.recreatedPage?.status, "completed");
+});
