@@ -17,7 +17,9 @@
  *
  * Storage needs SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY. Database URLs
  * must be a direct or session-pooler (port 5432) connection, never the
- * transaction pooler (6543). Nothing secret is printed.
+ * transaction pooler (6543). Loads .env.local, then .env, from the repo
+ * folder first (variables already set in the terminal win; only the file
+ * names are printed). Nothing secret is printed.
  */
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -26,7 +28,7 @@ import { BACKUP_TABLES, listBackups, pullBackup, restoreBackup, runBackup } from
 import type { Queryable } from "../src/lib/data/client";
 import { migrate } from "../src/lib/data/migrate";
 import { getStorage, StorageNotFoundError, type StorageLike } from "../src/lib/data/storageClient";
-import { connectDirect, describeUrl, elapsed } from "./storeScriptArgs";
+import { connectDirect, describeUrl, elapsed, loadScriptEnv } from "./storeScriptArgs";
 
 interface Args {
   command: string;
@@ -179,6 +181,7 @@ async function restore(args: Args, started: number): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  loadScriptEnv();
   const args = parseBackupArgs(process.argv.slice(2));
   const started = Date.now();
   if (args.command === "run") await run(args, started);

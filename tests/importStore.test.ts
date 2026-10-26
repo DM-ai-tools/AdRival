@@ -2,8 +2,8 @@ import { after, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { gunzipSync, gzipSync } from "node:zlib";
 
-import { getDb } from "../src/lib/data/client";
-import { assertEmptyTarget, CUTOVER_MESSAGE, importStore } from "../src/lib/data/importStore";
+import { getDb, type TestClient, type TxOptions } from "../src/lib/data/client";
+import { assertEmptyTarget, CUTOVER_MESSAGE, IMPORT_STATEMENT_TIMEOUT_MS, importStore } from "../src/lib/data/importStore";
 import { verifyImport } from "../src/lib/data/verifyImport";
 import { SCHEMA_VERSION } from "../src/lib/data/legacyStore";
 import { seedConversionRuleSet } from "../src/lib/accounting/conversion";
@@ -740,5 +740,73 @@ describe("v1 store import (the old migration.test.ts cases)", () => {
     assert.equal(before.users, 1);
     const sets = await getDb().query<{ n: number }>("select count(*)::int as n from conversion_rule_sets");
     assert.equal(sets.rows[0].n, before.conversion_rule_sets);
+  });
+});
+
+describe("final review fixes", () => {
+  test("every import transaction carries a generous statement timeout (10 min)", async () => {
+    await freshDb("import-store-tx-timeout");
+    const base = getDb() as TestClient;
+    const seen: (TxOptions | undefined)[] = [];
+    const recorder: TestClient = {
+      query: (text, params) => base.query(text, params),
+      tx: (fn, opts) => {
+        seen.push(opts);
+        return base.tx(fn, opts);
+      },
+    };
+    await importStore(recorder, fixtureStore());
+    assert.ok(seen.length > 10, "one transaction per collection");
+    assert.ok(
+      seen.every((opts) => opts?.statementTimeoutMs === IMPORT_STATEMENT_TIMEOUT_MS),
+      "SET LOCAL statement_timeout on every import transaction",
+    );
+    assert.equal(IMPORT_STATEMENT_TIMEOUT_MS, 600_000);
+  });
+
+  test("archived pages without Storage settings: one distinct problem, not a vague mismatch per page", async () => {
+    await freshDb("import-store-archived-no-storage");
+    const saved = { url: process.env.SUPABASE_URL, key: process.env.SUPABASE_SERVICE_ROLE_KEY };
+    setStorageForTests(createMemoryStorage());
+    try {
+      await importStore(getDb(), fixtureStore(), { archiveOlderThanDays: 0 });
+      const { rows } = await getDb().query<{ n: number }>("select count(*)::int as n from recreated_pages where archive_path is not null");
+      assert.ok(rows[0].n > 0, "the fixture page was archived");
+      setStorageForTests(null);
+      delete process.env.SUPABASE_URL;
+      delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+      const result = await verifyImport(getDb(), fixtureStore());
+      assert.equal(result.ok, false);
+      assert.deepEqual(
+        result.mismatches.filter((m) => m.startsWith("archived pages cannot be checked: Storage not configured")).length,
+        1,
+        result.mismatches.join("\n"),
+      );
+      assert.ok(!result.mismatches.some((m) => /content unreadable/.test(m)), result.mismatches.join("\n"));
+    } finally {
+      setStorageForTests(null);
+      if (saved.url === undefined) delete process.env.SUPABASE_URL;
+      else process.env.SUPABASE_URL = saved.url;
+      if (saved.key === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+      else process.env.SUPABASE_SERVICE_ROLE_KEY = saved.key;
+    }
+  });
+
+  test("a database failure while re-planning interrupted runs is labelled a database error, and verify does not throw", async () => {
+    const broken = {
+      query: async () => {
+        throw new Error("Connection terminated unexpectedly");
+      },
+    };
+    const result = await verifyImport(broken, fixtureStore());
+    assert.equal(result.ok, false);
+    assert.ok(!result.mismatches.some((m) => /store could not be read/.test(m)), result.mismatches.join("\n"));
+    assert.match(result.mismatches[0], /^database error while reading interrupted runs: Connection terminated unexpectedly/);
+  });
+
+  test("an unreadable store is still reported as such", async () => {
+    const result = await verifyImport(getDb(), null as unknown as DatabaseShape);
+    assert.equal(result.ok, false);
+    assert.match(result.mismatches[0], /^the store could not be read/);
   });
 });

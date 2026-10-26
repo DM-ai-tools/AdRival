@@ -24,7 +24,7 @@ import {
 } from "../types";
 import { archiveOldPages, deleteArchivedFor } from "./archive";
 import { insertRuleSet, upsertMembershipRow } from "./audit";
-import { withTx, type Queryable } from "./client";
+import { withTx, type Queryable, type TxOptions } from "./client";
 import { upsertCompetitor } from "./competitors";
 import { upsertReservation, savePeriod } from "./credits";
 import { upsertIcpRow } from "./icps";
@@ -554,13 +554,24 @@ export function withoutMarker(page: unknown, onLight?: () => void): LegacyCompet
 
 /* ── import ── */
 
-type TxRunner = <T>(fn: (tx: Queryable) => Promise<T>) => Promise<T>;
+type TxRunner = <T>(fn: (tx: Queryable) => Promise<T>, opts?: TxOptions) => Promise<T>;
 
-/** The transaction runner of `db` when it has one (a test or script client), else withTx. */
-function txRunner(db: Queryable): TxRunner {
+/**
+ * Server-side bound on each import statement (SET LOCAL statement_timeout in
+ * every import transaction). Generous: the biggest single statement is a
+ * ~25 MB bytea insert over a home connection; it only guards against a hang.
+ */
+export const IMPORT_STATEMENT_TIMEOUT_MS = 600_000;
+
+/**
+ * The transaction runner of `db` when it has one (a test or script client),
+ * else withTx; every transaction gets IMPORT_STATEMENT_TIMEOUT_MS.
+ */
+function txRunner(db: Queryable): <T>(fn: (tx: Queryable) => Promise<T>) => Promise<T> {
   const own = (db as Queryable & { tx?: TxRunner }).tx;
-  if (!own) return withTx;
-  return <T>(fn: (tx: Queryable) => Promise<T>) => own.call(db, fn) as Promise<T>;
+  const opts: TxOptions = { statementTimeoutMs: IMPORT_STATEMENT_TIMEOUT_MS };
+  if (!own) return (fn) => withTx(fn, opts);
+  return <T>(fn: (tx: Queryable) => Promise<T>) => own.call(db, fn, opts) as Promise<T>;
 }
 
 function chunks<T>(rows: T[]): T[][] {

@@ -5,10 +5,14 @@
  *                                   [--dry-run] [--archive-days N] [--allow-existing]
  *   npm run import:store -- --store data/store.pre-postgres.json
  *
- * - Run it while the app is STOPPED: the import takes no run locks.
+ * - Run it while the app is STOPPED or in maintenance mode (MAINTENANCE_MODE=1
+ *   answers every request with 503): the import takes no run locks.
+ * - Loads .env.local, then .env, from the repo folder first; variables already
+ *   set in the terminal win. Only the file names are printed.
  * - --url defaults to DATABASE_DIRECT_URL: the direct connection, never the
- *   transaction pooler (DDL, a 120 s statement timeout and a ~25 MB bytea
- *   parameter all need a session connection).
+ *   transaction pooler (DDL, long statements and a ~25 MB bytea parameter all
+ *   need a session connection). Every import transaction starts with
+ *   SET LOCAL statement_timeout (10 minutes per statement).
  * - --dry-run parses and migrates the file and prints the counts and warnings,
  *   without connecting to any database.
  * - The import refuses a database that already has users (a live database)
@@ -17,14 +21,24 @@
  *   re-running into a rehearsal database needs that flag (the import is
  *   idempotent: the same file gives the same rows).
  * - --archive-days N moves page content older than N days to Storage after the
- *   import (needs SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY).
+ *   import. It needs SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY of the SAME
+ *   Supabase project as the database: when they are missing (or name another
+ *   project) the import refuses before reading the file or writing anything.
  * - store.json is only read.
  * Exits non-zero on any failure. Then run scripts/verify-import.ts.
  */
 import { expectedHeavy } from "../src/lib/data/verifyImport";
 import { assertEmptyTarget, importStore, planCounts, planImport } from "../src/lib/data/importStore";
 import { migrate } from "../src/lib/data/migrate";
-import { connectDirect, describeUrl, elapsed, loadStore, parseArgs } from "./storeScriptArgs";
+import {
+  assertArchiveStorage,
+  connectDirect,
+  describeUrl,
+  elapsed,
+  loadScriptEnv,
+  loadStore,
+  parseArgs,
+} from "./storeScriptArgs";
 
 function printWarnings(warnings: string[]): void {
   console.log(`warnings: ${warnings.length}`);
@@ -32,7 +46,10 @@ function printWarnings(warnings: string[]): void {
 }
 
 async function main(): Promise<void> {
+  loadScriptEnv();
   const args = parseArgs(process.argv.slice(2));
+  // Before the file is read or anything is written.
+  assertArchiveStorage(args);
   const started = Date.now();
   console.log(`reading ${args.store} (read-only)`);
   const store = await loadStore(args.store);

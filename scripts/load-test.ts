@@ -14,6 +14,10 @@
  * Prints p50/p95/max latency and error counts per endpoint and in total.
  * Exits non-zero when any response is non-2xx (401 included, unless
  * --allow-401), or when the total p95 is above --p95-ms. Never prints passwords or cookies.
+ *
+ * Loads .env.local, then .env, from the repo folder first (variables already
+ * set in the terminal win; only the file names are printed), so
+ * LOADTEST_USERS may also live in .env.local.
  */
 import { pathToFileURL } from "node:url";
 
@@ -203,6 +207,10 @@ function printSummary(endpoints: EndpointSummary[], total: EndpointSummary): voi
 }
 
 async function main(): Promise<void> {
+  // Loaded lazily: the helper pulls in the database client, which the
+  // pure functions above (and their tests) do not need.
+  const { loadScriptEnv } = await import("./storeScriptArgs");
+  loadScriptEnv();
   const args = parseLoadArgs(process.argv.slice(2));
   const users = readUsers();
   if (args.reserve) console.log("--reserve: credit reservations are not exercised (the load test only reads)");

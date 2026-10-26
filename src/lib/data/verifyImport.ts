@@ -4,6 +4,7 @@ import { gunzipSync } from "node:zlib";
 import { RECREATED_PAGE_HEAVY_KEYS, type DatabaseShape } from "../types";
 import { fetchArchived } from "./archive";
 import type { Queryable } from "./client";
+import { storageConfigured } from "./storageClient";
 import {
   CUTOVER_MESSAGE,
   MARKER_KEYS,
@@ -242,20 +243,31 @@ export async function verifyImport(
   let plan: ImportPlan;
   try {
     plan = planImport(store);
-    // Interrupted runs carry the import's time: plan again with it, so their
-    // failed form is compared exactly.
-    const ids = [...plan.prepared.interrupted];
-    if (ids.length) {
+  } catch (err) {
+    return { ok: false, mismatches: [`the store could not be read: ${errorText(err)}`], skipped };
+  }
+  // Interrupted runs carry the import's time: plan again with it, so their
+  // failed form is compared exactly.
+  const interruptedIds = [...plan.prepared.interrupted];
+  if (interruptedIds.length) {
+    let at: string | null | undefined;
+    try {
       const { rows } = await db.query<{ at: string | null }>(
         `select data->>'updatedAt' as at from jobs where id = any($1::text[])
          union all select data->>'updatedAt' as at from lookup_jobs where id = any($1::text[])`,
-        [ids],
+        [interruptedIds],
       );
-      const at = rows.find((r) => r.at)?.at;
-      if (at) plan = planImport(store, at);
+      at = rows.find((r) => r.at)?.at;
+    } catch (err) {
+      return { ok: false, mismatches: [`database error while reading interrupted runs: ${errorText(err)}`], skipped };
     }
-  } catch (err) {
-    return { ok: false, mismatches: [`the store could not be read: ${errorText(err)}`], skipped };
+    if (at) {
+      try {
+        plan = planImport(store, at);
+      } catch (err) {
+        return { ok: false, mismatches: [`the store could not be read: ${errorText(err)}`], skipped };
+      }
+    }
   }
   const prepared = plan.prepared;
 
@@ -572,6 +584,9 @@ export async function verifyImport(
     );
     const rowAt = new Map(stored.map((r) => [r.id, r.at]));
     let checked = 0;
+    // Archived content lives in Storage; without its settings it cannot be read.
+    const storageReady = storageConfigured();
+    const archivedUnchecked: string[] = [];
     for (const competitor of plan.competitors) {
       await check(`page ${competitor.id}`, async () => {
         const page = withoutMarker(competitor.recreatedPage);
@@ -593,6 +608,11 @@ export async function verifyImport(
           [competitor.id],
         );
         const row = rows[0];
+        if (!row.content && row.archive_path && !storageReady) {
+          // Reported once below, not as one "unreadable" line per page.
+          archivedUnchecked.push(competitor.id);
+          return;
+        }
         let textContent: string;
         try {
           const gz = row.content ? Buffer.from(row.content) : await fetchArchived(String(row.archive_path));
@@ -624,6 +644,12 @@ export async function verifyImport(
     const known = new Set(plan.competitors.map((c) => c.id));
     const orphans = [...rowAt.keys()].filter((id) => !known.has(id));
     if (orphans.length) mismatches.push(`recreatedPages: content of unknown competitors ${orphans.length}: ${listIds(orphans)}`);
+    if (archivedUnchecked.length) {
+      mismatches.unshift(
+        `archived pages cannot be checked: Storage not configured (set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY ` +
+          `of the database's Supabase project); ${archivedUnchecked.length} archived page(s) not checked: ${listIds(archivedUnchecked)}`,
+      );
+    }
     log(`recreated pages checked: ${checked}`);
   });
 
