@@ -283,15 +283,16 @@ function richestAd(ads: AdCandidate[]): AdCandidate {
   )[0];
 }
 
-function updateJob(job: SearchJob, patch: Partial<SearchJob>) {
+async function updateJob(job: SearchJob, patch: Partial<SearchJob>): Promise<void> {
   Object.assign(job, patch, { updatedAt: new Date().toISOString() });
-  saveJob(job);
+  await saveJob(job);
 }
 
 function setProgress(job: SearchJob, progress: Partial<JobProgress>) {
   job.progress = { ...job.progress, ...progress };
   job.updatedAt = new Date().toISOString();
-  saveJobProgress(job);
+  // Throttled progress, written in call order; failures are logged by the data layer.
+  void saveJobProgress(job);
 }
 
 /** Active-ads proxy from creatives already seen in this search (no extra API round-trips). */
@@ -441,7 +442,7 @@ export async function runCompetitorSearch(
     createdAt: now,
     updatedAt: now,
   };
-  saveJob(job);
+  await saveJob(job);
 
   const accepted: CompetitorRecord[] = [];
   const rejectedPages = new Set<string>();
@@ -624,8 +625,8 @@ export async function runCompetitorSearch(
       createdAt: new Date().toISOString(),
     };
 
-    saveCompetitor(competitor);
-    markPageSeen(pageId);
+    await saveCompetitor(competitor);
+    await markPageSeen(pageId);
     seen.add(pageId);
     accepted.push(competitor);
     if (!job.competitorIds.includes(competitor.id)) {
@@ -668,7 +669,7 @@ export async function runCompetitorSearch(
       accepted: accepted.length,
       message: `Accepted ${primary.pageName} (${accepted.length}/${TARGET_COMPETITORS})${locNote} — services: ${filter.services.join(", ")}`,
     });
-    saveJob(job);
+    await saveJob(job);
   };
 
   /**
@@ -677,7 +678,7 @@ export async function runCompetitorSearch(
    */
   const releaseHeldLocals = async (opts?: { addressUnknown?: boolean }) => {
     for (const miss of [...nearMisses]) {
-      if (accepted.length >= TARGET_COMPETITORS || isSearchJobSuppressed(job.id)) return;
+      if (accepted.length >= TARGET_COMPETITORS || (await isSearchJobSuppressed(job.id))) return;
       if (miss.reason !== "geoMismatch" || seen.has(miss.pageId)) continue;
       if (opts?.addressUnknown) {
         // Going country-wide: rivals whose address was not found came from
@@ -772,7 +773,7 @@ export async function runCompetitorSearch(
       if (qi >= queryQueue.length) {
         if (
           accepted.length >= TARGET_COMPETITORS ||
-          isSearchJobSuppressed(job.id) ||
+          (await isSearchJobSuppressed(job.id)) ||
           pageBudget >= pageLimit
         ) {
           break;
@@ -851,7 +852,7 @@ export async function runCompetitorSearch(
         do {
           if (accepted.length >= TARGET_COMPETITORS) break outer;
           if (accepted.length - acceptedAtStart >= querySlot) break;
-          if (isSearchJobSuppressed(job.id)) break outer;
+          if (await isSearchJobSuppressed(job.id)) break outer;
           if (pageBudget >= pageLimit) break outer;
           if (pagesForQuery >= queryPageCap) break;
 
@@ -1000,8 +1001,8 @@ export async function runCompetitorSearch(
                 targetCountry: primary.country || countries[0] || null,
               },
             );
-          const prefetchReviews = (fromIndex: number) => {
-            if (accepted.length >= TARGET_COMPETITORS || isSearchJobSuppressed(job.id)) return;
+          const prefetchReviews = async (fromIndex: number) => {
+            if (accepted.length >= TARGET_COMPETITORS || (await isSearchJobSuppressed(job.id))) return;
             const thrNow = thresholdsNow();
             for (
               let j = fromIndex + 1;
@@ -1044,7 +1045,7 @@ export async function runCompetitorSearch(
 
           for (const [entryIndex, [pageId, pageAds]] of pageEntries.entries()) {
             if (accepted.length >= TARGET_COMPETITORS) break outer;
-            prefetchReviews(entryIndex);
+            await prefetchReviews(entryIndex);
             if (
               seen.has(pageId) ||
               rejectedPages.has(pageId) ||
@@ -1300,7 +1301,7 @@ export async function runCompetitorSearch(
             );
           }
 
-          saveJobProgress(job);
+          await saveJobProgress(job);
         } while (cursor && pageBudget < pageLimit);
       } // country
     } // query
@@ -1353,7 +1354,7 @@ export async function runCompetitorSearch(
 
       // Still short of the target: a small market's relevant rivals often run
       // only a few ads. Take the best of them (at least one active ad).
-      if (accepted.length < TARGET_COMPETITORS && !isSearchJobSuppressed(job.id)) {
+      if (accepted.length < TARGET_COMPETITORS && !(await isSearchJobSuppressed(job.id))) {
         setProgress(job, {
           stage: "filling_quota",
           message: `Found ${accepted.length} of ${TARGET_COMPETITORS}. Adding relevant competitors that run fewer ads…`,
@@ -1370,7 +1371,7 @@ export async function runCompetitorSearch(
         : accepted.length > 0
           ? "partial"
           : "failed";
-    if (!isSearchJobSuppressed(jobId)) {
+    if (!(await isSearchJobSuppressed(jobId))) {
       const geoNote = localMode
         ? ` (${matchedLocalCount()} local; searched ${
             widened ? "nearby areas, then country-wide" : rings[ringLevel].label
@@ -1378,7 +1379,7 @@ export async function runCompetitorSearch(
         : preferLocalGeo && matchedLocalCount()
           ? ` (${matchedLocalCount()} geo-matched)`
           : "";
-      updateJob(job, {
+      await updateJob(job, {
         status,
         progress: {
           ...job.progress,
@@ -1392,7 +1393,7 @@ export async function runCompetitorSearch(
       });
     }
   } catch (err) {
-    updateJob(job, {
+    await updateJob(job, {
       status: "failed",
       error: (err as Error).message,
       progress: {

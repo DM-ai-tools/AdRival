@@ -370,17 +370,17 @@ export class SponsoredSearchAgent {
     private readonly brief: SponsoredBriefInput & { title: string },
     private readonly hooks: {
       /** True once the run is stopped or the list is full: the task is stopped too. */
-      isStopped: () => boolean;
+      isStopped: () => boolean | Promise<boolean>;
       /** The agent's latest action or note, for the live progress line. */
       onActivity?: (text: string) => void;
       /** Called once the task exists, to save its id on the run. */
-      onTask?: (task: { taskId: string; taskUrl: string | null }) => void;
+      onTask?: (task: { taskId: string; taskUrl: string | null }) => void | Promise<void>;
     },
   ) {}
 
   /** Sends one step and streams new finds to `onFinds` until the agent stops. Errors from `onFinds` are thrown. */
   async runStep(step: SponsoredStep, onFinds: (finds: SponsoredFind[]) => Promise<void>): Promise<SponsoredStepResult> {
-    if (this.hooks.isStopped()) return { outcome: "stopped" };
+    if (await this.hooks.isStopped()) return { outcome: "stopped" };
     const scale = timeScale();
     const first = !this.taskId;
     const content = buildSponsoredMessage(this.brief, step, first);
@@ -398,7 +398,7 @@ export class SponsoredSearchAgent {
         });
         this.taskId = created.task_id;
         this.taskUrl = created.task_url || null;
-        this.hooks.onTask?.({ taskId: this.taskId, taskUrl: this.taskUrl });
+        await this.hooks.onTask?.({ taskId: this.taskId, taskUrl: this.taskUrl });
       } else {
         // Events already in the task belong to earlier steps.
         await this.markSeen();
@@ -418,7 +418,7 @@ export class SponsoredSearchAgent {
 
     while (true) {
       await sleep(POLL_MS * scale);
-      if (this.hooks.isStopped()) {
+      if (await this.hooks.isStopped()) {
         await this.stop();
         return { outcome: "stopped" };
       }

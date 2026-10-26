@@ -173,7 +173,7 @@ async function fetchGoogleAdsPages(params: {
     batch: number;
     total: number;
     estimate: number | null;
-  }) => void | boolean;
+  }) => void | boolean | Promise<void | boolean>;
 }): Promise<{ ads: GoogleAdCreative[]; estimate: number | null }> {
   const out: GoogleAdCreative[] = [];
   const seen = new Set<string>();
@@ -199,7 +199,7 @@ async function fetchGoogleAdsPages(params: {
     }
     cursor = extractGoogleCursor(res);
     pages += 1;
-    const cont = params.onPage?.({
+    const cont = await params.onPage?.({
       page: pages,
       batch: batch.length,
       total: out.length,
@@ -503,7 +503,7 @@ export async function runGoogleFamilySearch(
     createdAt: now,
     updatedAt: now,
   };
-  saveJob(job);
+  await saveJob(job);
 
   const accepted: CompetitorRecord[] = [];
   const seenAdvertisers = new Set<string>();
@@ -524,17 +524,18 @@ export async function runGoogleFamilySearch(
   let countryWide = rings.length === 0;
   let relaxedReview = false;
 
-  const done = () => accepted.length >= TARGET_COMPETITORS || isSearchJobSuppressed(jobId);
+  const done = async () => accepted.length >= TARGET_COMPETITORS || (await isSearchJobSuppressed(jobId));
   const progress = (stage: SearchJob["progress"]["stage"], message: string) => {
     job.progress.stage = stage;
     job.progress.message = message;
     job.updatedAt = new Date().toISOString();
-    saveJobProgress(job);
+    // Throttled progress, written in call order; failures are logged by the data layer.
+    void saveJobProgress(job);
   };
 
   async function flushReview() {
     if (!pendingReview.length) return;
-    if (isSearchJobSuppressed(job.id)) {
+    if (await isSearchJobSuppressed(job.id)) {
       pendingReview.length = 0;
       return;
     }
@@ -544,7 +545,7 @@ export async function runGoogleFamilySearch(
       `Reviewing ${batch.length} ad ${batch.length === 1 ? "copy" : "copies"} in parallel…`,
     );
     await mapPool(batch, AD_REVIEW_BATCH, async (args) => {
-      if (done()) return;
+      if (await done()) return;
       await tryAcceptFromAds(args);
     });
   }
@@ -585,8 +586,8 @@ export async function runGoogleFamilySearch(
     });
   };
 
-  const acceptHeld = (competitor: CompetitorRecord) => {
-    saveCompetitor(competitor);
+  const acceptHeld = async (competitor: CompetitorRecord) => {
+    await saveCompetitor(competitor);
     accepted.push(competitor);
     job.competitorIds.push(competitor.id);
     job.progress.accepted = accepted.length;
@@ -597,7 +598,7 @@ export async function runGoogleFamilySearch(
   const releaseHeld = async (all: boolean) => {
     const { cheapLocationFromText, matchPlaceToTargets } = await import("./competitorLocation");
     for (const competitor of [...heldMismatches]) {
-      if (done()) break;
+      if (await done()) break;
       if (!all) {
         // The address looked up when it was held, else its ad copy.
         const geoNow =
@@ -632,9 +633,9 @@ export async function runGoogleFamilySearch(
         });
       }
       heldMismatches.splice(heldMismatches.indexOf(competitor), 1);
-      acceptHeld(competitor);
+      await acceptHeld(competitor);
     }
-    saveJob(job);
+    await saveJob(job);
   };
 
   /** Top-ranked web domains → their ads in the chosen country → review. */
@@ -644,7 +645,7 @@ export async function runGoogleFamilySearch(
     const budget = budgets[source];
     const fresh = domains.filter((d) => !checkedDomains.has(d));
     for (let i = 0; i < fresh.length; i += AD_REVIEW_BATCH) {
-      if (done() || budget.used >= budget.max) return;
+      if ((await done()) || budget.used >= budget.max) return;
       const slice = fresh
         .slice(i, i + AD_REVIEW_BATCH)
         .slice(0, budget.max - budget.used);
@@ -701,7 +702,7 @@ export async function runGoogleFamilySearch(
   /** Transparency advertiser-name search; ads still limited to the chosen country. */
   const searchAdvertiserNames = async (queries: string[], cap: number) => {
     for (const query of queries) {
-      if (done()) return;
+      if (await done()) return;
       progress("finding_domains", `Transparency search for "${query}"…`);
       let advertisers: ReturnType<typeof extractGoogleAdvertisers> = [];
       try {
@@ -713,7 +714,7 @@ export async function runGoogleFamilySearch(
       }
       const batch = advertisers.slice(0, cap);
       for (let i = 0; i < batch.length; i += AD_REVIEW_BATCH) {
-        if (done()) return;
+        if (await done()) return;
         const slice = batch.slice(i, i + AD_REVIEW_BATCH);
         progress("fetching_ads", `Fetching ads for ${slice.length} Transparency advertisers…`);
         const rows = await mapPool(slice, AD_REVIEW_BATCH, async (adv) => {
@@ -861,7 +862,7 @@ export async function runGoogleFamilySearch(
         const hit = web.snippets[i];
         if (hit) snippetOf.set(d, { title: hit.title || undefined, description: hit.description || undefined });
       });
-      if (web.domains.length && !done()) {
+      if (web.domains.length && !(await done())) {
         progress("ranking_domains", `Ranking ${web.domains.length} sites found ${step.label}…`);
         const kept = await keepLikelyCompetitorDomains({
           keyword: webQueries[0] || anchors[0] || "",
@@ -873,7 +874,7 @@ export async function runGoogleFamilySearch(
         if (kept.length < web.domains.length) bumpReason(job, "notCompetitorSite", web.domains.length - kept.length);
         await checkWebDomains(kept.slice(0, MAX_DOMAIN_CHECKS_PER_STEP), webQueries[0] || "");
       }
-      if (!done()) {
+      if (!(await done())) {
         await searchAdvertiserNames(await step.nameQueries(), step.level == null ? 8 : 4);
       }
     };
@@ -911,7 +912,7 @@ export async function runGoogleFamilySearch(
 
     const sponsoredCountry = webCountry || "AU";
     // An admin can switch Manus off in Settings: the web search then runs alone.
-    const agent = manusSearchEnabled() && !getAppSettings().disabledProviders.includes("manus")
+    const agent = manusSearchEnabled() && !(await getAppSettings()).disabledProviders.includes("manus")
       ? new SponsoredSearchAgent(
           {
             title: `${platform === "youtube" ? "YouTube" : "Google"} competitor search: ${allKeywords.slice(0, 3).join(", ")} (${sponsoredCountry})`,
@@ -923,9 +924,9 @@ export async function runGoogleFamilySearch(
           {
             isStopped: done,
             onActivity: (text) => progress("searching_sponsored", text),
-            onTask: (task) => {
+            onTask: async (task) => {
               job.manusSearch = task;
-              saveJob(job);
+              await saveJob(job);
             },
           },
         )
@@ -991,9 +992,9 @@ export async function runGoogleFamilySearch(
         const rounds = groupIntoRounds(steps);
         const moreStep = steps[steps.length - 1];
         for (const [r, group] of rounds.entries()) {
-          if (done()) break;
+          if (await done()) break;
           for (const step of group) await enterStep(step);
-          if (done()) break;
+          if (await done()) break;
           if (!(await runAgentRound(group, r, rounds.length, group.includes(moreStep)))) {
             agentUsable = false;
             break;
@@ -1005,16 +1006,16 @@ export async function runGoogleFamilySearch(
         // No agent, or it failed: the web search runs the steps it did not cover.
         for (const [index, step] of steps.entries()) {
           if (index < covered) continue;
-          if (done()) break;
+          if (await done()) break;
           await enterStep(step);
-          if (done()) break;
+          if (await done()) break;
           await runWebStep(step, index === 0);
         }
-      } else if (!done()) {
+      } else if (!(await done())) {
         // The agent's rounds are used up and the list is still short: the
         // web search fills it, country-wide.
         for (const step of steps.filter((s) => s.level == null)) {
-          if (done()) break;
+          if (await done()) break;
           await enterStep(step);
           await runWebStep(step, false);
         }
@@ -1027,7 +1028,7 @@ export async function runGoogleFamilySearch(
         recordManusTaskCreditsSoon({
           taskId: agent.taskId,
           operation: `manus.sponsored_search.${platform}`,
-          fallbackUserId: getJob(jobId)?.ownerUserId ?? null,
+          fallbackUserId: (await getJob(jobId))?.ownerUserId ?? null,
           projectKind: "search",
           projectId: jobId,
           runId: jobId,
@@ -1036,7 +1037,7 @@ export async function runGoogleFamilySearch(
     }
 
     // Anything still held fills the list last.
-    if (heldMismatches.length && !done()) {
+    if (heldMismatches.length && !(await done())) {
       progress("filling_quota", "Adding competitors from outside the local area to fill the list…");
       await releaseHeld(true);
     }
@@ -1048,10 +1049,10 @@ export async function runGoogleFamilySearch(
           ? "partial"
           : "failed";
     job.updatedAt = new Date().toISOString();
-    saveJob(job);
+    await saveJob(job);
 
-    if (!isSearchJobSuppressed(jobId)) {
-      const final = getJob(jobId) || job;
+    if (!(await isSearchJobSuppressed(jobId))) {
+      const final = (await getJob(jobId)) || job;
       final.status = job.status;
       final.progress.stage = "done";
       const sponsored = job.progress.sponsored;
@@ -1064,7 +1065,7 @@ export async function runGoogleFamilySearch(
           ? `Found ${accepted.length} competitors on ${platform} (ads shown in ${regionName}).${sponsoredNote} Brand review & deep location run on demand / during offer analysis.`
           : `No qualifying competitors found on ${platform} with ads shown in ${regionName}.${sponsoredNote}`;
       final.updatedAt = new Date().toISOString();
-      saveJob(final);
+      await saveJob(final);
     }
   } catch (err) {
     job.status = "failed";
@@ -1072,7 +1073,7 @@ export async function runGoogleFamilySearch(
     job.progress.stage = "failed";
     job.progress.message = (err as Error).message;
     job.updatedAt = new Date().toISOString();
-    saveJob(job);
+    await saveJob(job);
   }
 }
 
@@ -1137,7 +1138,7 @@ async function tryAcceptFromAds(args: {
     fromWeb,
   } = args;
 
-  if (isSearchJobSuppressed(job.id)) return;
+  if (await isSearchJobSuppressed(job.id)) return;
 
   // The client's own business shows up in its own keyword searches.
   if (
@@ -1149,7 +1150,7 @@ async function tryAcceptFromAds(args: {
     job.progress.rejected += 1;
     bumpReason(job, "guardrailReject");
     job.progress.message = `Skipped ${pageName}: this is your client's own business`;
-    saveJobProgress(job);
+    await saveJobProgress(job);
     return;
   }
 
@@ -1181,7 +1182,7 @@ async function tryAcceptFromAds(args: {
   const english: AdCandidate[] = [];
   let readable = 0;
   for (const ad of textFirst.slice(0, MAX_DETAIL_TRIES)) {
-    if (isSearchJobSuppressed(job.id)) return;
+    if (await isSearchJobSuppressed(job.id)) return;
     const details = await enrichGoogleAd(ad);
     if (platform === "youtube" && !isYouTubeCreative(ad, details)) continue;
     const candidate = mapGoogleCreativeToCandidate(ad, details);
@@ -1211,7 +1212,7 @@ async function tryAcceptFromAds(args: {
       }),
     );
     job.progress.message = `Reviewing ${pageName} from its website listing (its ads have no readable text)…`;
-    saveJobProgress(job);
+    await saveJobProgress(job);
   }
 
   if (english.length === 0) {
@@ -1220,7 +1221,7 @@ async function tryAcceptFromAds(args: {
     job.progress.message = readable
       ? `Skipped ${pageName}: ad copy is not English`
       : `Skipped ${pageName}: none of its ads had readable text`;
-    saveJobProgress(job);
+    await saveJobProgress(job);
     return;
   }
 
@@ -1256,7 +1257,7 @@ async function tryAcceptFromAds(args: {
     job.progress.rejected += 1;
     bumpReason(job, "noReadableCopy");
     job.progress.message = `Skipped ${pageName}: creatives had no readable ad copy`;
-    saveJobProgress(job);
+    await saveJobProgress(job);
     return;
   }
 
@@ -1275,7 +1276,7 @@ async function tryAcceptFromAds(args: {
     job.progress.rejected += 1;
     bumpReason(job, "noServiceSignal");
     job.progress.message = `Skipped ${pageName}: ad copy does not match the keywords`;
-    saveJobProgress(job);
+    await saveJobProgress(job);
     return;
   }
 
@@ -1283,11 +1284,11 @@ async function tryAcceptFromAds(args: {
     job.progress.rejected += 1;
     bumpReason(job, "shortDuration");
     job.progress.message = `Skipped ${pageName}: its ads have not run long enough`;
-    saveJobProgress(job);
+    await saveJobProgress(job);
     return;
   }
 
-  if (isSearchJobSuppressed(job.id) || accepted.length >= TARGET_COMPETITORS) return;
+  if ((await isSearchJobSuppressed(job.id)) || accepted.length >= TARGET_COMPETITORS) return;
 
   const guardCtx = buildGuardrailContext({
     businessProfile: job.businessProfile,
@@ -1309,7 +1310,7 @@ async function tryAcceptFromAds(args: {
     job.progress.rejected += 1;
     bumpReason(job, "guardrailReject");
     job.progress.message = `Skipped ${pageName}: ${pre.reason}`;
-    saveJobProgress(job);
+    await saveJobProgress(job);
     return;
   }
 
@@ -1317,7 +1318,7 @@ async function tryAcceptFromAds(args: {
   try {
     job.progress.stage = "analyzing_ad";
     job.progress.message = `LLM reviewing ${pageName}…`;
-    saveJobProgress(job);
+    await saveJobProgress(job);
     filter = await analyzeAdCandidate(
       keywords[0] || query,
       primary,
@@ -1336,7 +1337,7 @@ async function tryAcceptFromAds(args: {
     job.progress.rejected += 1;
     bumpReason(job, "llmError");
     job.progress.message = `Skipped ${pageName}: the relevance review failed (${(err as Error).message.slice(0, 80)})`;
-    saveJobProgress(job);
+    await saveJobProgress(job);
     return;
   }
 
@@ -1347,7 +1348,7 @@ async function tryAcceptFromAds(args: {
     job.progress.rejected += 1;
     bumpReason(job, "llmReject");
     job.progress.message = `Rejected ${pageName}: ${filter.reason || "not a competitor"}`;
-    saveJobProgress(job);
+    await saveJobProgress(job);
     return;
   }
 
@@ -1361,7 +1362,7 @@ async function tryAcceptFromAds(args: {
     job.progress.rejected += 1;
     bumpReason(job, "guardrailReject");
     job.progress.message = `Guardrail blocked ${pageName}: ${guard.reason}`;
-    saveJobProgress(job);
+    await saveJobProgress(job);
     return;
   }
 
@@ -1375,7 +1376,7 @@ async function tryAcceptFromAds(args: {
     job.progress.rejected += 1;
     bumpReason(job, "lowActiveAds");
     job.progress.message = `Skipped ${pageName}: ${activeCount} ads (need ≥${thresholds.minActiveAds})`;
-    saveJobProgress(job);
+    await saveJobProgress(job);
     return;
   }
 
@@ -1434,7 +1435,7 @@ async function tryAcceptFromAds(args: {
   // business's real address decides, since ad copy rarely names the suburb.
   if (heldMismatches) {
     job.progress.message = `Checking where ${pageName} is located…`;
-    saveJobProgress(job);
+    await saveJobProgress(job);
     const { lookupCompetitorPlace, matchPlaceToTargets } = await import("./competitorLocation");
     const looked = await lookupCompetitorPlace({
       pageName,
@@ -1458,15 +1459,17 @@ async function tryAcceptFromAds(args: {
       job.progress.message = `Holding ${pageName}: ${
         looked ? `based in ${looked.locationLabel || looked.locationCity}` : "address not found"
       } — searching nearer first`;
-      saveJobProgress(job);
+      await saveJobProgress(job);
       return;
     }
   }
 
   // Reviews run in parallel; another one may have filled the list meanwhile.
-  if (accepted.length >= TARGET_COMPETITORS || isSearchJobSuppressed(job.id)) return;
-  saveCompetitor(competitor);
+  if (accepted.length >= TARGET_COMPETITORS || (await isSearchJobSuppressed(job.id))) return;
+  // Checked again after the await and the slot taken at once: parallel reviews never fill past the target.
+  if (accepted.length >= TARGET_COMPETITORS) return;
   accepted.push(competitor);
+  await saveCompetitor(competitor);
   job.competitorIds.push(competitor.id);
   job.progress.accepted = accepted.length;
 
@@ -1479,7 +1482,7 @@ async function tryAcceptFromAds(args: {
       const candidate = mapGoogleCreativeToCandidate(ad, details);
       if (!candidate.landingPageUrl) continue;
       const richer = sampleAdFromGoogleCandidate(candidate, platform, domainHint);
-      updateCompetitor(competitor.id, { sampleAd: richer });
+      await updateCompetitor(competitor.id, { sampleAd: richer });
       break;
     }
   })();
@@ -1489,7 +1492,7 @@ async function tryAcceptFromAds(args: {
     : "";
   job.progress.stage = "searching_ads";
   job.progress.message = `Accepted ${pageName} (${accepted.length}/${TARGET_COMPETITORS}) via ${domain}${locNote}`;
-  saveJob(job);
+  await saveJob(job);
 }
 
 export async function runGoogleFamilyLookup(
@@ -1528,9 +1531,9 @@ export async function runGoogleFamilyLookup(
     createdAt: now,
     updatedAt: now,
   };
-  saveLookupJob(job);
+  await saveLookupJob(job);
 
-  if (isLookupJobSuppressed(lookupId)) return;
+  if ((await isLookupJobSuppressed(lookupId))) return;
 
   try {
     const res = await searchGoogleAdvertisers(queryName);
@@ -1586,14 +1589,14 @@ export async function runGoogleFamilyLookup(
     job.progress.candidatesFound = candidates.length;
     job.progress.stage = "verifying_page";
     job.progress.message = `Found ${candidates.length} matches. Verifying…`;
-    saveLookupJob(job);
+    await saveLookupJob(job);
 
     if (candidates.length === 0) {
       job.status = "failed";
       job.error = `No Google advertisers/domains found for "${queryName}"`;
       job.progress.stage = "failed";
       job.progress.message = job.error;
-      saveLookupJob(job);
+      await saveLookupJob(job);
       return;
     }
 
@@ -1635,8 +1638,8 @@ export async function runGoogleFamilyLookup(
     job.llmConfidence = pickConfidence;
     job.progress.stage = "fetching_ads";
     job.progress.message = `Fetching ads for ${selected.name}…`;
-    saveLookupJob(job);
-    if (isLookupJobSuppressed(lookupId)) return;
+    await saveLookupJob(job);
+    if ((await isLookupJobSuppressed(lookupId))) return;
 
     const isDomain = selected.pageId.startsWith("domain:");
     const domain = isDomain
@@ -1652,36 +1655,36 @@ export async function runGoogleFamilyLookup(
 
     if (isDomain && domain) {
       job.progress.message = `Loading company ads for domain ${domain}…`;
-      saveLookupJob(job);
+      await saveLookupJob(job);
       const byDomain = await fetchGoogleAdsPages({
         domain,
         region: GOOGLE_ADS_REGION,
-        onPage: ({ page, total, estimate: est }) => {
-          if (isLookupJobSuppressed(lookupId)) return false;
+        onPage: async ({ page, total, estimate: est }) => {
+          if ((await isLookupJobSuppressed(lookupId))) return false;
           job.progress.pagesScanned = page;
           job.progress.adsFetched = total;
           estimate = est ?? estimate;
           job.progress.message = `Domain ${domain}: ${total} ads${est != null ? ` (est. ${est})` : ""}…`;
-          saveLookupJob(job);
+          await saveLookupJob(job);
         },
       });
-      if (isLookupJobSuppressed(lookupId)) return;
+      if ((await isLookupJobSuppressed(lookupId))) return;
       creatives = byDomain.ads;
       estimate = byDomain.estimate ?? estimate;
     } else if (!isDomain) {
       const byAdv = await fetchGoogleAdsPages({
         advertiser_id: selected.pageId,
         region: GOOGLE_ADS_REGION,
-        onPage: ({ page, total, estimate: est }) => {
-          if (isLookupJobSuppressed(lookupId)) return false;
+        onPage: async ({ page, total, estimate: est }) => {
+          if ((await isLookupJobSuppressed(lookupId))) return false;
           job.progress.pagesScanned = page;
           job.progress.adsFetched = total;
           estimate = est ?? estimate;
           job.progress.message = `Advertiser ads: ${total}${est != null ? ` (est. ${est})` : ""}…`;
-          saveLookupJob(job);
+          await saveLookupJob(job);
         },
       });
-      if (isLookupJobSuppressed(lookupId)) return;
+      if ((await isLookupJobSuppressed(lookupId))) return;
       creatives = byAdv.ads;
       estimate = byAdv.estimate ?? estimate;
     }
@@ -1701,19 +1704,19 @@ export async function runGoogleFamilyLookup(
 
       for (const advertiserId of advertiserIds.slice(0, 5)) {
         job.progress.message = `Fetching all creatives for advertiser ${advertiserId}…`;
-        saveLookupJob(job);
+        await saveLookupJob(job);
         const byAdv = await fetchGoogleAdsPages({
           advertiser_id: advertiserId,
           region: GOOGLE_ADS_REGION,
-          onPage: ({ page, total, estimate: est }) => {
-            if (isLookupJobSuppressed(lookupId)) return false;
+          onPage: async ({ page, total, estimate: est }) => {
+            if ((await isLookupJobSuppressed(lookupId))) return false;
             job.progress.pagesScanned += 1;
             estimate = est ?? estimate;
             job.progress.message = `Advertiser ${advertiserId}: page ${page}, ${total} ads${est != null ? ` (est. ${est})` : ""}…`;
-            saveLookupJob(job);
+            await saveLookupJob(job);
           },
         });
-        if (isLookupJobSuppressed(lookupId)) return;
+        if ((await isLookupJobSuppressed(lookupId))) return;
         for (const ad of byAdv.ads) merged.set(creativeKey(ad), ad);
         estimate = byAdv.estimate ?? estimate;
       }
@@ -1742,7 +1745,7 @@ export async function runGoogleFamilyLookup(
 
     // Pull FB likes / IG followers for the resolved advertiser via Meta endpoints
     job.progress.message = `Fetching profile metrics for "${selected.name}"…`;
-    saveLookupJob(job);
+    await saveLookupJob(job);
     selected = await enrichLookupPageMetrics(selected, {
       platform,
       websiteHint: domain ? `https://${domain}` : null,
@@ -1755,7 +1758,7 @@ export async function runGoogleFamilyLookup(
       selected,
       ...job.candidates.filter((c) => !selectedIds.has(c.pageId)),
     ];
-    saveLookupJob(job);
+    await saveLookupJob(job);
 
     if (platform === "youtube") {
       creatives = creatives.filter((ad) => isYouTubeCreative(ad));
@@ -1763,7 +1766,7 @@ export async function runGoogleFamilyLookup(
 
     job.progress.adsFetched = creatives.length;
     job.progress.message = `Enriching ${creatives.length} ${platform} ads${estimate != null ? ` (est. ${estimate})` : ""}…`;
-    saveLookupJob(job);
+    await saveLookupJob(job);
 
     const stored: LookupAdRecord[] = [];
     const seen = new Set<string>();
@@ -1804,12 +1807,12 @@ export async function runGoogleFamilyLookup(
         raw: { ...ad, details } as Record<string, unknown>,
         createdAt: new Date().toISOString(),
       };
-      saveLookupAd(record);
+      await saveLookupAd(record);
       stored.push(record);
       job.adIds.push(record.id);
       job.progress.adsFetched = stored.length;
       job.progress.message = `Loaded ${stored.length}/${creatives.length} ${platform} ads…`;
-      saveLookupJob(job);
+      await saveLookupJob(job);
     }
 
     job.progress.adsFetched = stored.length;
@@ -1823,12 +1826,12 @@ export async function runGoogleFamilyLookup(
       job.progress.message = `Matched "${selected.name}" but found no public ${platform} ads.`;
     }
     job.updatedAt = new Date().toISOString();
-    saveLookupJob(job);
+    await saveLookupJob(job);
   } catch (err) {
     job.status = "failed";
     job.error = (err as Error).message;
     job.progress.stage = "failed";
     job.progress.message = (err as Error).message;
-    saveLookupJob(job);
+    await saveLookupJob(job);
   }
 }

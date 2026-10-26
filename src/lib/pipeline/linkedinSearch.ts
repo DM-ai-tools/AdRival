@@ -158,7 +158,7 @@ export async function runLinkedInSearch(
     createdAt: now,
     updatedAt: now,
   };
-  saveJob(job);
+  await saveJob(job);
 
   const accepted: CompetitorRecord[] = [];
   const seenAdvertisers = new Set<string>();
@@ -199,15 +199,15 @@ export async function runLinkedInSearch(
         );
 
     outer: for (const query of queries) {
-      if (isSearchJobSuppressed(jobId)) break outer;
+      if (await isSearchJobSuppressed(jobId)) break outer;
       let token: string | null = null;
       let pages = 0;
 
       do {
         if (accepted.length >= TARGET_COMPETITORS) break outer;
-        if (isSearchJobSuppressed(jobId)) break outer;
+        if (await isSearchJobSuppressed(jobId)) break outer;
         job.progress.message = `LinkedIn keyword "${query}" — page ${pages + 1}…`;
-        saveJobProgress(job);
+        await saveJobProgress(job);
 
         let res;
         try {
@@ -218,7 +218,7 @@ export async function runLinkedInSearch(
           });
         } catch (err) {
           job.progress.message = `LinkedIn search error: ${(err as Error).message}`;
-          saveJobProgress(job);
+          await saveJobProgress(job);
           break;
         }
 
@@ -303,7 +303,7 @@ export async function runLinkedInSearch(
 
         for (const [index, [pageId, pageAds]] of eligible.entries()) {
           if (accepted.length >= TARGET_COMPETITORS) break outer;
-          if (isSearchJobSuppressed(jobId)) break outer;
+          if (await isSearchJobSuppressed(jobId)) break outer;
           for (let j = index; j <= index + LI_REVIEW_AHEAD; j += 1) startReview(j);
 
           const pool = pageAds;
@@ -317,11 +317,11 @@ export async function runLinkedInSearch(
           ) {
             job.progress.rejected += 1;
             job.progress.message = `Skipped ${primary.pageName}: this is your client's own business`;
-            saveJobProgress(job);
+            await saveJobProgress(job);
             continue;
           }
           job.progress.message = `AI reviewing ${primary.pageName} (${pool.length} ads)…`;
-          saveJobProgress(job);
+          await saveJobProgress(job);
 
           const outcome = await reviews.get(pageId)!;
           if (!outcome.ok) {
@@ -349,12 +349,12 @@ export async function runLinkedInSearch(
           if (!guard.ok) {
             job.progress.rejected += 1;
             job.progress.message = `Guardrail blocked ${primary.pageName}: ${guard.reason}`;
-            saveJobProgress(job);
+            await saveJobProgress(job);
             continue;
           }
 
           job.progress.message = `Counting LinkedIn ads for ${primary.pageName}…`;
-          saveJobProgress(job);
+          await saveJobProgress(job);
 
           let activeCount = pageAds.length;
           try {
@@ -373,7 +373,7 @@ export async function runLinkedInSearch(
           if (!meetsActiveAdsThreshold(activeCount, thresholds)) {
             job.progress.rejected += 1;
             job.progress.message = `Skipped ${primary.pageName}: ${activeCount} ads (need ≥${thresholds.minActiveAds})`;
-            saveJobProgress(job);
+            await saveJobProgress(job);
             continue;
           }
 
@@ -406,7 +406,7 @@ export async function runLinkedInSearch(
               liUrl,
             });
             job.progress.message = `Holding ${primary.pageName}: outside target geo — seeking locals first`;
-            saveJobProgress(job);
+            await saveJobProgress(job);
             continue;
           }
 
@@ -437,7 +437,7 @@ export async function runLinkedInSearch(
             createdAt: new Date().toISOString(),
           };
           seenAdvertisers.add(pageId);
-          saveCompetitor(competitor);
+          await saveCompetitor(competitor);
           accepted.push(competitor);
           job.competitorIds.push(competitor.id);
           job.progress.accepted = accepted.length;
@@ -470,7 +470,7 @@ export async function runLinkedInSearch(
             ? ` · ${competitor.locationLabel}`
             : "";
           job.progress.message = `Accepted ${primary.pageName} (${accepted.length}/${TARGET_COMPETITORS})${locNote}`;
-          saveJob(job);
+          await saveJob(job);
         }
       } while (token && pages < MAX_LI_PAGES);
     }
@@ -479,7 +479,7 @@ export async function runLinkedInSearch(
     if (accepted.length < TARGET_COMPETITORS && heldGeo.length > 0) {
       job.progress.stage = "filling_quota";
       job.progress.message = `Filling from ${heldGeo.length} geo-held LinkedIn candidates…`;
-      saveJob(job);
+      await saveJob(job);
       for (const held of heldGeo) {
         if (accepted.length >= TARGET_COMPETITORS) break;
         if (seenAdvertisers.has(held.pageId)) continue;
@@ -516,7 +516,7 @@ export async function runLinkedInSearch(
           createdAt: new Date().toISOString(),
         };
         seenAdvertisers.add(held.pageId);
-        saveCompetitor(competitor);
+        await saveCompetitor(competitor);
         accepted.push(competitor);
         job.competitorIds.push(competitor.id);
         job.progress.accepted = accepted.length;
@@ -544,10 +544,10 @@ export async function runLinkedInSearch(
           ? "partial"
           : "failed";
     job.updatedAt = new Date().toISOString();
-    saveJob(job);
+    await saveJob(job);
 
-    if (!isSearchJobSuppressed(jobId)) {
-      const final = getJob(jobId) || job;
+    if (!(await isSearchJobSuppressed(jobId))) {
+      const final = (await getJob(jobId)) || job;
       final.status = job.status;
       final.progress.stage = "done";
       final.progress.message =
@@ -555,14 +555,14 @@ export async function runLinkedInSearch(
           ? `Found ${accepted.length} LinkedIn competitors. Brand review & deep location run on demand / during offer analysis.`
           : "No qualifying LinkedIn competitors found.";
       final.updatedAt = new Date().toISOString();
-      saveJob(final);
+      await saveJob(final);
     }
   } catch (err) {
     job.status = "failed";
     job.error = (err as Error).message;
     job.progress.stage = "failed";
     job.progress.message = (err as Error).message;
-    saveJob(job);
+    await saveJob(job);
   }
 }
 
@@ -635,9 +635,9 @@ export async function runLinkedInLookup(
     createdAt: now,
     updatedAt: now,
   };
-  saveLookupJob(job);
+  await saveLookupJob(job);
 
-  if (isLookupJobSuppressed(lookupId)) return;
+  if (await isLookupJobSuppressed(lookupId)) return;
 
   try {
     let token: string | null = null;
@@ -649,13 +649,13 @@ export async function runLinkedInLookup(
     const others = new Map<string, number>();
 
     do {
-      if (isLookupJobSuppressed(job.id)) return;
+      if (await isLookupJobSuppressed(job.id)) return;
       const res = await searchLinkedInAds({
         company: name,
         countries: "US,AU",
         paginationToken: token,
       });
-      if (isLookupJobSuppressed(job.id)) return;
+      if (await isLookupJobSuppressed(job.id)) return;
       const ads = extractLinkedInAds(res);
       const pageInfo = extractLinkedInPagination(res);
       token = pageInfo.isLastPage ? null : pageInfo.token;
@@ -696,7 +696,7 @@ export async function runLinkedInLookup(
           raw: ad as Record<string, unknown>,
           createdAt: new Date().toISOString(),
         };
-        saveLookupAd(record);
+        await saveLookupAd(record);
         stored.push(record);
         job.adIds.push(record.id);
       }
@@ -714,12 +714,12 @@ export async function runLinkedInLookup(
 
       job.progress.adsFetched = stored.length;
       job.progress.message = `Fetched ${stored.length} LinkedIn ads…`;
-      saveLookupJob(job);
+      await saveLookupJob(job);
     } while (token && pages < MAX_LI_PAGES);
 
     if (job.selectedPage) {
       job.progress.message = `Fetching profile metrics for "${job.selectedPage.name}"…`;
-      saveLookupJob(job);
+      await saveLookupJob(job);
       job.selectedPage = await enrichLookupPageMetrics(job.selectedPage, {
         platform: "linkedin",
         linkedinUrlHint:
@@ -727,7 +727,7 @@ export async function runLinkedInLookup(
             ? String(job.selectedPage.raw.advertiserPageUrl)
             : null,
       });
-      saveLookupJob(job);
+      await saveLookupJob(job);
     }
 
     if (stored.length > 0) {
@@ -742,12 +742,12 @@ export async function runLinkedInLookup(
         ? `No LinkedIn ads from "${name}". LinkedIn returned ads from other companies (${elsewhere.join(", ")}); try the company's exact LinkedIn name or its LinkedIn page link.`
         : `No LinkedIn ads found for "${name}".`;
     }
-    saveLookupJob(job);
+    await saveLookupJob(job);
   } catch (err) {
     job.status = "failed";
     job.error = (err as Error).message;
     job.progress.stage = "failed";
     job.progress.message = (err as Error).message;
-    saveLookupJob(job);
+    await saveLookupJob(job);
   }
 }
