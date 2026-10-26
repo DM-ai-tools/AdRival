@@ -11,10 +11,38 @@ export interface Queryable {
   ): Promise<{ rows: R[]; rowCount: number }>;
 }
 
+/** How a transaction is opened (see txPreamble). */
+export interface TxOptions {
+  /**
+   * REPEATABLE READ, READ ONLY: every read of the transaction sees one
+   * consistent snapshot (set in BEGIN itself, before any other statement).
+   */
+  snapshot?: boolean;
+  /** SET LOCAL statement_timeout for this transaction (ms); overrides the client's default; null leaves it. */
+  statementTimeoutMs?: number | null;
+  /** SET LOCAL idle_in_transaction_session_timeout (ms). */
+  idleTimeoutMs?: number;
+}
+
 /** A test database: a Queryable that can also run a callback in one transaction. */
 export type TestClient = Queryable & {
-  tx<T>(fn: (t: Queryable) => Promise<T>): Promise<T>;
+  tx<T>(fn: (t: Queryable) => Promise<T>, opts?: TxOptions): Promise<T>;
 };
+
+/**
+ * The statements that open a transaction: BEGIN (with the snapshot isolation
+ * when asked), then the SET LOCAL bounds. `defaultTimeoutMs` applies when the
+ * options do not name a statement timeout (null: none).
+ */
+export function txPreamble(opts: TxOptions = {}, defaultTimeoutMs: number | null = null): string[] {
+  const out = [opts.snapshot ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY" : "BEGIN"];
+  const timeout = opts.statementTimeoutMs === undefined ? defaultTimeoutMs : opts.statementTimeoutMs;
+  if (timeout !== null) out.push(`SET LOCAL statement_timeout = '${Math.max(0, Math.floor(timeout))}ms'`);
+  if (opts.idleTimeoutMs !== undefined) {
+    out.push(`SET LOCAL idle_in_transaction_session_timeout = '${Math.max(0, Math.floor(opts.idleTimeoutMs))}ms'`);
+  }
+  return out;
+}
 
 /**
  * Ceiling for any one query. `query_timeout` is enforced client-side by pg.
@@ -85,24 +113,23 @@ function wrapClient(client: Pool | PoolClient): Queryable {
 }
 
 /**
- * BEGIN/COMMIT on one pooled connection, ROLLBACK when `fn` throws. The first
- * statement bounds every statement of the transaction server-side
- * (`statementTimeoutMs`; null leaves the session's setting).
+ * BEGIN/COMMIT on one pooled connection, ROLLBACK when `fn` throws. The
+ * preamble bounds every statement of the transaction server-side
+ * (`defaultTimeoutMs` unless `opts` says otherwise; see txPreamble).
  */
 async function poolTx<T>(
   target: Pool,
   fn: (tx: Queryable) => Promise<T>,
-  statementTimeoutMs: number | null = TX_STATEMENT_TIMEOUT_MS,
+  defaultTimeoutMs: number | null = TX_STATEMENT_TIMEOUT_MS,
+  opts: TxOptions = {},
 ): Promise<T> {
   const client = await target.connect();
   let broken = false;
   try {
-    await client.query("BEGIN");
+    const [begin, ...locals] = txPreamble(opts, defaultTimeoutMs);
+    await client.query(begin);
     try {
-      if (statementTimeoutMs !== null) {
-        const ms = Math.max(0, Math.floor(statementTimeoutMs));
-        await client.query(`SET LOCAL statement_timeout = '${ms}ms'`);
-      }
+      for (const statement of locals) await client.query(statement);
       const value = await fn(wrapClient(client));
       await client.query("COMMIT");
       return value;
@@ -130,7 +157,7 @@ export function poolTestClient(target: Pool, opts: { statementTimeoutMs?: number
   const timeout = opts.statementTimeoutMs === undefined ? TX_STATEMENT_TIMEOUT_MS : opts.statementTimeoutMs;
   return {
     query: base.query,
-    tx: (fn) => poolTx(target, fn, timeout),
+    tx: (fn, txOpts) => poolTx(target, fn, timeout, txOpts),
   };
 }
 
@@ -157,9 +184,9 @@ export function getDb(): Queryable {
 }
 
 /** Runs `fn` in one transaction on one connection; rolls back when it throws. */
-export async function withTx<T>(fn: (tx: Queryable) => Promise<T>): Promise<T> {
-  if (testClient) return testClient.tx(fn);
-  return poolTx(ensurePool(), fn);
+export async function withTx<T>(fn: (tx: Queryable) => Promise<T>, opts?: TxOptions): Promise<T> {
+  if (testClient) return testClient.tx(fn, opts);
+  return poolTx(ensurePool(), fn, TX_STATEMENT_TIMEOUT_MS, opts);
 }
 
 /** Points getDb/withTx at a test database, or back at the pool with null. */

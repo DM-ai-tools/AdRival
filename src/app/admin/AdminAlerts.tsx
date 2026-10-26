@@ -25,6 +25,13 @@ interface ProviderCreditAlert {
   acknowledgedAt: string | null;
 }
 
+interface BackupFailureAlert {
+  id: string;
+  message: string;
+  createdAt: string;
+  acknowledgedAt: string | null;
+}
+
 export default function AdminAlerts({
   onOpenUser,
   onChanged,
@@ -34,6 +41,7 @@ export default function AdminAlerts({
 }) {
   const [lowCredit, setLowCredit] = useState<LowCreditAlert[]>([]);
   const [providerCredits, setProviderCredits] = useState<ProviderCreditAlert[]>([]);
+  const [backupFailures, setBackupFailures] = useState<BackupFailureAlert[]>([]);
   const [showDismissed, setShowDismissed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -45,11 +53,16 @@ export default function AdminAlerts({
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const json = await adminFetch<{ lowCredit: LowCreditAlert[]; providerCredits: ProviderCreditAlert[] }>(
+      const json = await adminFetch<{
+        lowCredit: LowCreditAlert[];
+        providerCredits: ProviderCreditAlert[];
+        backupFailures?: BackupFailureAlert[];
+      }>(
         `/api/admin/alerts${showDismissed ? "?all=1" : ""}`,
       );
       setLowCredit(json.lowCredit ?? []);
       setProviderCredits(json.providerCredits ?? []);
+      setBackupFailures(json.backupFailures ?? []);
       setError(null);
     } catch (err) {
       setError((err as Error).message);
@@ -131,6 +144,38 @@ export default function AdminAlerts({
       ) : null}
       <InlineNotice notice={notice} onDismiss={() => setNotice(null)} />
       {loading && !lowCredit.length && !providerCredits.length ? <p className="muted">Loading alerts…</p> : null}
+
+      {backupFailures.length ? (
+        <div className="admin-alert-group">
+          <div className="progress-head">
+            <h3>Database backup failed</h3>
+            {backupFailures.some((a) => !a.acknowledgedAt) ? (
+              <button
+                type="button"
+                className="chip-btn"
+                disabled={busy !== null}
+                onClick={() => void dismiss(backupFailures.filter((a) => !a.acknowledgedAt).map((a) => a.id), "backup")}
+              >
+                {busy === "backup" ? "Dismissing…" : "Dismiss"}
+              </button>
+            ) : null}
+          </div>
+          <p className="form-hint">
+            The nightly backup and its retry failed. Check the server log, then run one by hand (POST /api/admin/backup or
+            npm run backup:run; see docs/POSTGRES_OPERATIONS.md).
+          </p>
+          <ul className="admin-alert-list">
+            {backupFailures.map((alert) => (
+              <li key={alert.id}>
+                <span>
+                  {formatDateTime(alert.createdAt)} · {alert.message}
+                  {alert.acknowledgedAt ? <span className="muted"> · dismissed</span> : null}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       <h3>Low credits</h3>
       {!loading && lowCredit.length === 0 ? (

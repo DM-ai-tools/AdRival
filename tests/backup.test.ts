@@ -3,15 +3,16 @@ import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { gunzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 
-import { getDb, setClientForTests, type Queryable } from "../src/lib/data/client";
+import { getDb, setClientForTests, type Queryable, type TestClient, type TxOptions } from "../src/lib/data/client";
 import { migrate } from "../src/lib/data/migrate";
 import {
   BACKUP_BUCKET,
   BACKUP_TABLES,
   type BackupManifest,
   backupTick,
+  recordBackupFailureAlert,
   createBackupScheduler,
   keepAlivePing,
   listBackups,
@@ -558,4 +559,188 @@ test("updateCompetitorWith re-reads when the page changed between the prefetch a
     { withContent: true },
   );
   assert.equal(seenHtml, "<html>edited</html>");
+});
+
+/* ── review fixes: one snapshot, loud restore, alerts ── */
+
+function partRows<T>(date: string, table: string): T[] {
+  const entry = manifestOf(date).tables.find((t) => t.name === table)!;
+  return entry.parts.flatMap((part) =>
+    gunzipSync(storage.objects.get(`${BACKUP_BUCKET}/${part.path}`)!)
+      .toString("utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as T),
+  );
+}
+
+test("every read of a backup runs in ONE repeatable-read, read-only transaction, isolation set before the first read", async () => {
+  await seed();
+  const seen: { outside: string[]; inside: string[]; iso?: string; ro?: string; opts?: TxOptions } = {
+    outside: [],
+    inside: [],
+  };
+  const wrapped: TestClient = {
+    query: (text, params) => {
+      seen.outside.push(text);
+      return source.query(text, params);
+    },
+    tx: (fn, opts) => {
+      seen.opts = opts;
+      return source.tx(async (handle) => {
+        const probe = await handle.query<{ iso: string; ro: string }>(
+          "select current_setting('transaction_isolation') as iso, current_setting('transaction_read_only') as ro",
+        );
+        seen.iso = probe.rows[0].iso;
+        seen.ro = probe.rows[0].ro;
+        return fn({
+          query: (text, params) => {
+            seen.inside.push(text);
+            return handle.query(text, params);
+          },
+        });
+      }, opts);
+    },
+  };
+  await runBackup(wrapped, storage);
+  assert.deepEqual(seen.outside, [], "no read outside the snapshot");
+  assert.equal(seen.opts?.snapshot, true);
+  assert.equal(seen.iso, "repeatable read");
+  assert.equal(seen.ro, "on");
+  assert.match(seen.inside[0], /pg_try_advisory_xact_lock/, "the backup lock is the first statement");
+  assert.ok(seen.inside.some((q) => /from "credit_ledger"/.test(q)));
+});
+
+test("a credit change committed while the backup runs is either wholly in it or wholly out", async () => {
+  await importStore(getDb(), fixtureStore());
+  const writes: Promise<void>[] = [];
+  const hooked: StorageLike = {
+    ...storage,
+    putObject: async (bucket, path, body) => {
+      if (path.includes("/credit_periods") && writes.length === 0) {
+        // Another connection reserves 100 more, with the matching ledger and reservation rows, between two table reads.
+        writes.push(source.detached(() =>
+          source.tx(async (tx) => {
+            await tx.query("update credit_periods set reserved = reserved + 100 where id = 'p-alice'");
+            await tx.query(
+              `insert into credit_reservations (id, user_id, period_id, status, expires_at, data)
+               values ('r-snap', 'u-alice', 'p-alice', 'open', now() + interval '1 hour', '{}'::jsonb)`,
+            );
+            await tx.query(
+              `insert into credit_ledger (id, user_id, period_id, data)
+               values ('l-snap', 'u-alice', 'p-alice', '{"type":"reservation_hold"}'::jsonb)`,
+            );
+          }),
+        ));
+      }
+      await storage.putObject(bucket, path, body);
+    },
+  };
+  const { date } = await runBackup(getDb(), hooked);
+  assert.equal(writes.length, 1, "the concurrent write was started during the backup");
+  await Promise.all(writes);
+
+  const period = partRows<{ id: string; reserved: number | string }>(date, "credit_periods").find((r) => r.id === "p-alice")!;
+  const hasLedger = partRows<{ id: string }>(date, "credit_ledger").some((r) => r.id === "l-snap");
+  const hasReservation = partRows<{ id: string }>(date, "credit_reservations").some((r) => r.id === "r-snap");
+  const counted = Number(period.reserved) === 300;
+  assert.equal(hasLedger, counted, "ledger row and period counter agree");
+  assert.equal(hasReservation, counted, "reservation and period counter agree");
+  const after = await getDb().query<{ reserved: string }>("select reserved::text as reserved from credit_periods where id = 'p-alice'");
+  assert.equal(after.rows[0].reserved, "300", "the write itself committed");
+});
+
+test("restore into an empty database fails, naming the table, when the manifest's row count does not match", async () => {
+  await seed();
+  const { date } = await runBackup(getDb(), storage);
+  const manifest = manifestOf(date);
+  manifest.tables.find((t) => t.name === "users")!.rows += 1;
+  storage.objects.set(`${BACKUP_BUCKET}/${date}/manifest.json`, Buffer.from(JSON.stringify(manifest)));
+  const target = await freshTarget();
+  await assert.rejects(restoreBackup(target, storage, date), /users: 3 in the backup, 2 restored/);
+});
+
+test("restore into an empty database fails when a row is dropped by a unique conflict; allow-existing reports it", async () => {
+  await seed();
+  const { date } = await runBackup(getDb(), storage);
+  const manifest = manifestOf(date);
+  const users = manifest.tables.find((t) => t.name === "users")!;
+  const part = users.parts[0];
+  const lines = gunzipSync(storage.objects.get(`${BACKUP_BUCKET}/${part.path}`)!)
+    .toString("utf8")
+    .split("\n")
+    .filter(Boolean);
+  const twin = JSON.parse(lines[0]) as Record<string, unknown>;
+  twin.id = "u-twin"; // same username: users_username_lower_key rejects it
+  lines.push(JSON.stringify(twin));
+  const body = gzipSync(`${lines.join("\n")}\n`);
+  storage.objects.set(`${BACKUP_BUCKET}/${part.path}`, body);
+  Object.assign(part, { rows: lines.length, bytes: body.length, sha256: createHash("sha256").update(body).digest("hex") });
+  users.rows = lines.length;
+  storage.objects.set(`${BACKUP_BUCKET}/${date}/manifest.json`, Buffer.from(JSON.stringify(manifest)));
+
+  await assert.rejects(restoreBackup(await freshTarget(), storage, date), /users: 3 in the backup, 2 restored/);
+  const result = await restoreBackup(await freshTarget(), storage, date, { into: "allow-existing" });
+  assert.equal(result.skipped, 1);
+});
+
+test("page rows keep their data object; content is spliced in last as base64", async () => {
+  await seed();
+  await getDb().query(`update recreated_pages set data = '{"note":"kept","n":1}'::jsonb where competitor_id = 'c-db'`);
+  const { date } = await runBackup(getDb(), storage);
+  const part = manifestOf(date).tables.find((t) => t.name === "recreated_pages")!.parts[0];
+  const lines = gunzipSync(storage.objects.get(`${BACKUP_BUCKET}/${part.path}`)!)
+    .toString("utf8")
+    .split("\n")
+    .filter(Boolean);
+  assert.equal(lines.length, 2);
+  for (const line of lines) assert.match(line, /,"content":(null|"[A-Za-z0-9+/=]*")\}$/);
+  const target = await freshTarget();
+  await restoreBackup(target, storage, date);
+  assert.deepEqual(await fingerprint(target), await fingerprint(source));
+});
+
+test("a single page row bigger than the part limit fails the backup with a message naming the competitor", async () => {
+  await seed();
+  // ~20 KB of incompressible content; every other row compresses far below 10 KB.
+  await getDb().query("update recreated_pages set content = $1 where competitor_id = 'c-db'", [randomBytes(20_000)]);
+  await assert.rejects(runBackup(getDb(), storage, { partBytes: 10_000 }), /recreated_pages row c-db/);
+  assert.equal((await listBackups(storage)).length, 0, "no manifest: not a backup");
+});
+
+test("a failed retry raises an admin alert; GET shows the last success and the last failure", async () => {
+  const alerts: number[] = [];
+  const pending: Array<() => void> = [];
+  let calls = 0;
+  createBackupScheduler({
+    run: () => {
+      calls += 1;
+      return Promise.resolve("failed");
+    },
+    now: () => new Date(2026, 9, 26, 1, 0, 0),
+    setTimer: (fn) => {
+      pending.push(fn);
+    },
+    onRetryFailed: () => {
+      alerts.push(calls);
+    },
+  }).start();
+  const step = async () => {
+    pending.shift()!();
+    await new Promise((r) => setImmediate(r));
+  };
+  await step();
+  assert.deepEqual(alerts, [], "no alert after the first failure");
+  await step();
+  assert.deepEqual(alerts, [2], "one alert once the retry failed too");
+
+  const root = await makeUser("root", "admin");
+  assert.equal((await postBackup(root)).status, 200);
+  await recordBackupFailureAlert("Storage upload failed: HTTP 500");
+  const list = await getBackups(root);
+  const body = list.body as { lastSuccess: { date: string } | null; lastFailure: { at: string; message: string } | null };
+  assert.ok(body.lastSuccess?.date);
+  assert.equal(body.lastFailure?.message, "Storage upload failed: HTTP 500");
+  const { rows } = await getDb().query<{ data: { kind: string } }>("select data from admin_alerts");
+  assert.deepEqual(rows.map((r) => r.data.kind), ["backup_failed"]);
 });

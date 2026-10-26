@@ -10,8 +10,9 @@ export const runtime = "nodejs";
 
 /**
  * Admin alerts: users currently under the low-credit threshold, and provider
- * accounts that ran out of credits while someone was working. Provider alerts
- * stay open until an admin dismisses them; ?all=1 also lists dismissed ones.
+ * accounts that ran out of credits while someone was working, and failed
+ * nightly database backups. Provider and backup alerts stay open until an
+ * admin dismisses them; ?all=1 also lists dismissed ones.
  */
 export async function GET(request: Request) {
   try {
@@ -35,8 +36,18 @@ export async function GET(request: Request) {
       }));
 
     // Out-of-credit vendor accounts are the platform's to fix, not a client organisation's.
-    const all = scope.kind === "platform" ? await listAdminAlerts() : [];
+    const every = scope.kind === "platform" ? await listAdminAlerts() : [];
+    const all = every.filter((alert) => alert.kind === "provider_credits_exhausted");
     const open = all.filter((alert) => !alert.acknowledgedAt);
+    // Failed nightly database backups (platform only, like provider alerts).
+    const backupAll = every.filter((alert) => alert.kind === "backup_failed");
+    const backupOpen = backupAll.filter((alert) => !alert.acknowledgedAt);
+    const backupFailures = (showAll ? backupAll : backupOpen).map((alert) => ({
+      id: alert.id,
+      message: alert.message,
+      createdAt: alert.createdAt,
+      acknowledgedAt: alert.acknowledgedAt ?? null,
+    }));
     const providerCredits = (showAll ? all : open).map((alert) => ({
       id: alert.id,
       userId: alert.userId,
@@ -53,11 +64,13 @@ export async function GET(request: Request) {
       {
         lowCredit,
         providerCredits,
+        backupFailures,
         counts: {
           lowCredit: lowCredit.length,
           providerOpen: open.length,
           providerDismissed: all.length - open.length,
-          open: lowCredit.length + open.length,
+          backupOpen: backupOpen.length,
+          open: lowCredit.length + open.length + backupOpen.length,
         },
       },
       { headers: { "Cache-Control": "no-store" } },

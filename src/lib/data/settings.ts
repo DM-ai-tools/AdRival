@@ -1,4 +1,4 @@
-import type { AdminAlert, AppSettings } from "../types";
+import type { AdminAlert, AppSettings, BackupFailedAdminAlert, ProviderCreditAdminAlert } from "../types";
 import { getDb, withTx, type Queryable } from "./client";
 import { defaultAppSettings } from "./legacyStore";
 import { isoOrNull } from "./runs";
@@ -65,7 +65,7 @@ export async function recordProviderCreditAlert(input: {
   userId: string;
   username: string;
   displayName: string;
-  provider: AdminAlert["provider"];
+  provider: ProviderCreditAdminAlert["provider"];
   runId: string | null;
 }): Promise<void> {
   await withTx(async (tx) => {
@@ -102,6 +102,32 @@ export async function recordProviderCreditAlert(input: {
       [MAX_ADMIN_ALERTS],
     );
   });
+}
+
+/** Records a failed nightly backup (after its retry failed too) as an admin alert. */
+export async function recordBackupFailure(message: string): Promise<void> {
+  const alert: BackupFailedAdminAlert = {
+    id: crypto.randomUUID(),
+    kind: "backup_failed",
+    message: message.slice(0, 300),
+    createdAt: new Date().toISOString(),
+  };
+  await withTx(async (tx) => {
+    await upsertAdminAlertRow(tx, alert);
+    await tx.query(
+      `delete from admin_alerts
+        where id in (select id from admin_alerts order by created_at desc, id desc offset $1)`,
+      [MAX_ADMIN_ALERTS],
+    );
+  });
+}
+
+/** The newest backup-failure alert (dismissed or not), or null. */
+export async function latestBackupFailure(): Promise<BackupFailedAdminAlert | null> {
+  const { rows } = await getDb().query<{ data: BackupFailedAdminAlert }>(
+    `select data from admin_alerts where data->>'kind' = 'backup_failed' order by created_at desc, id desc limit 1`,
+  );
+  return rows[0]?.data ?? null;
 }
 
 /** Inserts or replaces one alert; created_at is the alert's createdAt (the dedupe window reads it). */

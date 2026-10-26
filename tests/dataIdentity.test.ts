@@ -215,7 +215,7 @@ test("provider credit alerts dedupe per user+provider and acknowledge once", asy
   await settings.recordProviderCreditAlert({ ...input, runId: "r2" });
   await settings.recordProviderCreditAlert({ ...input, provider: "openai" });
   await settings.recordProviderCreditAlert({ ...input, userId: "u-other" });
-  const alerts = (await settings.listAdminAlerts()).filter((a) => a.userId === "u-alert");
+  const alerts = (await settings.listAdminAlerts()).filter((a) => a.kind === "provider_credits_exhausted" && a.userId === "u-alert");
   assert.equal(alerts.length, 2);
   assert.ok(alerts.every((a) => a.kind === "provider_credits_exhausted"));
 
@@ -256,7 +256,7 @@ test("an alert older than the dedupe window does not block a new one", async () 
     provider: "runway",
     runId: null,
   });
-  assert.equal((await settings.listAdminAlerts()).filter((a) => a.userId === "u-old").length, 2);
+  assert.equal((await settings.listAdminAlerts()).filter((a) => a.kind === "provider_credits_exhausted" && a.userId === "u-old").length, 2);
 });
 
 /* ── projects and spaces ── */

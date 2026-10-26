@@ -1661,7 +1661,20 @@ export interface CreditReservation {
 
 /* ──────────────────────────── Audit & settings ──────────────────────────── */
 
-export interface AdminAlert {
+/** An admin alert: a provider account out of credits, or a failed nightly database backup. */
+export type AdminAlert = ProviderCreditAdminAlert | BackupFailedAdminAlert;
+
+export interface BackupFailedAdminAlert {
+  id: string;
+  kind: "backup_failed";
+  /** Short, secret-free reason. */
+  message: string;
+  createdAt: string;
+  acknowledgedAt?: string | null;
+  acknowledgedByUserId?: string | null;
+}
+
+export interface ProviderCreditAdminAlert {
   id: string;
   kind: "provider_credits_exhausted";
   userId: string;

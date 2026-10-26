@@ -8,8 +8,10 @@ import {
   poolConfigFor,
   poolTestClient,
   setClientForTests,
+  txPreamble,
   type Queryable,
   type TestClient,
+  type TxOptions,
 } from "../../src/lib/data/client";
 import { migrate } from "../../src/lib/data/migrate";
 
@@ -33,6 +35,12 @@ export type PgliteTestClient = TestClient & {
   close(): Promise<void>;
   /** True when called from code running inside an open transaction of this client. */
   inTransaction(): boolean;
+  /**
+   * Runs `fn` as if from another connection: outside the caller's transaction
+   * context, so it may use getDb()/withTx (it waits for the open transaction
+   * to finish, as a second connection would wait for its locks).
+   */
+  detached<T>(fn: () => Promise<T>): Promise<T>;
 };
 
 /** A tiny FIFO async mutex. */
@@ -101,7 +109,7 @@ export async function createPgliteClient(): Promise<PgliteTestClient> {
       if (insideOpenTx()) throw new Error(TX_MISUSE);
       return runExclusive(() => raw.query<R>(text, params));
     },
-    async tx<T>(fn: (t: Queryable) => Promise<T>): Promise<T> {
+    async tx<T>(fn: (t: Queryable) => Promise<T>, opts?: TxOptions): Promise<T> {
       if (insideOpenTx()) throw new Error(TX_MISUSE);
       return runExclusive(() => {
         const state: TxState = { open: true };
@@ -114,8 +122,11 @@ export async function createPgliteClient(): Promise<PgliteTestClient> {
           },
         };
         return inTx.run(state, async () => {
-          await pg.exec("BEGIN");
+          // No default statement timeout here (PGlite has one connection); options as in production.
+          const [begin, ...locals] = txPreamble(opts, null);
+          await pg.exec(begin);
           try {
+            for (const statement of locals) await pg.exec(statement);
             const value = await fn(handle);
             state.open = false;
             await pg.exec("COMMIT");
@@ -134,6 +145,7 @@ export async function createPgliteClient(): Promise<PgliteTestClient> {
     },
     close: () => pg.close(),
     inTransaction: insideOpenTx,
+    detached: (fn) => inTx.exit(fn),
   };
 }
 

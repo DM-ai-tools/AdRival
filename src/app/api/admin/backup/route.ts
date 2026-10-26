@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { errorResponse, HttpError, requirePlatformAdmin } from "@/lib/authz";
 import { recordAudit } from "@/lib/accounting/records";
-import { BackupBusyError, listBackups, runBackupNow, type BackupResult } from "@/lib/data/backup";
+import { BackupBusyError, lastBackupFailure, listBackups, runBackupNow, type BackupResult } from "@/lib/data/backup";
 import { getStorage, StorageNotConfiguredError, storageConfigured } from "@/lib/data/storageClient";
 
 export const runtime = "nodejs";
@@ -40,13 +40,19 @@ export async function POST() {
   }
 }
 
-/** Complete backups in Storage, newest first (date, tables, rows, bytes). Platform admins only. */
+/**
+ * Complete backups in Storage, newest first (date, tables, rows, bytes), the
+ * last success (the newest complete backup) and the last failure (the newest
+ * backup-failure alert). Platform admins only.
+ */
 export async function GET() {
   try {
     await requirePlatformAdmin();
     requireStorage();
     const backups = await listBackups(getStorage());
-    return NextResponse.json({ backups });
+    const lastSuccess = backups[0] ? { date: backups[0].date, at: backups[0].createdAt } : null;
+    const lastFailure = await lastBackupFailure();
+    return NextResponse.json({ backups, lastSuccess, lastFailure });
   } catch (err) {
     return errorResponse(err, { audience: "admin" });
   }

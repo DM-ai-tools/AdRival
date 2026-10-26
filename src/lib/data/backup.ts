@@ -4,7 +4,8 @@ import { createInterface } from "node:readline";
 import { Readable } from "node:stream";
 import { constants as zlibConstants, createGunzip, createGzip, type Gzip } from "node:zlib";
 
-import { getDb, type Queryable } from "./client";
+import { getDb, withTx, type Queryable, type TestClient, type TxOptions } from "./client";
+import { latestBackupFailure, recordBackupFailure } from "./settings";
 import { safeMessage } from "./health";
 import {
   getStorage,
@@ -36,10 +37,18 @@ import {
  * `recreated-pages-archive` bucket and are not copied here (see
  * docs/POSTGRES_OPERATIONS.md).
  *
- * The backup is not one snapshot: tables are read one after another while the
- * app runs, so a row written during the backup can be in one table and not in
- * a related one. Restore tolerates that (a page row whose competitor is not in
- * the backup is skipped and counted).
+ * One consistent snapshot: every read (migration list and every table) runs
+ * in ONE `REPEATABLE READ, READ ONLY` transaction, so credit counters, ledger
+ * and reservations, runs and their competitors, users and memberships all
+ * come from the same moment, and no row moves between batches. The table
+ * objects are uploaded from inside that transaction, one part at a time, so
+ * memory stays bounded by one part (~40 MB) instead of the whole database;
+ * the cost is one pooled connection and an open read-only snapshot for the
+ * backup's duration (no row locks are taken; idle_in_transaction_session_
+ * timeout of 10 min bounds a stuck upload). The manifest is written after
+ * COMMIT and retention runs after it. A transaction-level advisory lock taken
+ * first makes a second backup (another instance, an overlapping deploy)
+ * report "already running" instead of running twice.
  */
 
 export const BACKUP_BUCKET = "db-backups";
@@ -78,12 +87,16 @@ const DEFAULT_KEEP = 3;
 const DEFAULT_PART_BYTES = 40 * 1024 * 1024;
 const BATCH_ROWS = 2000;
 /** Tables with bytea columns (page content, up to ~25 MB a row) are read a few rows at a time. */
-const BYTEA_BATCH_ROWS = 2;
+const BYTEA_BATCH_ROWS = 1;
 const INSERT_BATCH_ROWS = 500;
 const INSERT_BATCH_BYTES = 8 * 1024 * 1024;
 const DAY_MS = 24 * 60 * 60_000;
 const IDENT = /^[a-z_][a-z0-9_]*$/;
 const FOLDER = /^(\d{4})-(\d{2})-(\d{2})T(\d{2})(\d{2})Z(?:-(\d+))?$/;
+/** pg_try_advisory_xact_lock key of the backup (any constant shared by every instance). */
+export const BACKUP_LOCK_KEY = 7_302_010;
+/** The snapshot transaction: one consistent read-only view, 5 min per statement, 10 min idle (uploads). */
+const SNAPSHOT_TX: TxOptions = { snapshot: true, statementTimeoutMs: 5 * 60_000, idleTimeoutMs: 10 * 60_000 };
 
 /** Restore skips rows whose parent is not in the target (only FK in the schema). */
 const PARENT_FILTER: Record<string, string> = {
@@ -289,7 +302,15 @@ async function backUpTable(db: Queryable, info: TableInfo, o: WriteOptions): Pro
   let writer = new PartWriter();
   let rows = 0;
 
-  const upload = async (body: Buffer, file: string, partRows: number) => {
+  let partFirstKey = "";
+  const upload = async (body: Buffer, file: string, partRows: number, firstKey: string) => {
+    if (partRows === 1 && body.length > o.partBytes) {
+      // Retrying cannot help: say which row, so it can be dealt with (Storage refuses files over its limit).
+      throw new Error(
+        `${info.name} row ${firstKey} is ${(body.length / 1e6).toFixed(1)} MB compressed, over the ` +
+          `${(o.partBytes / 1e6).toFixed(1)} MB part limit; it cannot be backed up`,
+      );
+    }
     const path = `${o.folder}/${file}`;
     await o.storage.putObject(o.bucket, path, body);
     parts.push({ path, rows: partRows, bytes: body.length, sha256: sha256(body) });
@@ -305,12 +326,15 @@ async function backUpTable(db: Queryable, info: TableInfo, o: WriteOptions): Pro
     for (const row of batch.rows) {
       let line: string;
       if (info.byteaColumns.length) {
-        const obj = JSON.parse(row.j) as Record<string, unknown>;
-        info.byteaColumns.forEach((c, i) => {
-          const value = row[`b${i}`] as Buffer | Uint8Array | null | undefined;
-          obj[c] = value ? Buffer.from(value).toString("base64") : null;
-        });
-        line = `${JSON.stringify(obj)}\n`;
+        // The row text without its bytea columns, with each spliced in last as
+        // base64 (never JSON.parse/stringify the row: `data` stays as Postgres wrote it).
+        const tail = info.byteaColumns
+          .map((c, i) => {
+            const value = row[`b${i}`] as Buffer | Uint8Array | null | undefined;
+            return `,"${c}":${value ? `"${Buffer.from(value).toString("base64")}"` : "null"}`;
+          })
+          .join("");
+        line = `${row.j.slice(0, -1)}${tail}}\n`;
       } else {
         line = `${row.j}\n`;
       }
@@ -320,10 +344,12 @@ async function backUpTable(db: Queryable, info: TableInfo, o: WriteOptions): Pro
         if (writer.compressed + bytes > o.partBytes) {
           // Another row follows, so this table has parts: number them.
           const done = writer;
+          const doneKey = partFirstKey;
           writer = new PartWriter();
-          await upload(await done.finish(), partFile(parts.length + 1), done.rows);
+          await upload(await done.finish(), partFile(parts.length + 1), done.rows, doneKey);
         }
       }
+      if (writer.rows === 0) partFirstKey = row.k;
       await writer.write(line, bytes);
       rows += 1;
     }
@@ -331,7 +357,7 @@ async function backUpTable(db: Queryable, info: TableInfo, o: WriteOptions): Pro
     last = batch.rows[batch.rows.length - 1].k;
   }
   const body = await writer.finish();
-  await upload(body, parts.length === 0 ? `${info.name}.ndjson.gz` : partFile(parts.length + 1), writer.rows);
+  await upload(body, parts.length === 0 ? `${info.name}.ndjson.gz` : partFile(parts.length + 1), writer.rows, partFirstKey);
 
   return {
     name: info.name,
@@ -342,6 +368,14 @@ async function backUpTable(db: Queryable, info: TableInfo, o: WriteOptions): Pro
     bytes: parts.reduce((n, p) => n + p.bytes, 0),
     parts,
   };
+}
+
+/** Runs `fn` in the snapshot transaction on `db` (a client with tx, or the app database). */
+function snapshotRunner(db: Queryable): <T>(fn: (tx: Queryable) => Promise<T>) => Promise<T> {
+  const own = (db as Partial<TestClient>).tx;
+  if (typeof own === "function") return <T>(fn: (tx: Queryable) => Promise<T>) => own.call(db, fn, SNAPSHOT_TX) as Promise<T>;
+  if (db === getDb()) return (fn) => withTx(fn, SNAPSHOT_TX);
+  throw new Error("runBackup needs the app database or a client that can open a transaction");
 }
 
 /** A folder name for `now` that no object uses yet. */
@@ -355,8 +389,9 @@ async function freeFolder(storage: StorageLike, bucket: string, now: Date): Prom
 }
 
 /**
- * Backs up every table to `bucket` (default db-backups), writes the manifest
- * last, then applies retention (keep the newest `keep`, default 3, complete
+ * Backs up every table to `bucket` (default db-backups) from one consistent
+ * snapshot, writes the manifest after the snapshot transaction committed,
+ * then applies retention (keep the newest `keep`, default 3, complete
  * backups; a retention failure is logged, the backup still counts).
  */
 export async function runBackup(
@@ -375,14 +410,17 @@ export async function runBackup(
     batchRows: opts.batchRows ?? BATCH_ROWS,
   };
 
-  const migrations = (
-    await db.query<{ name: string }>("select name from schema_migrations order by name")
-  ).rows.map((r) => r.name);
-
-  const tables: BackupTable[] = [];
-  for (const name of await tablesToBackUp(db)) {
-    tables.push(await backUpTable(db, await tableInfo(db, name), write));
-  }
+  const { migrations, tables } = await snapshotRunner(db)(async (tx) => {
+    // First statement: one backup at a time across every instance.
+    const lock = await tx.query<{ ok: boolean }>("select pg_try_advisory_xact_lock($1) as ok", [BACKUP_LOCK_KEY]);
+    if (!lock.rows[0]?.ok) throw new BackupBusyError();
+    const names = (await tx.query<{ name: string }>("select name from schema_migrations order by name")).rows.map(
+      (r) => r.name,
+    );
+    const done: BackupTable[] = [];
+    for (const name of await tablesToBackUp(tx)) done.push(await backUpTable(tx, await tableInfo(tx, name), write));
+    return { migrations: names, tables: done };
+  });
 
   const manifest: BackupManifest = {
     format: "adrival-db-backup",
@@ -589,16 +627,28 @@ async function insertJsonBatch(db: Queryable, table: BackupTable, lines: string[
   return rowCount;
 }
 
-async function insertByteaRow(db: Queryable, table: BackupTable, line: string): Promise<number> {
-  const t = ident(table.name);
+/** The row text without its spliced bytea tail, and each bytea value (see backUpTable). */
+export function splitByteaLine(line: string, byteaColumns: string[]): { json: string; values: Array<Buffer | null> } {
+  const tail = byteaColumns.map((c) => `,"${c}":(null|"([A-Za-z0-9+/=]*)")`).join("");
+  const m = new RegExp(`${tail}\\}$`).exec(line);
+  if (m) {
+    const values = byteaColumns.map((_, i) => (m[2 * i + 1] === "null" ? null : Buffer.from(m[2 * i + 2], "base64")));
+    return { json: `${line.slice(0, m.index)}}`, values };
+  }
+  // Not in the spliced layout (hand-edited file): parse it.
   const obj = JSON.parse(line) as Record<string, unknown>;
-  const params: unknown[] = [];
-  const buffers: Array<Buffer | null> = table.byteaColumns.map((c) => {
+  const values = byteaColumns.map((c) => {
     const value = obj[c];
     delete obj[c];
     return typeof value === "string" ? Buffer.from(value, "base64") : null;
   });
-  params.push(JSON.stringify(obj), ...buffers);
+  return { json: JSON.stringify(obj), values };
+}
+
+async function insertByteaRow(db: Queryable, table: BackupTable, line: string): Promise<number> {
+  const t = ident(table.name);
+  const { json, values } = splitByteaLine(line, table.byteaColumns);
+  const params: unknown[] = [json, ...values];
   const select = table.columns.map((c) => {
     const i = table.byteaColumns.indexOf(c);
     return i >= 0 ? `$${i + 2}::bytea` : `r.${ident(c)}`;
@@ -650,6 +700,7 @@ export async function restoreBackup(
   date: string,
   opts: { into?: "empty" | "allow-existing"; bucket?: string } = {},
 ): Promise<{ tables: number; rows: number; inserted: number; skipped: number }> {
+  // skipped: rows of the backup not inserted (schema_migrations, which the migrations fill first, not counted).
   const bucket = opts.bucket ?? BACKUP_BUCKET;
   const manifest = await completeManifest(storage, date, bucket);
 
@@ -691,20 +742,24 @@ export async function restoreBackup(
 
   let rows = 0;
   let inserted = 0;
+  let skipped = 0;
+  const differences: string[] = [];
   for (const table of tables) {
+    let tableInserted = 0;
+    let tableRead = 0;
     for (const part of table.parts) {
       const body = await verifiedObject(storage, bucket, part);
       let batch: string[] = [];
       let batchBytes = 0;
       const flush = async () => {
-        if (batch.length) inserted += await insertJsonBatch(db, table, batch);
+        if (batch.length) tableInserted += await insertJsonBatch(db, table, batch);
         batch = [];
         batchBytes = 0;
       };
       for await (const line of ndjsonLines(body)) {
-        rows += 1;
+        tableRead += 1;
         if (table.byteaColumns.length) {
-          inserted += await insertByteaRow(db, table, line);
+          tableInserted += await insertByteaRow(db, table, line);
           continue;
         }
         batch.push(line);
@@ -714,8 +769,25 @@ export async function restoreBackup(
       await flush();
     }
     await resetSequences(db, table);
+    rows += tableRead;
+    inserted += tableInserted;
+    if (table.name !== "schema_migrations") skipped += tableRead - tableInserted;
+    // schema_migrations is filled by the migrations the target ran first.
+    if (table.name !== "schema_migrations" && (tableInserted !== table.rows || tableRead !== table.rows)) {
+      differences.push(`${table.name}: ${table.rows} in the backup, ${tableInserted} restored`);
+    }
   }
-  return { tables: tables.length, rows, inserted, skipped: rows - inserted };
+  if (opts.into !== "allow-existing" && differences.length) {
+    // Into an empty database every row must land: a drop (unique conflict, missing parent, bad count) is an error.
+    throw new Error(
+      `restore incomplete: ${differences.join("; ")}. The database now holds a partial restore: ` +
+        "drop and recreate it, or re-run with allow-existing after fixing the cause.",
+    );
+  }
+  if (skipped > 0) {
+    console.warn(`[backup] restore of ${date}: ${skipped} row(s) not inserted (already there, or a missing parent page)`);
+  }
+  return { tables: tables.length, rows, inserted, skipped };
 }
 
 /* ── scheduler and keep-alive ── */
@@ -728,6 +800,7 @@ export class BackupBusyError extends Error {
 }
 
 let running = false;
+let lastTickError: string | null = null;
 
 /** One backup of the app database to Storage now (one at a time per process). */
 export async function runBackupNow(opts: { keep?: number } = {}): Promise<BackupResult> {
@@ -761,7 +834,8 @@ export async function backupTick(): Promise<TickOutcome> {
       console.log("[backup] skipped: a backup is already running");
       return "busy";
     }
-    console.error(`[backup] failed: ${safeMessage(err)}`);
+    lastTickError = safeMessage(err);
+    console.error(`[backup] failed: ${lastTickError}`);
     return "failed";
   }
 }
@@ -781,6 +855,8 @@ export interface BackupSchedulerDeps {
   run: () => Promise<TickOutcome>;
   now: () => Date;
   setTimer: (fn: () => void, ms: number) => void;
+  /** Called once when the retry failed too (raise an admin alert). */
+  onRetryFailed?: () => void | Promise<void>;
 }
 
 /** Nightly at 02:00; a failed run is retried once after 15 minutes, then the nightly schedule resumes. */
@@ -793,8 +869,18 @@ export function createBackupScheduler(deps: BackupSchedulerDeps): { start(): voi
     } catch {
       outcome = "failed";
     }
-    if (outcome === "failed" && !retry) deps.setTimer(() => void fire(true), RETRY_MS);
-    else nightly();
+    if (outcome === "failed" && !retry) {
+      deps.setTimer(() => void fire(true), RETRY_MS);
+      return;
+    }
+    if (outcome === "failed" && deps.onRetryFailed) {
+      try {
+        await deps.onRetryFailed();
+      } catch (err) {
+        console.error(`[backup] could not record the failure alert: ${safeMessage(err)}`);
+      }
+    }
+    nightly();
   };
   return { start: nightly };
 }
@@ -815,6 +901,7 @@ export function startBackupScheduler(): boolean {
     setTimer: (fn, ms) => {
       setTimeout(fn, ms).unref();
     },
+    onRetryFailed: () => recordBackupFailureAlert(lastTickError ?? "unknown error"),
   }).start();
   return true;
 }
@@ -839,4 +926,15 @@ export function startKeepAlive(): boolean {
   keepAliveStarted = true;
   setInterval(() => void keepAlivePing(), KEEP_ALIVE_MS).unref();
   return true;
+}
+
+/** An admin alert (Alerts panel) that the nightly backup failed twice in a row. */
+export function recordBackupFailureAlert(message: string): Promise<void> {
+  return recordBackupFailure(safeMessage(message));
+}
+
+/** The newest backup-failure alert, for GET /api/admin/backup. */
+export async function lastBackupFailure(): Promise<{ at: string; message: string } | null> {
+  const alert = await latestBackupFailure();
+  return alert ? { at: alert.createdAt, message: alert.message } : null;
 }
