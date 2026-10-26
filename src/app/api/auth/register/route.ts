@@ -36,7 +36,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
 
-  const settings = getAppSettings();
+  const settings = await getAppSettings();
   if (!settings.publicSignupEnabled) {
     return NextResponse.json(
       {
@@ -64,14 +64,14 @@ export async function POST(request: Request) {
   }
 
   const username = normalizeUsername(String(body.username ?? ""));
-  if (getUserByUsername(username)) {
+  if (await getUserByUsername(username)) {
     return NextResponse.json({ error: "Username already taken" }, { status: 409 });
   }
 
   try {
     // Public sign-up always creates a regular user. The role is not read from
     // the request body, so it cannot be self-assigned.
-    const user = createUser({
+    const user = await createUser({
       username,
       displayName: String(body.displayName ?? "").trim(),
       passwordHash: await hashPassword(String(body.password ?? "")),
@@ -80,12 +80,12 @@ export async function POST(request: Request) {
     });
 
     // Zero credits unless an admin configured a default allowance.
-    initializeUserCredits(user.id, {
+    await initializeUserCredits(user.id, {
       allowanceSubunits: settings.defaultAllowanceSubunits,
       resetCadence: settings.defaultResetCadence,
       reason: "Default allowance on sign-up",
     });
-    recordAudit({
+    await recordAudit({
       actorUserId: user.id,
       actorUsername: user.username,
       action: "auth.register",

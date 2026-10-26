@@ -14,11 +14,12 @@ export const runtime = "nodejs";
 export async function GET() {
   try {
     const user = await requireUser({ allowPasswordChangePending: true });
+    const [credits, org] = await Promise.all([getCreditSummary(user.id), getOrganization(user.orgId)]);
     return NextResponse.json({
       user: toPublicUser(user),
-      credits: getCreditSummary(user.id),
+      credits,
       /** Client organisation name, or null for platform-level accounts. */
-      orgName: getOrganization(user.orgId)?.name ?? null,
+      orgName: org?.name ?? null,
       platformAdmin: user.role === "admin" && !user.orgId,
     });
   } catch (err) {
@@ -49,7 +50,7 @@ export async function PATCH(request: Request) {
     }
 
     // Role is never taken from the request body — a user cannot promote itself.
-    const updated = updateUser(current.id, { displayName });
+    const updated = await updateUser(current.id, { displayName });
     if (!updated) {
       return NextResponse.json({ error: "User not found" }, { status: 404 });
     }

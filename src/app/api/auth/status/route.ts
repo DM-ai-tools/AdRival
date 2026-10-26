@@ -6,13 +6,13 @@ export const runtime = "nodejs";
 
 export async function GET() {
   const user = await getCurrentUser();
-  const settings = getAppSettings();
+  const [settings, activeAdmins] = await Promise.all([getAppSettings(), countActiveAdmins()]);
   return NextResponse.json({
     authenticated: Boolean(user),
     user,
     // Lets the sign-in screen hide the "create account" link when sign-up is
     // off, and prompt for bootstrap on a brand-new deployment.
     publicSignupEnabled: settings.publicSignupEnabled,
-    needsBootstrap: countActiveAdmins() === 0,
+    needsBootstrap: activeAdmins === 0,
   });
 }

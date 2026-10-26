@@ -58,7 +58,7 @@ export async function POST(request: Request) {
     }
 
     // Bumping the session epoch invalidates every other session for this user.
-    const updated = updateUser(user.id, {
+    const updated = await updateUser(user.id, {
       passwordHash: await hashPassword(newPassword),
       mustChangePassword: false,
       bumpSessionEpoch: true,
@@ -66,7 +66,7 @@ export async function POST(request: Request) {
     if (!updated) {
       return NextResponse.json({ error: "User not found" }, { status: 404 });
     }
-    recordAudit({
+    await recordAudit({
       actorUserId: user.id,
       actorUsername: user.username,
       action: "auth.password_changed",

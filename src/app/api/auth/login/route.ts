@@ -35,7 +35,7 @@ export async function POST(request: Request) {
   }
 
   const username = String(body.username ?? "");
-  const lock = isLoginLocked(username);
+  const lock = await isLoginLocked(username);
   if (lock.locked) {
     return NextResponse.json(
       {
@@ -45,7 +45,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const user = getUserByUsername(username);
+  const user = await getUserByUsername(username);
   const passwordOk =
     !!user &&
     (await verifyPassword(String(body.password ?? ""), user.passwordHash));
@@ -53,21 +53,21 @@ export async function POST(request: Request) {
   // Suspended and soft-deleted accounts fail with the same generic message as a
   // wrong password so the endpoint does not disclose account state.
   if (!user || !passwordOk || user.status !== "active") {
-    recordFailedLogin(username);
+    await recordFailedLogin(username);
     return NextResponse.json(
       { error: "Invalid username or password" },
       { status: 401 },
     );
   }
 
-  clearLoginAttempts(username);
-  updateUser(user.id, { lastLoginAt: new Date().toISOString() });
+  await clearLoginAttempts(username);
+  await updateUser(user.id, { lastLoginAt: new Date().toISOString() });
   const publicUser = toPublicUser(user);
   const token = await createSessionToken({
     ...publicUser,
     sessionEpoch: user.sessionEpoch,
   });
-  recordAudit({
+  await recordAudit({
     actorUserId: user.id,
     actorUsername: user.username,
     action: "auth.login",
