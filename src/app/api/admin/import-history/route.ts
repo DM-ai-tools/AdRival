@@ -82,7 +82,7 @@ export async function POST(req: NextRequest) {
     payload = (await req.json()) as Partial<DatabaseShape>;
   } catch {
     return NextResponse.json(
-      { error: "Body must be JSON matching data/store.json" },
+      { error: "Body must be JSON in the store export format (the shape of the old data/store.json file)" },
       { status: 400 },
     );
   }

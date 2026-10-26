@@ -138,7 +138,8 @@ src/
     api/                    # REST-style route handlers
   components/               # Search, tables, analysis panels, history
   lib/
-    db.ts                   # JSON persistence
+    db.ts                   # Data API (re-exports the Postgres repositories)
+    data/                   # Postgres repositories, migrations runner, Storage, backup, import
     types.ts                # Domain model
     sociavault/ openai/ openrouter/ anthropic/ firecrawl/ runway/
     pipeline/               # Business logic
@@ -147,7 +148,8 @@ src/
       recreateLandingPage.ts, contentDraft.ts, markdownContentDraft.ts
       generateLandingImages.ts, resolveBrandBundle.ts, ...
       archive/              # Capture, CID paste, brand apply, interactivity
-data/store.json             # Runtime database (gitignored)
+db/migrations/              # SQL migrations (run at start)
+data/store.json             # Pre-Postgres store (gitignored): import/rollback source only
 public/generated/           # Runway image outputs per competitor
 ```
 
@@ -161,7 +163,7 @@ AdRival is a **Node.js Next.js monolith**: UI and API live in one app. Heavy wor
 
 - **Search / lookup** start quickly and continue in the background using Next.js `after()`, while the client polls status endpoints.
 - **Landing analysis** and **recreate** are longer synchronous API calls (up to several minutes) driven from the UI with loading states.
-- State is persisted to a local JSON store so history survives restarts when the `data/` directory is mounted.
+- State is persisted in Postgres (Supabase) so history survives restarts and deploys. Some live run state (progress, stop signals) is also held in the server's memory, so the app runs as one instance.
 
 ### 6.2 High-level system diagram
 
@@ -173,7 +175,8 @@ AdRival is a **Node.js Next.js monolith**: UI and API live in one app. Heavy wor
                              │               └─────────────────────┘
                              ▼
                     ┌──────────────────┐
-                    │ data/store.json  │
+                    │ Postgres         │
+                    │ Supabase Storage │
                     │ public/generated │
                     └──────────────────┘
 ```
@@ -243,10 +246,11 @@ Recreation is done by the Manus design agent; see `docs/RECREATE_PIPELINE.md`. T
 
 ### 8.1 Persistence
 
-- **Primary store:** `data/store.json` managed by `src/lib/db.ts`
-- **Generated assets:** `public/generated/{competitorId}/*.png`
-- **No traditional SQL database** in the default setup
-- For production (Railway), mount a volume at `/app/data` so history survives deploys
+- **Primary store:** Postgres (Supabase), through the repositories in `src/lib/data/` (re-exported by `src/lib/db.ts`); schema in `db/migrations/`, applied at start. See `docs/POSTGRES_OPERATIONS.md`.
+- **Archived recreated pages and backups:** Supabase Storage (`recreated-pages-archive`, `db-backups`)
+- **Generated assets:** `public/generated/{competitorId}/*.png`; uploaded recreate assets on the `/app/data` volume
+- **History:** until the 2026-10 Postgres move, everything lived in `data/store.json`. That file is now only the source for the one-time import (`npm run import:store`) and the rollback copy; the app no longer reads it.
+- For production (Railway), keep the volume at `/app/data` (uploaded assets, the rollback copy of `store.json`)
 
 ### 8.2 Top-level collections
 
@@ -367,8 +371,8 @@ Design preview uses a sandboxed iframe with `srcDoc={html}` so the draft runs wi
 5. **Interactive preview matters**  
    Archived pages often lose original JS; AdRival injects a lightweight runtime so FAQs and common reveal patterns still work in preview.
 
-6. **JSON store simplicity**  
-   Fast to ship and deploy, but not multi-writer SQL. Suitable for single-instance / volume-backed deployments.
+6. **Postgres, still one instance**  
+   The JSON store was replaced by Postgres in 2026-10 (multi-writer safe: row locks, advisory locks, a credit ledger). Some live run state still lives in server memory, so the app runs as a single instance.
 
 7. **Long jobs need Node runtime**  
    Playwright + multi-API pipelines are not edge-friendly; routes explicitly use the Node.js runtime.

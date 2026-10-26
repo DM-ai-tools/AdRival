@@ -20,7 +20,7 @@ or into a file that is committed.** Put them only in Railway variables, in
 
 | Phase | What | Where | Time |
 |---|---|---|---|
-| A | One-time checks before the day | Supabase, Railway dashboards | 30-45 min |
+| A | One-time checks before the day (incl. the maintenance switch, A9) | Supabase, Railway dashboards | 45-60 min |
 | B | Rehearsal: the whole move, on a throwaway Supabase project | Your PC | 1-2 hours |
 | C | Cutover: the real move | Railway + production Supabase | 15-30 min offline, outside working hours |
 | D | After go-live: watch, back up, know the limits | Dashboards + your PC | first week |
@@ -112,6 +112,14 @@ RECREATED_PAGE_ARCHIVE_DAYS=14
 Do **not** put `DATABASE_TEST_URL` here. It is only typed on one command
 line in B1.
 
+The scripts (`import:store`, `verify:import`, `backup:*`, `loadtest`) read
+`.env.local` (then `.env`) themselves. Each prints one line first, for
+example `env files loaded: .env.local (variables already set in this terminal
+win)`: file names only, never values. A variable you `export` in the
+terminal always wins over the file, and `--url` wins over
+`DATABASE_DIRECT_URL`. That is how Phase C points the scripts at production
+while this file keeps the scratch values.
+
 Check (Git Bash): `git status --short` must not list `.env.local`.
 If it does, stop and tell Claude.
 
@@ -131,6 +139,14 @@ project's values:
 Do **not** set `DATABASE_TEST_URL` on Railway. Ever. The staging tests
 create and drop schemas.
 
+**Remove `HISTORY_IMPORT_SECRET`** from Railway at the cutover (C6) if it is
+set. It enables `/api/admin/import-history`, whose default `replace` mode
+would replace the Postgres runs with an old file's and wipe every run
+created after the cutover.
+
+`MAINTENANCE_MODE` is set and unset during the window (C3, C6, C7); it is not
+a permanent variable.
+
 Do not set them early: the current live app does not use them, but it is
 cleaner to change everything in one window.
 
@@ -144,22 +160,46 @@ Keep the volume mounted at `/app/data`. Reasons:
 Check: Railway, your service, Volumes: a volume at `/app/data` exists.
 Do not delete or resize it.
 
+**Deploys do not overlap while the volume is attached.** Railway stops the
+old container before it starts the new one (a volume can only be mounted
+once). That is what makes it safe that the new app, at startup, marks every
+"running" job as failed: no old container is still running them. The flip
+side: **a deploy that fails to start is downtime** until it is fixed or
+rolled back, and every deploy (including a variable change) is a short
+outage. Plan every deploy outside working hours.
+
 ### A6. How will you get `store.json` off the volume?
 
 You need a copy of `/app/data/store.json` (about 142 MB) on your PC at
 cutover, and one for the rehearsal. The app has no download button for it.
-Options:
+The file can only be read **from inside the running container**
+(`railway ssh`). That is why the cutover keeps the old container running in
+maintenance mode (A9, C3) while you copy it, and only then deploys the new
+build.
+
 - Rehearsal: use the local file `data/store.pre-postgres.json` (already in
   the repo folder, git-ignored; Task 9 used exactly this file). It may be
   older than production. For a realistic rehearsal that is fine.
-- Cutover: the Railway CLI (`npm i -g @railway/cli`, then `railway login`,
-  `railway link`) offers `railway ssh`. Ask Claude to work out the exact
-  download for your setup on the day. **This step was not tested.** Do it
-  once during the rehearsal week so you are not learning it in the window.
-  Fallback: if you cannot download it, the cutover cannot run the import
-  from your PC. Stop and ask Claude.
+- Cutover: the commands are in C4. **Practise them once in the rehearsal
+  week** against the live service (reading the file is harmless; it may
+  change between your hash and your copy while the app is live, which is
+  fine for practice). If neither route in C4 works for you, stop and ask
+  Claude before the day.
 
-Check: you hold a file of about the expected size on your PC.
+Railway CLI setup (once, PowerShell or Git Bash):
+```sh
+npm i -g @railway/cli
+railway login
+railway link        # pick the project, the environment and the AdRival service
+railway ssh         # opens a shell in the running container; type exit to leave
+```
+**Not tested by Claude:** the exact `railway ssh` options and whether it
+passes a command and its output through cleanly. Railway's CLI documents
+`railway ssh [command]`; the C4 commands use `railway ssh -- sh -c '...'`.
+If your CLI version rejects `--`, try the same without `--`.
+
+Check: you hold a file of about the expected size on your PC, and its
+SHA-256 matches the one printed inside the container.
 
 ### A7. Git safety
 
@@ -178,6 +218,45 @@ Rollback for the whole project: `git switch main`. `main` is untouched.
 Choose the cutover window (evening or weekend). Tell users the app will be
 offline for about 30 minutes (leave room for trouble: say 1 hour).
 
+### A9. Deploy the maintenance switch on the old app (rehearsal week, off-hours)
+
+The live app runs `main`, which has no maintenance switch. The branch
+`maintenance-on-main` is `main` plus exactly one change: with
+`MAINTENANCE_MODE=1`, every request except `/api/health` gets "503 down for
+maintenance" (JSON `{"error":"maintenance"}` for `/api/...`, a short page
+for the browser). It still reads and writes `store.json` exactly like
+`main`. It exists only locally until you push it.
+
+1. (Git Bash) Push the branch (it is not pushed yet):
+   ```sh
+   git log --oneline -3 maintenance-on-main
+   git push origin maintenance-on-main
+   ```
+   Expect the top commits "test: run the maintenance middleware test in npm
+   test" and "feat: MAINTENANCE_MODE=1 answers everything but /api/health
+   with 503", on top of `main`'s newest commit.
+2. Railway, your service, Settings, Source: set the deploy branch to
+   `maintenance-on-main`, then Deploy. Wait for "Active". The app works
+   exactly as before (the switch is off).
+3. Test the toggle (each change is a redeploy, a minute or two offline):
+   - Variables: add `MAINTENANCE_MODE` = `1`, deploy. Open the app: the
+     "Down for maintenance" page. Open `https://<your app>/api/health`: it
+     still answers (HTTP 200). In Git Bash,
+     `curl -i https://<your app>/api/history` shows `503` and
+     `Retry-After: 600`.
+   - Variables: delete `MAINTENANCE_MODE`, deploy. The app works normally
+     again.
+   If the page does not appear with the variable set: Next.js reads the
+   variable at run time in the middleware (verified only in unit tests, not
+   on Railway). Send Claude the deploy log; do not rely on the switch until
+   this works.
+4. Practise the `store.json` copy (C4 steps 2-4) once, while the app is
+   live.
+
+Leave the service on `maintenance-on-main` until the cutover. It is the
+build you roll back to as well.
+Rollback: set the deploy branch back to `main` and Deploy.
+
 ---
 
 ## B. Rehearsal on the scratch project
@@ -192,10 +271,13 @@ window:
 
 ```sh
 export SCRATCH_SESSION='<scratch session pooler string, port 5432>'
-export SCRATCH_SESSION2='<second scratch schema: see B6>'
 ```
 
-(You only need `SCRATCH_SESSION` until B6.)
+`SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` come from `.env.local` (A3):
+every script prints `env files loaded: .env.local ...` as its first line. If
+it prints `env files loaded: none`, you are not in the repo folder or the
+file is missing. Do not export production values in this terminal during
+Phase B (a value set in the terminal wins over `.env.local`).
 
 ### B1. Concurrency tests (once)
 
@@ -204,11 +286,14 @@ connections. They create and drop their own temporary schemas in the
 scratch database. They skip themselves if the variable is missing.
 
 ```sh
-DATABASE_TEST_URL="$SCRATCH_SESSION" npx tsx --test tests/dataCreditsStaging.test.ts tests/dataRunsStaging.test.ts tests/backupStaging.test.ts
+DATABASE_TEST_URL="$SCRATCH_SESSION" npx tsx --test --test-timeout=300000 tests/dataCreditsStaging.test.ts tests/dataRunsStaging.test.ts tests/backupStaging.test.ts
 ```
 (Git Bash. Verified names: those three files exist in `tests/`.)
 
-Expect: all tests pass, none "skipped". Note the total time.
+Expect: all tests pass, none "skipped". Note the total time. Nothing can
+hang for long: each test stops after 2 minutes, every wait for a blocked
+session after 15 s (message `waitForBlocked: expected ... within ...`), and
+the whole run after 5 minutes.
 If skipped: the variable did not reach the command. Retype it on the same line.
 If a test fails: stop. Send Claude the test name and the message (it holds no
 secrets). Do not go on to cutover. Rollback: nothing to undo; schemas are
@@ -233,7 +318,10 @@ If "records left out" shows lost records: stop, send Claude the line.
 npm run import:store -- --store data/store.pre-postgres.json --url "$SCRATCH_SESSION" --archive-days 14
 ```
 `--archive-days 14` moves recreated pages older than 14 days into Storage
-right after the import. This is the first real use of Storage.
+right after the import. This is the first real use of Storage. The import
+refuses to start (nothing read, nothing written) if `SUPABASE_URL` /
+`SUPABASE_SERVICE_ROLE_KEY` are missing, or if `SUPABASE_URL` belongs to a
+different Supabase project than the `--url` database.
 
 Expect: counts matching the dry run (last time: 49 recreated pages, 511
 competitors, 9277 ledger rows, 4265 provider calls, 3 users), then an archive
@@ -256,12 +344,19 @@ Expect: it prints ok and **0 mismatches** (last time: 4.3 s in the test
 database). Any mismatch is a stop: send Claude the whole output.
 
 Note: if you used `--archive-days`, archived pages are checked from
-Storage. If verify complains about archived pages, see "What to look for"
-(Storage) below.
+Storage. "archived pages cannot be checked: Storage not configured" means
+the Storage variables did not reach the script (check the `env files
+loaded` line). Other complaints about archived pages: see "What to look
+for" (Storage) below.
 
 ### B5. Run the app locally against the scratch database
 
 This checks the real thing end to end: login, history, old pages, Storage.
+
+**Only ever against the scratch project.** Never run `npm run dev` (or any
+local copy of the app) with `DATABASE_URL` pointing at the production
+database, now or later: at startup it marks every running job as failed
+and starts the archive and nightly-backup schedulers, from your PC.
 
 1. (Git Bash) `npm run dev`
 2. Open http://localhost:3000. Log in with your own real admin login (users
@@ -305,9 +400,10 @@ Rollback: stop the server. Nothing else changed outside scratch.
    `date` (format `2026-10-26T0200Z`) and the time it took. Check in the
    dashboard: Storage, bucket `db-backups`, a folder with that date
    containing `manifest.json`.
-   (The script needs `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in the
-   terminal. They are in `.env.local`; if the script says they are missing,
-   export them in the terminal.)
+   (The script reads `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` from
+   `.env.local` by itself; its first line says `env files loaded:
+   .env.local ...`. If it says `none`, or Storage is reported missing, run it
+   from the repo folder or export the two variables in the terminal.)
 3. Pull the backup to your PC:
    ```sh
    npm run backup:pull -- --out backups
@@ -339,7 +435,7 @@ These are the points the code could not prove without real Supabase.
 | `SET LOCAL idle_in_transaction_session_timeout` | A backup dies mid-way with "terminating connection due to idle-in-transaction timeout" or the setting is rejected | Same fix as above: use the session string. Send the exact message to Claude. |
 | 30 s client timeout on each backup read (one batch holds up to 2 big page rows) | Backup error "Query read timeout" on the `recreated_pages` table | Run the backup from your PC with `backup:run` (the script has a longer limit). Tell Claude to raise the per-read limit. |
 | Storage REST calls (upload, download, list, delete, bucket create) | Archive result shows `failed` > 0, or logs like `storage ... 401/403` (wrong key), `... 413` (file over 50 MB), `... 404` | 401/403: the service-role key or URL is wrong or from another project; re-copy both. 413: a single page is over the size limit; send Claude the id. 404/400 "Bucket not found": the app creates buckets itself; make sure the key is the `service_role` one, then create `recreated-pages-archive` and `db-backups` by hand in the dashboard as **private** buckets and retry. Missing object on read: the app treats both 404 and a 400 with "not_found" as "not found"; if you see a different status, send Claude the status and body. |
-| `statement_timeout` through the session pooler | Import or migration stops with "canceling statement due to statement timeout" (the biggest page is a 31.7 MB write) | Retry once. If it repeats, tell Claude; the limit is 120 s in the import script and can be raised. |
+| `SET LOCAL statement_timeout` through the session pooler (the scripts no longer send it as a connection parameter) | Import or migration stops with "canceling statement due to statement timeout" (the biggest page is a 31.7 MB write), or an error naming `statement_timeout` | Retry once. If it repeats, tell Claude; the scripts allow 10 minutes per statement. |
 | Free-plan upload limit 50 MB | Backup error "row ... is X MB compressed, over the Y MB part limit" | Send Claude the competitor id named; the page must be shrunk or archived first. |
 | IPv6 / network | `ENOTFOUND` or `ETIMEDOUT` to `db.<ref>.supabase.co` | You used the direct host. Use the session pooler string (A2). |
 | Password characters | "password authentication failed" | The password has special characters (`@`, `/`, `#`, `:`). Reset the database password to letters and numbers only. |
@@ -348,7 +444,7 @@ These are the points the code could not prove without real Supabase.
 ### B8. Timing notes to record
 
 Fill in during the rehearsal. The plan expects the offline window
-(Phase C, steps 3-7) to be under 30 minutes.
+(Phase C, steps 3-7, including the store.json copy) to be under 40 minutes.
 
 | Step | Expected result | Actual | OK? |
 |---|---|---|---|
@@ -375,12 +471,19 @@ Go/no-go for Phase C: every row OK, or each failure fixed and re-run.
 
 ## C. Cutover day
 
-Total offline time expected: 15-30 minutes. Do it outside working hours.
+Total offline time expected: 20-40 minutes. Do it outside working hours.
 Have a second person or a phone nearby. Keep the Phase B table open.
 
-Before you start: you have the production session string and transaction
-string, project URL and service-role key (A2), and the path to the copied
-`store.json` plan (A6).
+Before you start:
+- you have the production session string and transaction string, project
+  URL and service-role key (A2);
+- the service runs `maintenance-on-main` and you tested the switch (A9);
+- you practised the `store.json` copy (A6, C4);
+- the folder `C:\Users\Rithin\cutover-2026` exists and is empty.
+
+The order matters: the old container must **still be running** while you
+copy `store.json` (C4), because the file can only be read from inside it.
+Maintenance mode (C3) keeps users out so the file stops changing.
 
 ### C1. Announce the window
 
@@ -394,32 +497,60 @@ Check: you sent it. Rollback: send "postponed".
    Stop button.
 2. Wait until nothing says "running".
 
-Check: no running jobs. Any job still running at C3 is marked "failed
-(Interrupted by cutover)" in the import. That is safe but the user has to
-rerun it.
+Check: no running jobs. Any job still running at C3 is cut off by the
+redeploy and imported as "failed (Interrupted by cutover)". That is safe but
+the user has to rerun it.
 Rollback: nothing changed yet.
 
-### C3. Take the Railway service offline
+### C3. Maintenance mode on the old app
 
-Railway dashboard, your service, Deployments, the latest deployment, menu
-(three dots), **Remove** (stops the container; the volume and the variables
-stay). Or Settings, scale replicas to 0 if shown. Either way the volume is
-kept.
-Check: opening the app URL fails or shows Railway's "not found".
-Rollback: Deployments, Redeploy the latest deployment.
+Railway, your service (still on `maintenance-on-main`), Variables: add
+`MAINTENANCE_MODE` = `1`, then deploy the change. With the volume attached
+the old container stops and a new one of the **same old build** starts (a
+minute or two).
 
-### C4. Copy `store.json` to safety and record its fingerprint
+Check (in the browser and Git Bash):
+- the app shows "Down for maintenance";
+- `curl -i https://<your app>/api/health` answers 200;
+- `curl -i https://<your app>/api/history` answers `503` with
+  `Retry-After: 600`.
 
-1. Copy `/app/data/store.json` from the volume to a safe folder on your PC,
-   for example `C:\Users\Rithin\cutover-2026\store.json` (method from A6).
-   Do this after C3 so the file no longer changes.
-2. Record size and SHA-256 (PowerShell):
+From now on no request can change `store.json`.
+Rollback: delete `MAINTENANCE_MODE`, deploy. The app is back as before.
+
+### C4. Copy `store.json` from the running container
+
+All in **Git Bash** (PowerShell's `>` would corrupt the download), from the
+repo folder, after `railway link` (A6). **Not tested by Claude:** the
+`railway ssh` command syntax and its output passing; you practised it in
+the rehearsal week (A9 step 4).
+
+1. Fingerprint inside the container, twice, a minute apart (the second must
+   equal the first: the file has stopped changing):
+   ```sh
+   railway ssh -- sh -c 'sha256sum /app/data/store.json; stat -c %s /app/data/store.json'
+   ```
+   Write down the hash (64 hex characters) and the size in bytes. If the two
+   readings differ, something still writes; wait two minutes and repeat. If
+   it keeps changing, stop and ask Claude.
+2. Download it, gzip-compressed and base64-encoded between two markers, so
+   the text stream cannot damage it:
+   ```sh
+   cd /c/Users/Rithin/cutover-2026
+   railway ssh -- sh -c 'echo ==BEGIN==; gzip -c /app/data/store.json | base64 -w0; echo; echo ==END==' > store.b64.txt
+   sed -n '/==BEGIN==/,/==END==/p' store.b64.txt | sed '1d;$d' | tr -d '\r\n ' | base64 -d | gunzip > store.json
+   sha256sum store.json; stat -c %s store.json
+   ```
+   Expect: the same hash and size as step 1.
+3. Check again in PowerShell (it must match the container's hash; letter case
+   does not matter):
    ```powershell
    Get-FileHash "C:\Users\Rithin\cutover-2026\store.json" -Algorithm SHA256
    (Get-Item "C:\Users\Rithin\cutover-2026\store.json").Length
    ```
-3. Make a second copy on another disk or cloud folder.
-4. Tag the repo (Git Bash):
+4. Keep **two copies**: copy `store.json` to a second place (another disk or
+   a cloud folder) and check the copy's `Get-FileHash` too.
+5. Tag the repo (Git Bash):
    ```sh
    git tag pre-postgres-cutover
    git tag --list "pre-postgres*"
@@ -427,56 +558,109 @@ Rollback: Deployments, Redeploy the latest deployment.
    (If `pre-postgres-cutover` already exists, stop and ask Claude. It
    means this was run before.)
 
-Check: the file size is plausible (about the size of the rehearsal file or
-larger) and the hash is written down. The original on the volume is not
-touched.
-Rollback: nothing yet. If the copy fails, Redeploy (C3 rollback) and postpone.
+**Fallback A, in parts** (if the single download breaks off or the hash
+differs). Split inside the container, download each part, join:
+```sh
+railway ssh -- sh -c 'gzip -c /app/data/store.json > /tmp/s.gz && cd /tmp && split -b 20m -d s.gz s.part. && ls -l /tmp/s.part.* && sha256sum /tmp/s.gz'
+# for each part listed (00, 01, 02, ...):
+railway ssh -- sh -c 'echo ==BEGIN==; base64 -w0 /tmp/s.part.00; echo; echo ==END==' > part00.txt
+sed -n '/==BEGIN==/,/==END==/p' part00.txt | sed '1d;$d' | tr -d '\r\n ' | base64 -d > s.part.00
+# after all parts:
+cat s.part.* > s.gz && sha256sum s.gz    # must equal the /tmp/s.gz hash
+gunzip -c s.gz > store.json && sha256sum store.json
+```
+`/tmp` lives only as long as this container; do not redeploy between these
+commands.
 
-### C5. Import into production Supabase
+**Fallback B, through Supabase Storage** (if `railway ssh` cannot run a
+command and only the interactive shell works). In the Supabase dashboard of
+the **production** project, Storage, create a **private** bucket `cutover`.
+Then `railway ssh` (interactive) and type, with your real values:
+```sh
+export U='<production project URL>' K='<production service-role key>'
+gzip -c /app/data/store.json > /tmp/store.json.gz && ls -l /tmp/store.json.gz && sha256sum /app/data/store.json
+node -e 'const fs=require("fs");fetch(process.env.U+"/storage/v1/object/cutover/store.json.gz",{method:"POST",headers:{Authorization:"Bearer "+process.env.K,"Content-Type":"application/gzip","x-upsert":"true"},body:fs.readFileSync("/tmp/store.json.gz")}).then(async r=>console.log(r.status,await r.text()))'
+exit
+```
+Expect `200`. The free plan refuses files over 50 MB: if the `.gz` is
+bigger, use Fallback A. Download `store.json.gz` from the dashboard into
+`C:\Users\Rithin\cutover-2026`, then (Git Bash)
+`gunzip -c store.json.gz > store.json && sha256sum store.json` and compare.
+Delete the bucket's file after the cutover is done. (Also untested.)
+
+`railway run` is **not** a fallback: it runs a command on your PC with the
+Railway variables, not inside the container, so it cannot see the volume.
+
+Check: you hold two copies whose SHA-256 equals the container's; the
+original on the volume is untouched.
+Rollback: nothing changed in the data. If no route works, delete
+`MAINTENANCE_MODE` (C3 rollback) and postpone.
+
+### C5. Import into production Supabase (app still in maintenance)
 
 Use the **production session pooler string (port 5432)**. No
-`--allow-existing`: the command refuses a database that already has users, which
-protects you from importing twice.
+`--allow-existing`: the command refuses a database that already has users,
+which protects you from importing twice.
+
+`.env.local` still holds the **scratch** values. Export the production
+values in this terminal first; the terminal wins over `.env.local`, and the
+import refuses `--archive-days` if Storage belongs to another project than
+the database.
 
 (Git Bash)
 ```sh
 export PROD_SESSION='<production session pooler string, port 5432>'
+export SUPABASE_URL='<production project URL>'
+export SUPABASE_SERVICE_ROLE_KEY='<production service-role key>'
+export DATABASE_DIRECT_URL="$PROD_SESSION"
 npm run import:store -- --store "/c/Users/Rithin/cutover-2026/store.json" --url "$PROD_SESSION" --archive-days 14
 npm run verify:import -- --store "/c/Users/Rithin/cutover-2026/store.json" --url "$PROD_SESSION"
 ```
+Each prints `env files loaded: .env.local (variables already set in this
+terminal win)` first; the exported values are the ones used.
 Check: verify prints ok with **0 mismatches**, and the counts match the
 numbers you saw in the rehearsal (scaled to today's data).
 **If there is any mismatch, any "lost", or any error: STOP.** Do not
-deploy. Rollback: Redeploy the previous deployment in Railway (C3 rollback).
-The app runs as before on `store.json`, which was never changed. Send Claude
-the full output.
+deploy. Rollback: delete `MAINTENANCE_MODE` on Railway and deploy (the old
+build on `maintenance-on-main`, reading `store.json`, which was never
+changed). Send Claude the full output.
 
-Then take a first backup (also tests the production setup):
+Then take a first backup (same terminal; also tests the production setup):
 ```sh
-export SUPABASE_URL='<production project URL>'
-export SUPABASE_SERVICE_ROLE_KEY='<production service-role key>'
 npm run backup:run -- --url "$PROD_SESSION"
 ```
 Check: it prints `{ date, path, tables, rows, bytes }`; Storage, `db-backups`
 has a folder with `manifest.json`.
 
-### C6. Set Railway variables and deploy
+Keep this terminal for C7/C8, or close it: a new terminal falls back to the
+scratch values of `.env.local`.
+
+### C6. Set Railway variables and deploy the new build (maintenance still on)
 
 1. Railway, Variables: add the five variables from A4 (production values).
+   Keep `MAINTENANCE_MODE` = `1`. **Delete `HISTORY_IMPORT_SECRET`** if it
+   is there.
 2. Deploy the branch **directly first** (safest, because `main` stays as it
    was): Railway, Settings, Source, set the deploy branch to
    `postgres-migration`, then Deploy. (If the branch setting is not where you
    expect, ask Claude to guide you.)
    Merging to `main` comes only after the smoke test in C7.
-3. Watch the deploy logs. Migrations run at start. The health check calls
-   `/api/health`.
+3. Watch the deploy logs. The old container stops first (volume), then the
+   new one starts: migrations run, then the health check calls
+   `/api/health` (it answers in maintenance mode too).
 
-Check: the deploy goes "Active"; open `https://<your app>/api/health`: it shows
-`"ok":true,"db":"up"`. Logs have no "DATABASE_URL" or "Storage" errors.
-A deploy that stays "Unhealthy" for 5 minutes (the health-check limit) has failed.
+Check: the deploy goes "Active"; `https://<your app>/api/health` shows
+`"ok":true,"db":"up"`; the app itself still shows "Down for maintenance".
+Logs have no "DATABASE_URL" or "Storage" errors.
+A deploy that stays "Unhealthy" for 5 minutes (the health-check limit) has
+failed, and because deploys do not overlap, the app is down: roll back.
 Rollback: see "Rollback procedure" below.
 
-### C7. Smoke test (do all of it)
+### C7. Open for yourself, smoke test (do all of it)
+
+Maintenance mode blocks every page, also for you (there is no bypass). So:
+delete `MAINTENANCE_MODE` and deploy, **but do not announce yet**. Users
+were told the window is still open; the smoke test runs now.
 
 - [ ] Log in as platform admin.
 - [ ] Log in as a normal user.
@@ -489,11 +673,13 @@ Rollback: see "Rollback procedure" below.
       the balance goes down by the right amount and the ledger shows it.
 - [ ] Admin overview loads.
 - [ ] Admin: Backups: `GET /api/admin/backup` lists the C5 backup (or run
-      `npm run backup:run -- --url "$PROD_SESSION"` once more).
+      `npm run backup:run -- --url "$PROD_SESSION"` once more, in the C5
+      terminal).
 - [ ] Reopen: tell users the app is back.
 
 If any item fails: decide with Claude whether it is a quick fix or a
-rollback. Do not leave a half-working app up.
+rollback. To keep users out while you decide, set `MAINTENANCE_MODE` = `1`
+again and deploy. Do not leave a half-working app up.
 Rollback: below.
 
 ### C8. Load test (off-hours, 6 users)
@@ -505,7 +691,8 @@ in a variable (Git Bash; passwords are typed here, never committed):
 export LOADTEST_USERS='[{"username":"lt1","password":"..."},{"username":"lt2","password":"..."}]'
 npm run loadtest -- --base https://<your app URL> --users 6 --duration 60
 ```
-(`--job <run id>` is optional and adds a run-status read.)
+(`--job <run id>` is optional and adds a run-status read. `LOADTEST_USERS`
+may also live in `.env.local`; the script reads it.)
 Expect: p50/p95/max per endpoint; exit status 0; total p95 under 2000 ms.
 Write down the p95. A non-zero exit or p95 over 2000 ms is not an emergency.
 It is a Phase D follow-up: send Claude the output.
@@ -515,6 +702,8 @@ It is a Phase D follow-up: send Claude the output.
 GO if: verify ok (C5), health up (C6), every smoke-test box ticked (C7).
 Then merge to `main` (ask Claude to do it: `git switch main`, merge
 `postgres-migration`, push) and set Railway back to deploy from `main`.
+`maintenance-on-main` is then no longer needed (keep the branch until the
+14 days of D1 are over).
 NO-GO: roll back.
 
 ### Rollback procedure
@@ -522,11 +711,13 @@ NO-GO: roll back.
 When: any hard failure in C5-C7, or a serious problem later.
 
 1. Railway, Variables: delete `DATABASE_URL`, `DATABASE_DIRECT_URL`,
-   `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`. (The old build ignores them,
-   but remove them so nothing mixes.)
-2. Set the deploy source back to `main` (or the deployment from before),
-   and Redeploy the previous build. If you need the exact old code: the git
-   tag `pre-postgres-cutover` (and `pre-postgres-migration-2026-10-23`).
+   `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `MAINTENANCE_MODE`
+   (unless you want users kept out a little longer). (The old build ignores
+   the database variables, but remove them so nothing mixes.)
+2. Settings, Source: set the deploy branch back to `maintenance-on-main`
+   (the old app plus the switch; `main` works too) and Deploy. If you need
+   the exact old code: the git tag `pre-postgres-cutover` (and
+   `pre-postgres-migration-2026-10-23`).
 3. The old code reads `/app/data/store.json`, which was never changed.
    Check: log in; the history is the same as before C3.
 
@@ -572,9 +763,20 @@ Rule:
 
 - **One app instance only.** Some run state lives in the server's memory.
   Do not scale to 2 or more instances.
-- **Deploys while runs are in progress**: the new container's startup marks
-  every running job as failed, including jobs the old container is still
-  running. Deploy only when nothing is running.
+- **Deploys while runs are in progress**: with the volume attached, Railway
+  stops the old container before the new one starts (no overlap). Runs in
+  flight are cut off and the new container's startup marks them failed.
+  Deploy only when nothing is running. No overlap also means **a failed
+  deploy is downtime** until it is fixed or rolled back. Without the volume
+  (or with 2+ replicas) deploys would overlap and the new container would
+  mark the old one's live runs failed.
+- **Never run the app locally against the production database** (`npm run
+  dev` with the production `DATABASE_URL`): startup marks running jobs
+  failed and starts the archive and backup schedulers on your PC.
+- **`HISTORY_IMPORT_SECRET` stays off Railway.** Setting it re-enables
+  `/api/admin/import-history`, whose default `replace` mode would wipe every
+  run created since the cutover. If you ever need it, use `--mode merge` and
+  remove the secret right after.
 - **Migrations must stay additive** (add only; no renames or drops in the
   same deploy as the code change).
 - **No off-site copy of the archive bucket** by script. Download it by hand
@@ -586,8 +788,8 @@ Rule:
 - **The browser end-to-end tests** (`npm run test:e2e`) need a shared
   database and are not part of this cutover.
 - **Performance follow-ups**: finding existing recreations for a URL scans
-  many competitors; the admin overview reads provider calls three times. Both
-  are fine at today's size.
+  many competitors; the admin overview reads all provider calls once, plus
+  two 25-row reads. Both are fine at today's size.
 - **Smaller deferred items** are in the migration log
   (`.superpowers/sdd/2026-10-23-postgres-migration/progress.md`, lines
   marked HARDENING and "minors deferred").
@@ -602,7 +804,11 @@ Rule:
 | `ENOTFOUND` / `ETIMEDOUT` to `db.<ref>.supabase.co` | No IPv6. Use the session pooler string. |
 | "password authentication failed" | Wrong password, or special characters. Reset the DB password (letters and digits). |
 | Import says "already has N user row(s)" | The database is not empty (maybe an earlier import). On scratch: wipe it. On production: stop and ask Claude. Do not add `--allow-existing` without Claude. |
-| verify prints any mismatch or "lost" | STOP. Do not deploy. Roll back (Railway redeploy). Send Claude the output. |
+| verify prints any mismatch or "lost" | STOP. Do not deploy. Roll back (delete `MAINTENANCE_MODE`, deploy the old build). Send Claude the output. |
+| verify prints "archived pages cannot be checked: Storage not configured" | The Storage variables did not reach the script. Export `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` of the database's project in the terminal (or check `.env.local`), then rerun verify. |
+| Import says "--archive-days needs Storage" or "belongs to a different Supabase project" | Nothing was written. Export the Storage values of the same project as `--url` in this terminal and rerun. |
+| The app shows "Down for maintenance" when it should not | `MAINTENANCE_MODE` is still set on Railway. Delete it and deploy. |
+| A staging test fails with `waitForBlocked: expected ...` or a timeout | The race did not form within the time limit. Send Claude the test name and message; do not go on to cutover. |
 | Deploy stays Unhealthy | Open the deploy logs. Wrong `DATABASE_URL` is the usual cause. Check it is the 6543 string for the right project. If not solved in 10 minutes: rollback. |
 | `/api/health` shows `"db":"down"` | Check the Supabase project is not paused (dashboard). Check `DATABASE_URL`. |
 | A user cannot log in after cutover | Check the user exists in the verify output counts. Platform admin can reset the password. |
@@ -626,5 +832,13 @@ Verified by reading the files (not by running them): scripts in
 `--duration`, `--job`, `--p95-ms`, `--allow-401` (`scripts/load-test.ts`);
 staging test files and `DATABASE_TEST_URL` (`tests/helpers/testDb.ts`);
 `/api/health`, `/api/admin/archive-pages`, `/api/admin/backup`.
+Run locally (unit tests and a smoke run): the scripts' `.env.local`/`.env`
+loading and its first line (`env files loaded: ...`), the `--archive-days`
+refusal without Storage, `MAINTENANCE_MODE` in the middleware (503 JSON
+with `Retry-After: 600`, HTML page, `/api/health` passes), on both
+`postgres-migration` and `maintenance-on-main`; `--test-timeout` is a
+standard Node test-runner flag.
 Not tested: anything against real Supabase or Railway; the Railway
-dashboard wording; the store.json download (A6); the console `fetch` call.
+dashboard wording; `railway ssh` and every store.json download route (C4,
+both fallbacks); `MAINTENANCE_MODE` read at run time on Railway (A9 step 3
+tests it); the console `fetch` call.

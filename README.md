@@ -14,7 +14,12 @@ Add keys to `.env.local`:
 ```
 SOCIAVAULT_API_KEY=sk_live_...
 OPENAI_API_KEY=sk-...
+DATABASE_URL=postgresql://...   # a local or scratch Postgres, never production
 ```
+
+`npm run dev` needs a Postgres in `DATABASE_URL`. **Never point it (or any
+local app) at the production database:** startup marks every running job as
+failed and starts the archive and backup schedulers.
 
 ```bash
 npm run dev
@@ -37,12 +42,27 @@ Required environment variables (set in the Railway service):
 | `ADMIN_BOOTSTRAP_TOKEN` | First admin only | One-time secret for `/setup`. Remove after bootstrap. |
 | `ADMIN_BOOTSTRAP_USERNAME` | First admin only | Username created or promoted as the first admin |
 | `HISTORY_IMPORT_SECRET` | No | Bearer secret for `/api/admin/import-history` (remove after importing) |
+| `DATABASE_URL` | Yes | Postgres (Supabase transaction pooler, port 6543). All app data lives here. |
+| `DATABASE_DIRECT_URL` | Recommended | Session/direct connection (port 5432) for migrations at start; falls back to `DATABASE_URL` |
+| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | Yes | Supabase Storage: archived recreated pages and database backups |
+| `MAINTENANCE_MODE` | No | `1` answers every request except `/api/health` with 503 (cutover / maintenance window) |
+
+All data (accounts, runs, competitors, credits, recreated pages) lives in
+Postgres; see [docs/POSTGRES_OPERATIONS.md](docs/POSTGRES_OPERATIONS.md).
+`data/store.json` was the store before the Postgres move (2026-10). It is now
+only a source for the one-time import (`npm run import:store`) and the
+rollback copy; the app no longer reads or writes it.
 
 ### Import local history into production
 
-Local history lives in `data/store.json` (gitignored). After deploy:
+This copies runs from a store file (for example an old local
+`data/store.json`, gitignored) into the running app's Postgres database:
 
-1. Attach a Railway volume at `/app/data` (so history survives redeploys)
+**Never use the default `replace` mode against production after the Postgres
+cutover:** it replaces the server's runs with the file's and wipes everything
+created since. Use `--mode merge`, and remove `HISTORY_IMPORT_SECRET` when done.
+
+1. Attach a Railway volume at `/app/data` (uploaded recreate assets live there)
 2. Set `HISTORY_IMPORT_SECRET` on the Railway service and redeploy
 3. From this machine:
 
@@ -71,7 +91,7 @@ npm run build
 npm run start
 ```
 
-Persist note: job history is stored under `data/store.json` (created at runtime). Attach a Railway volume at `/app/data` if you need persistence across deploys.
+Persist note: job history and all other data are stored in Postgres (`DATABASE_URL`). Keep the Railway volume at `/app/data`: uploaded recreate assets live there, and it holds the pre-Postgres `store.json` as the rollback copy. With the volume attached, Railway does not overlap deploys (the old container stops before the new one starts), so a failed deploy means downtime until it is fixed or rolled back.
 
 Repo: [DM-ai-tools/AdRival](https://github.com/DM-ai-tools/AdRival)
 
@@ -109,5 +129,6 @@ Auth header: `X-API-Key`. See [SociaVault docs](https://docs.sociavault.com/).
 SociaVault bills in its own credits (`GET /v1/credits` for remaining balance;
 scrape responses may include `credits_used`). Application credits charged to
 users are a separate, admin-configured conversion — one SociaVault credit is
-not assumed to equal one Claude or GPT credit. Local persist is JSON under
-`data/store.json` (gitignored).
+not assumed to equal one Claude or GPT credit. Credit periods, reservations
+and the ledger are stored in Postgres (before the 2026-10 move they lived in
+`data/store.json`).

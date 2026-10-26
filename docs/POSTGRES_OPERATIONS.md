@@ -14,7 +14,23 @@ All commands are run from the repo root.
 | `SUPABASE_SERVICE_ROLE_KEY` | Railway and shell | Service-role key for Storage. Server side only; it is never logged or sent to a browser. Without it (or `SUPABASE_URL`) archiving and the nightly backup are off, each with one log line at startup. |
 | `RECREATED_PAGE_ARCHIVE_DAYS` | Railway (optional) | Days before recreated page content moves from the database to Storage. Default 14. |
 | `DATABASE_TEST_URL` | Your shell, only for the staging tests | Direct URL of a **scratch** Supabase project (the tests create and drop their own schemas). |
-| `LOADTEST_USERS` | Your shell, only for the load test | JSON array of test logins: `[{"username":"lt1","password":"..."}]`. |
+| `LOADTEST_USERS` | Your shell or `.env.local`, only for the load test | JSON array of test logins: `[{"username":"lt1","password":"..."}]`. |
+| `MAINTENANCE_MODE` | Railway (only during a maintenance window) | `1` answers every request except `/api/health` with 503 (`{ "error": "maintenance" }` with `Retry-After: 600` for `/api`, a short page otherwise). Unset it to reopen. |
+| `HISTORY_IMPORT_SECRET` | Railway, only while running `scripts/import-history.mjs` | **Remove it at the cutover.** The history import's default `replace` mode replaces the server's runs with a file's and would wipe everything created after the cutover. |
+
+**Scripts read `.env.local` and `.env` themselves.** `import:store`,
+`verify:import`, `backup:*` and `loadtest` load `.env.local`, then `.env`, from
+the repo folder at start and print which files they loaded (names only).
+A variable already set in the terminal always wins, and `--url` wins over
+`DATABASE_DIRECT_URL`. So when `.env.local` holds the scratch project's
+values, export the production values in the terminal before running a
+script against production (`import:store --archive-days` refuses Storage
+settings of another Supabase project than its database URL).
+
+**Never run `npm run dev` (or any local copy of the app or its schedulers)
+against the production database.** Startup marks every running job as
+failed and starts the archive and nightly-backup schedulers, which would
+then run from your PC as well.
 
 **IPv4 note.** On the free plan the direct host (`db.<ref>.supabase.co:5432`)
 is IPv6 only. From a machine or network without IPv6 (most home connections
@@ -150,8 +166,9 @@ stays in the database and is tried again on the next run.
 
 ## Cutover import and verification
 
-Run with the app **stopped** (see the cutover plan), against the direct or
-session-pooler URL (never 6543):
+Run with the app **stopped or in maintenance mode** (`MAINTENANCE_MODE=1`;
+see the cutover runbook), against the direct or session-pooler URL (never
+6543):
 
 ```sh
 npm run import:store -- --store data/store.pre-postgres.json --dry-run
@@ -160,9 +177,15 @@ npm run verify:import -- --store data/store.pre-postgres.json --url "<session UR
 ```
 
 The import refuses a database that already has users unless
-`--allow-existing` (a rehearsal re-run); verify prints every mismatch and
-exits non-zero when there is one. Take a backup right after a good verify:
-`npm run backup:run`.
+`--allow-existing` (a rehearsal re-run). With `--archive-days` it refuses,
+before reading the file or writing anything, when `SUPABASE_URL` /
+`SUPABASE_SERVICE_ROLE_KEY` are missing or name another project. Every import
+transaction is bounded by `SET LOCAL statement_timeout` (10 minutes per
+statement; no startup parameter, which the session pooler may reject).
+Verify prints every mismatch and exits non-zero when there is one; archived
+pages without Storage settings are reported once as "archived pages cannot
+be checked: Storage not configured". Take a backup right after a good
+verify: `npm run backup:run`.
 
 ## Staging concurrency tests (run once before cutover)
 
@@ -171,10 +194,12 @@ in-process test database cannot give. Against a scratch project (never the
 production one):
 
 ```sh
-DATABASE_TEST_URL="<direct URL of a scratch project>" npx tsx --test tests/dataCreditsStaging.test.ts tests/dataRunsStaging.test.ts tests/backupStaging.test.ts
+DATABASE_TEST_URL="<direct URL of a scratch project>" npx tsx --test --test-timeout=300000 tests/dataCreditsStaging.test.ts tests/dataRunsStaging.test.ts tests/backupStaging.test.ts
 ```
 
-They skip themselves when `DATABASE_TEST_URL` is not set.
+They skip themselves when `DATABASE_TEST_URL` is not set. Each test stops
+after 2 minutes and each wait for a blocked session after 15 s, with a
+message saying what it saw, instead of hanging.
 
 ## Load test (optional, against staging)
 
@@ -199,18 +224,23 @@ copy is cheap) or be ignored.
   suppressed-run sets, progress throttles, the brand-review "starting" mark)
   belongs to one container. Run **one** app instance.
 - At startup the app marks every `running` job as failed (no live process
-  owns it). During an **overlapping Railway deploy**, the new container's
-  startup marks the **old** container's live runs failed while they are still
-  running. Deploy when no run is in progress, or accept that runs in flight
-  are marked failed and must be restarted. (Job leases would fix this; not
-  built yet.)
-- Migrations run at startup while the old container may still serve traffic,
-  so every migration must stay **additive** (new tables, new nullable
-  columns, new indexes). No renames or drops in the same deploy as the code
-  that stops using them.
+  owns it). That is safe only because deploys do not overlap: **with the
+  Railway volume attached, Railway stops the old container before the new one
+  starts.** The flip side: a deploy that fails to start is downtime until it
+  is fixed or rolled back. Runs in flight at a deploy are cut off and marked
+  failed; deploy when nothing is running. If deploys ever overlap (volume
+  removed, replicas > 1), the new container would mark the old one's live
+  runs failed. (Job leases would fix this; not built yet.)
+- Keep every migration **additive** (new tables, new nullable columns, new
+  indexes): a rollback redeploys older code against the migrated schema. No
+  renames or drops in the same deploy as the code that stops using them.
 - Transactions are bounded server-side to 30 s (`SET LOCAL
   statement_timeout`), single queries to 30 s client-side. Migrations at
   startup get a 10-minute query timeout **only when `DATABASE_DIRECT_URL` is
   set** (they then run on their own session connection); without it they run
   on the runtime pool with its 30 s limit. The backup's snapshot transaction
-  allows 5 minutes per statement and 10 minutes idle.
+  allows 5 minutes per statement and 10 minutes idle. The scripts
+  (import, verify, backup from a shell) bound each statement of their
+  transactions to 10 minutes (`SET LOCAL`; the backup snapshot keeps its 5
+  minutes), and single reads outside a transaction to 10.5 minutes
+  client-side.

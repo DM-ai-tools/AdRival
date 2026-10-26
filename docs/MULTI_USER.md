@@ -1,7 +1,10 @@
 # Multi-user workspaces, credits, and admin
 
-AdRival stores accounts, projects, and the credit ledger in `data/store.json`
-(schema version 2). Existing jobs and history survive the migration. Rows
+AdRival stores accounts, projects, and the credit ledger in Postgres (see
+`docs/POSTGRES_OPERATIONS.md`). They were introduced in `data/store.json`
+(schema version 2), which was the store until the 2026-10 Postgres move and is
+now only an import/rollback source. Existing jobs and history survived both
+migrations. Rows
 created before ownership existed stay **unassigned** until an administrator
 assigns them — they are never shown to regular users.
 
