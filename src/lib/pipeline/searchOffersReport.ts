@@ -96,12 +96,12 @@ async function mapPool<T, R>(
 function updateProgress(
   job: SearchJob,
   patch: Partial<SearchJob["progress"]>,
-) {
+): Promise<void> {
   job.progress = { ...job.progress, ...patch };
   job.updatedAt = new Date().toISOString();
   // Throttled; the final "done"/failed update changes the stage and is
-  // written at once.
-  saveJobProgress(job);
+  // written at once (resolves when that write has landed).
+  return saveJobProgress(job);
 }
 
 function toLookupAd(
@@ -334,7 +334,7 @@ async function fetchMetaAds(
       // Same count the search shows: the Ad Library's active total for this page.
       if (pages === 1 && country === primary) {
         const reported = extractSearchResultsCount(response);
-        if (reported != null) updateCompetitor(competitor.id, { activeAdsCount: reported });
+        if (reported != null) await updateCompetitor(competitor.id, { activeAdsCount: reported });
       }
       const ads = extractAds(response);
       cursor = extractCursor(response);
@@ -391,7 +391,7 @@ async function fetchGoogleAds(
   let cursor: string | null = null;
   let pages = 0;
   // Ads shown in the run's country, as the search found them.
-  const region = googleRegionFromGeo(String(getJob(runId)?.geo || "all"));
+  const region = googleRegionFromGeo(String((await getJob(runId))?.geo || "all"));
   let estimate: number | null = null;
   do {
     const res = await getGoogleCompanyAds({
@@ -416,7 +416,7 @@ async function fetchGoogleAds(
   // The competitor's ad count everywhere is Google's count for the country
   // (all pages read when Google gives none).
   const total = platform === "youtube" ? null : estimate ?? (cursor ? null : creatives.length);
-  if (total != null) updateCompetitor(competitor.id, { activeAdsCount: total });
+  if (total != null) await updateCompetitor(competitor.id, { activeAdsCount: total });
 
   // The listing has no destination: read each ad's details for where it
   // really leads (and its headline and text), text ads first. Ads beyond the
@@ -556,7 +556,7 @@ async function fetchAndCacheAdsForCompetitor(
   countryHint?: string | null,
 ): Promise<SearchCompetitorAdRecord[]> {
   if (!force) {
-    const cached = getSearchCompetitorAdsByCompetitor(runId, competitor.id);
+    const cached = await getSearchCompetitorAdsByCompetitor(runId, competitor.id);
     const staleLinks = cached.some((ad) => /adstransparency\.google\.com/i.test(ad.landingPageUrl || ""));
     if (cached.length > 0 && !staleLinks) return cached;
   }
@@ -569,7 +569,7 @@ async function fetchAndCacheAdsForCompetitor(
   } else if (platform === "linkedin") {
     ads = await fetchLinkedInAds(runId, competitor);
   }
-  saveSearchCompetitorAds(ads, {
+  await saveSearchCompetitorAds(ads, {
     runId,
     replaceCompetitorId: competitor.id,
   });
@@ -622,7 +622,7 @@ export function pickAdsForAnalysis(
   return picked.map((item) => item.ad);
 }
 
-function failOffers(job: SearchJob, message: string): SearchJob {
+async function failOffers(job: SearchJob, message: string): Promise<SearchJob> {
   job.offersReport = {
     status: "failed",
     createdAt: job.offersReport?.createdAt || new Date().toISOString(),
@@ -638,7 +638,7 @@ function failOffers(job: SearchJob, message: string): SearchJob {
       uniqueOffers: [],
     },
   };
-  updateProgress(job, {
+  await updateProgress(job, {
     stage: "done",
     offersPhase: "failed",
     offersCurrentName: null,
@@ -662,9 +662,9 @@ export async function runSearchOffersReportPhase(
     competitorIds?: string[] | null;
   },
 ): Promise<SearchJob | null> {
-  const job = getJob(runId);
+  const job = await getJob(runId);
   if (!job) return null;
-  if (isSearchJobSuppressed(runId)) return job;
+  if (await isSearchJobSuppressed(runId)) return job;
 
   try {
     const selectedIds =
@@ -674,17 +674,17 @@ export async function runSearchOffersReportPhase(
           ? new Set(job.offersCompetitorIds)
           : null;
 
-    const competitors = getCompetitorsByRun(runId)
+    const competitors = (await getCompetitorsByRun(runId))
       .filter((c) => !selectedIds || selectedIds.has(c.id))
       .sort((a, b) => (b.activeAdsCount || 0) - (a.activeAdsCount || 0))
       .slice(0, MAX_COMPETITORS);
     if (!competitors.length) {
-      return failOffers(job, "No competitors found to analyze offers.");
+      return await failOffers(job, "No competitors found to analyze offers.");
     }
 
     const refetchAds = Boolean(options?.refetchAds);
     const fetchTotal = competitors.length;
-    updateProgress(job, {
+    await updateProgress(job, {
       stage: "analyzing_offers",
       offersPhase: "fetch_ads",
       offersDone: 0,
@@ -698,7 +698,7 @@ export async function runSearchOffersReportPhase(
 
     let fetched = 0;
     await mapPool(competitors, FETCH_CONCURRENCY, async (c) => {
-      if (isSearchJobSuppressed(runId)) return false;
+      if (await isSearchJobSuppressed(runId)) return false;
       await fetchAndCacheAdsForCompetitor(
         runId,
         c,
@@ -707,7 +707,7 @@ export async function runSearchOffersReportPhase(
       );
       fetched += 1;
       const pct = Math.round((fetched / Math.max(fetchTotal, 1)) * 55);
-      updateProgress(job, {
+      await updateProgress(job, {
         offersPhase: "fetch_ads",
         offersCurrentName: c.pageName,
         offersDone: fetched,
@@ -720,13 +720,13 @@ export async function runSearchOffersReportPhase(
       return true;
     });
 
-    if (isSearchJobSuppressed(runId)) return getJob(runId) || job;
+    if (await isSearchJobSuppressed(runId)) return (await getJob(runId)) || job;
 
-    const cached = getSearchCompetitorAdsByRun(runId).filter((a) =>
+    const cached = (await getSearchCompetitorAdsByRun(runId)).filter((a) =>
       competitors.some((c) => c.id === a.competitorId),
     );
     if (!cached.length) {
-      return failOffers(job, "No ads fetched for the selected competitors.");
+      return await failOffers(job, "No ads fetched for the selected competitors.");
     }
 
     const focus = searchedServiceFocus(
@@ -768,17 +768,17 @@ export async function runSearchOffersReportPhase(
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-    saveLookupJob(lookupJob);
-    if (isSearchJobSuppressed(runId)) return getJob(runId) || job;
+    await saveLookupJob(lookupJob);
+    if (await isSearchJobSuppressed(runId)) return (await getJob(runId)) || job;
     const adIndex = new Map<string, SearchCompetitorAdRecord>();
     const mappedAds = analysisAds.map((ad) => {
       const mapped = toLookupAd(syntheticLookupId, ad);
       adIndex.set(mapped.id, ad);
       return mapped;
     });
-    saveLookupAds(mappedAds);
+    await saveLookupAds(mappedAds);
 
-    updateProgress(job, {
+    await updateProgress(job, {
       offersPhase: "analysis",
       offersDone: fetchTotal,
       offersTotal: fetchTotal + 3,
@@ -804,10 +804,10 @@ export async function runSearchOffersReportPhase(
         skip: Boolean(job.skipGuardrails),
         override: job.guardrailOverride || null,
       },
-      onProgress: (tick) => {
-        if (isSearchJobSuppressed(runId)) return;
+      onProgress: async (tick) => {
+        if (await isSearchJobSuppressed(runId)) return;
         const analysisPct = 58 + Math.round((tick.pct / 100) * 40);
-        updateProgress(job, {
+        await updateProgress(job, {
           offersPhase: tick.phase,
           offersCurrentName: tick.currentName ?? null,
           offersDone: fetchTotal + tick.done,
@@ -817,10 +817,10 @@ export async function runSearchOffersReportPhase(
         });
       },
     });
-    const done = getLookupJob(syntheticLookupId);
+    const done = await getLookupJob(syntheticLookupId);
     const report = done?.offersReport || null;
     if (!report || report.status !== "completed") {
-      return failOffers(job, report?.error || "Offers report failed");
+      return await failOffers(job, report?.error || "Offers report failed");
     }
 
     const enhanced = dedupeLaddersWithSources(report, adIndex);
@@ -848,7 +848,7 @@ export async function runSearchOffersReportPhase(
       };
     }
     job.offersReport = enhanced;
-    updateProgress(job, {
+    await updateProgress(job, {
       stage: "done",
       offersPhase: "done",
       offersCurrentName: null,
@@ -861,11 +861,11 @@ export async function runSearchOffersReportPhase(
           : ""
       }.`,
     });
-    saveJob(job);
+    await saveJob(job);
     return job;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return failOffers(job, message);
+    return await failOffers(job, message);
   }
 }
 

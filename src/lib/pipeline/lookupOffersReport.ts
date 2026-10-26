@@ -11,6 +11,7 @@ import {
   getLookupJob,
   isLookupJobSuppressed,
   saveLookupJob,
+  updateLookupJobWith,
 } from "../db";
 import type {
   FunnelStage,
@@ -78,7 +79,7 @@ type OffersProgressHook = (update: {
   currentName?: string | null;
   message: string;
   pct: number;
-}) => void;
+}) => void | Promise<void>;
 
 const offerProgressHooks = new Map<string, OffersProgressHook>();
 
@@ -1465,7 +1466,7 @@ export async function buildLookupOffersReport(
 ): Promise<LookupOffersReport> {
   const now = new Date().toISOString();
   const signals = options?.relevance || null;
-  const ads = getLookupAds(lookupId);
+  const ads = await getLookupAds(lookupId);
   if (ads.length === 0) {
     return {
       status: "failed",
@@ -1512,17 +1513,17 @@ export async function buildLookupOffersReport(
   const totalUnits = 2 + lpWorkCount; // creatives + LPs + ladder
   let doneUnits = 0;
 
-  const tick = (
+  const tick = async (
     phase: string,
     message: string,
     currentName?: string | null,
     advance = 0,
   ) => {
-    if (isLookupJobSuppressed(lookupId)) {
+    if (await isLookupJobSuppressed(lookupId)) {
       throw new Error("Stopped by user");
     }
     doneUnits = Math.min(totalUnits, doneUnits + advance);
-    reportOffersProgress(lookupId, {
+    await reportOffersProgress(lookupId, {
       phase,
       done: doneUnits,
       total: totalUnits,
@@ -1531,11 +1532,11 @@ export async function buildLookupOffersReport(
     });
   };
 
-  tick("creatives", "Clustering & enriching unique ad creatives…", null, 0);
+  await tick("creatives", "Clustering & enriching unique ad creatives…", null, 0);
 
   // Deep location for the looked-up advertiser (deferred from ad fetch)
   try {
-    const job = getLookupJob(lookupId);
+    const job = await getLookupJob(lookupId);
     if (job && !job.internalOnly) {
       const sample = ads[0];
       const website =
@@ -1561,7 +1562,7 @@ export async function buildLookupOffersReport(
         skipPerplexityIfResolved: provisional.locationStatus === "matched",
       });
       const loc = locResult.location;
-      patchLookupJob(job, {
+      await patchLookupJob(job, {
         locationLabel: loc.locationLabel,
         locationCity: loc.locationCity,
         locationSuburb: loc.locationSuburb,
@@ -1576,7 +1577,7 @@ export async function buildLookupOffersReport(
 
   // —— Ad copy clusters ——
   const clusters = clusterAdCreatives(ads, creativeCap, lpFocus);
-  tick(
+  await tick(
     "creatives",
     `Enriching ${clusters.length} unique creatives…`,
     `${clusters.length} creatives`,
@@ -1588,7 +1589,7 @@ export async function buildLookupOffersReport(
       ? [offersService.keywords.join(", "), offersService.category].filter(Boolean).join(" / ")
       : null,
   );
-  tick(
+  await tick(
     "creatives",
     `Creative analysis done · ${clusters.length} clusters`,
     null,
@@ -1654,7 +1655,7 @@ export async function buildLookupOffersReport(
   const lpBuckets = lpBucketsPreview;
   const { toAnalyze, skipped } = lpSelection;
 
-  tick(
+  await tick(
     "landing_pages",
     `Analyzing ${toAnalyze.length} unique landing pages…`,
     toAnalyze[0]?.url || null,
@@ -1663,11 +1664,11 @@ export async function buildLookupOffersReport(
 
   let lpFinished = 0;
   const analyzedPages = await mapPool(toAnalyze, LP_CONCURRENCY, async (bucket) => {
-    if (isLookupJobSuppressed(lookupId)) {
+    if (await isLookupJobSuppressed(lookupId)) {
       throw new Error("Stopped by user");
     }
     const label = bucket.url.replace(/^https?:\/\//i, "").slice(0, 48);
-    reportOffersProgress(lookupId, {
+    await reportOffersProgress(lookupId, {
       phase: "landing_pages",
       done: 1 + lpFinished,
       total: totalUnits,
@@ -1683,9 +1684,9 @@ export async function buildLookupOffersReport(
           !options?.forceReanalyzePages,
       ) || bucket.ads[0];
 
-    const finishOne = <T,>(result: T): T => {
+    const finishOne = async <T,>(result: T): Promise<T> => {
       lpFinished += 1;
-      reportOffersProgress(lookupId, {
+      await reportOffersProgress(lookupId, {
         phase: "landing_pages",
         done: 1 + lpFinished,
         total: totalUnits,
@@ -1702,7 +1703,7 @@ export async function buildLookupOffersReport(
       representative.pageAnalysis.offer
     ) {
       const o = representative.pageAnalysis.offer;
-      return finishOne({
+      return await finishOne({
         url: preferDestinationUrl(
           bucket.url,
           representative.pageAnalysis.analyzedUrl,
@@ -1741,7 +1742,7 @@ export async function buildLookupOffersReport(
       const analysis = updated.pageAnalysis;
       const o = analysis?.offer;
       if (offersService && analysis?.status === "completed" && analysis.mentionsService === false) {
-        return finishOne({
+        return await finishOne({
           url: preferDestinationUrl(bucket.url, analysis.analyzedUrl),
           matchKey: bucket.matchKey,
           adCount: bucket.ads.length,
@@ -1753,7 +1754,7 @@ export async function buildLookupOffersReport(
         } satisfies LookupUniqueLandingPage);
       }
       if (!analysis || analysis.status === "failed" || !o?.primaryOffer) {
-        return finishOne({
+        return await finishOne({
           url: bucket.url,
           matchKey: bucket.matchKey,
           adCount: bucket.ads.length,
@@ -1765,7 +1766,7 @@ export async function buildLookupOffersReport(
           relevanceScore: bucket.relevanceScore ?? null,
         } satisfies LookupUniqueLandingPage);
       }
-      return finishOne({
+      return await finishOne({
         url: preferDestinationUrl(bucket.url, analysis.analyzedUrl),
         matchKey: bucket.matchKey,
         adCount: bucket.ads.length,
@@ -1796,7 +1797,7 @@ export async function buildLookupOffersReport(
       const message = err instanceof Error ? err.message : String(err);
       // The pre-check found the page is about another service: not a failure.
       const offTopic = /different service than the one searched/i.test(message);
-      return finishOne({
+      return await finishOne({
         url: bucket.url,
         matchKey: bucket.matchKey,
         adCount: bucket.ads.length,
@@ -1901,7 +1902,7 @@ export async function buildLookupOffersReport(
 
   const serviceNodes = buildServiceNodes(focusedPages, focusedCreatives);
   doneUnits = 1 + toAnalyze.length;
-  tick(
+  await tick(
     "ladder",
     "Building offer value ladder…",
     "Value ladder",
@@ -1915,7 +1916,7 @@ export async function buildLookupOffersReport(
     ads,
     signals,
   });
-  const lookupJob = getLookupJob(lookupId);
+  const lookupJob = await getLookupJob(lookupId);
   const guardCtx = buildGuardrailContext({
     businessProfile:
       signals?.businessProfile || lookupJob?.businessProfile || null,
@@ -1936,7 +1937,7 @@ export async function buildLookupOffersReport(
   ]
     .filter(Boolean)
     .join(" ");
-  tick("ladder", "Offer value ladder ready", null, 1);
+  await tick("ladder", "Offer value ladder ready", null, 1);
 
   const analyzedCount = focusedPages.filter((p) => p.status === "completed").length;
   const failedCount = focusedPages.filter((p) => p.status === "failed").length;
@@ -1980,12 +1981,12 @@ export async function buildLookupOffersReport(
   };
 }
 
-function patchLookupJob(job: LookupJob, patch: Partial<LookupJob>) {
+async function patchLookupJob(job: LookupJob, patch: Partial<LookupJob>): Promise<void> {
   Object.assign(job, patch, { updatedAt: new Date().toISOString() });
-  saveLookupJob(job);
+  await saveLookupJob(job);
 }
 
-function reportOffersProgress(
+async function reportOffersProgress(
   lookupId: string,
   update: {
     phase: string;
@@ -1994,27 +1995,31 @@ function reportOffersProgress(
     currentName?: string | null;
     message: string;
   },
-) {
-  const job = getLookupJob(lookupId);
-  if (!job) return;
+): Promise<void> {
   const pct = Math.min(
     100,
     Math.round((update.done / Math.max(update.total, 1)) * 100),
   );
-  patchLookupJob(job, {
-    status: "running",
-    progress: {
-      ...job.progress,
-      stage: "analyzing_offers",
-      message: update.message,
-      offersPhase: update.phase,
-      offersDone: update.done,
-      offersTotal: update.total,
-      offersCurrentName: update.currentName ?? null,
-      offersPct: pct,
-    },
+  // Built from the lookup as stored at the write, so parallel workers never lose a tick.
+  let found = false;
+  await updateLookupJobWith(lookupId, (job) => {
+    found = true;
+    return {
+      status: "running",
+      progress: {
+        ...job.progress,
+        stage: "analyzing_offers",
+        message: update.message,
+        offersPhase: update.phase,
+        offersDone: update.done,
+        offersTotal: update.total,
+        offersCurrentName: update.currentName ?? null,
+        offersPct: pct,
+      },
+    };
   });
-  offerProgressHooks.get(lookupId)?.({
+  if (!found) return;
+  await offerProgressHooks.get(lookupId)?.({
     phase: update.phase,
     done: update.done,
     total: update.total,
@@ -2042,13 +2047,13 @@ export async function runLookupOffersReportPhase(
     onProgress?: OffersProgressHook;
   },
 ): Promise<LookupJob | null> {
-  const job = getLookupJob(lookupId);
+  const job = await getLookupJob(lookupId);
   if (!job) return null;
-  if (isLookupJobSuppressed(lookupId)) return job;
+  if (await isLookupJobSuppressed(lookupId)) return job;
   if (options?.onProgress) offerProgressHooks.set(lookupId, options.onProgress);
 
   try {
-    const ads = getLookupAds(lookupId);
+    const ads = await getLookupAds(lookupId);
     const finalStatus =
       options?.finalStatus || (ads.length > 0 ? "completed" : "partial");
 
@@ -2057,7 +2062,7 @@ export async function runLookupOffersReportPhase(
       job.offersReport?.status === "completed" &&
       job.offersReport.adsAnalyzed === ads.length
     ) {
-      patchLookupJob(job, {
+      await patchLookupJob(job, {
         status: finalStatus,
         progress: {
           ...job.progress,
@@ -2068,7 +2073,7 @@ export async function runLookupOffersReportPhase(
             `Loaded ${ads.length} ads · offers report ready.`,
         },
       });
-      return getLookupJob(lookupId);
+      return await getLookupJob(lookupId);
     }
 
     const pending: LookupOffersReport = {
@@ -2098,7 +2103,7 @@ export async function runLookupOffersReportPhase(
         : null);
 
     const lpCap = options?.maxLandingPages ?? MAX_LP_TO_ANALYZE;
-    patchLookupJob(job, {
+    await patchLookupJob(job, {
       status: "running",
       offersReport: pending,
       progress: {
@@ -2128,7 +2133,7 @@ export async function runLookupOffersReportPhase(
       const offerCount =
         report.adCopy.uniqueOffers.length +
         report.landingPages.uniqueOffers.length;
-      patchLookupJob(job, {
+      await patchLookupJob(job, {
         status: finalStatus,
         offersReport: report,
         progress: {
@@ -2149,7 +2154,7 @@ export async function runLookupOffersReportPhase(
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      patchLookupJob(job, {
+      await patchLookupJob(job, {
         status: finalStatus,
         offersReport: {
           ...pending,
@@ -2166,7 +2171,7 @@ export async function runLookupOffersReportPhase(
       });
     }
 
-    return getLookupJob(lookupId);
+    return await getLookupJob(lookupId);
   } finally {
     offerProgressHooks.delete(lookupId);
   }
