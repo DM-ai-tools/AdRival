@@ -14,6 +14,7 @@ import {
   reserveCredits,
   sweepAbandonedReservations,
 } from "./service";
+import type { CreditSummary } from "./service";
 import { creditsToSubunits } from "./units";
 
 /** Opening hold for a run whose eventual size is not yet known. */
@@ -191,13 +192,24 @@ export interface RunCreditReport {
 }
 
 /** Numbers behind "This run used X credits. You have Y credits available." */
-export async function reportRunCredits(userId: string, runId: string): Promise<RunCreditReport> {
+/**
+ * `summary` is the caller's credit summary when the caller already loaded it
+ * (status polling needs it anyway), so it is not read twice.
+ */
+export async function reportRunCredits(
+  userId: string,
+  runId: string,
+  summary?: Pick<CreditSummary, "availableSubunits">,
+): Promise<RunCreditReport> {
   // Scoped to this payer: inside a shared project each user sees only their own
   // charges, never the project owner's.
-  const { creditsCharged, pendingCalls } = await creditsForRun(runId, userId);
+  const [{ creditsCharged, pendingCalls }, own] = await Promise.all([
+    creditsForRun(runId, userId),
+    summary ?? getCreditSummary(userId),
+  ]);
   return {
     runCreditsCharged: creditsCharged,
-    availableSubunits: (await getCreditSummary(userId)).availableSubunits,
+    availableSubunits: own.availableSubunits,
     pendingCalls,
   };
 }

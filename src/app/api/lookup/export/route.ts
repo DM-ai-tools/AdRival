@@ -14,14 +14,14 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "lookupId is required" }, { status: 400 });
   }
 
-  resolveProjectAccess("lookup", lookupId, user, "view");
+  await resolveProjectAccess("lookup", lookupId, user, "view");
 
-  const job = getLookupJob(lookupId);
+  const job = await getLookupJob(lookupId);
   if (!job) {
     return NextResponse.json({ error: "Lookup not found" }, { status: 404 });
   }
 
-  const ads = getLookupAds(lookupId);
+  const ads = await getLookupAds(lookupId);
   const buffer = await buildLookupWorkbook(job, ads);
   const safeName = (job.selectedPage?.name || job.queryName)
     .replace(/[^\w\-]+/g, "_")

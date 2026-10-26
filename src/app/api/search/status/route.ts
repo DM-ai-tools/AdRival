@@ -22,12 +22,18 @@ export async function GET(request: Request) {
 
     // 404s for a run the caller doesn't own or have shared, so polling another
     // user's job id reveals nothing.
-    const access = resolveProjectAccess("search", jobId, user, "view");
+    const access = await resolveProjectAccess("search", jobId, user, "view");
 
-    let job = getJob(jobId);
+    let job = await getJob(jobId);
     if (!job) {
       return NextResponse.json({ error: "Job not found" }, { status: 404 });
     }
+    // Light rows only (no page HTML): this is the polling hot path.
+    const [records, runAds, summary] = await Promise.all([
+      getCompetitorsByRun(jobId),
+      getSearchCompetitorAdsByRun(jobId),
+      getCreditSummary(user.id),
+    ]);
     // A brand review this app is not running was cut off by a restart or
     // redeploy. Say so, so it can be started again instead of looking stuck.
     if (
@@ -36,33 +42,39 @@ export async function GET(request: Request) {
       Date.now() - Date.parse(job.updatedAt) > 30_000
     ) {
       const done = job.progress.brandReviewDone ?? 0;
-      const total = job.progress.brandReviewTotal ?? getCompetitorsByRun(jobId).length;
+      const total = job.progress.brandReviewTotal ?? records.length;
       job =
-        updateJob(jobId, {
+        (await updateJob(jobId, {
           progress: {
             ...job.progress,
             stage: "done",
             brandReviewCurrentName: null,
             message: `Brand review stopped after ${done} of ${total} competitors because the app restarted. Run brand review again to finish it.`,
           },
-        }) || job;
+        })) || job;
     }
 
-    const competitors = getCompetitorsByRun(jobId).map((competitor) => ({
+    const competitors = records.map((competitor) => ({
       ...competitorForList(competitor),
       pageAnalysis: maskPageAnalysis(competitor.pageAnalysis),
     }));
-    const ads = getSearchCompetitorAdsByRun(jobId).map((ad) => ({
+    const ads = runAds.map((ad) => ({
       ...ad,
       raw: {},
     }));
-    const summary = getCreditSummary(user.id);
     // Users see a generic provider message; administrators also see which provider ran out.
-    let adminNote: string | null | undefined;
+    const masked = (text: string | null | undefined) => maskClientFacingText(redactProviderCreditText(text, false));
+    const showsProviderNote = (out: string | null | undefined): out is string =>
+      user.role === "admin" && Boolean(out) && out!.includes(USER_PROVIDER_CREDIT_MESSAGE);
+    // The provider calls are read only when an admin is shown that message.
+    const adminNote = [job.error, job.offersReport?.error, job.progress?.message].some((text) =>
+      showsProviderNote(masked(text)),
+    )
+      ? providerOutOfCreditsNote((await queryProviderCalls({ runId: jobId, limit: 300 })).rows)
+      : null;
     const visible = (text: string | null | undefined) => {
-      const out = maskClientFacingText(redactProviderCreditText(text, false));
-      if (user.role !== "admin" || !out || !out.includes(USER_PROVIDER_CREDIT_MESSAGE)) return out;
-      if (adminNote === undefined) adminNote = providerOutOfCreditsNote(queryProviderCalls({ runId: jobId, limit: 300 }).rows);
+      const out = masked(text);
+      if (!showsProviderNote(out)) return out;
       return adminNote ? `${out} ${adminNote}` : out;
     };
     return NextResponse.json({
@@ -80,7 +92,7 @@ export async function GET(request: Request) {
       ads,
       access: { role: access.role, ownerIsSelf: access.project.ownerUserId === user.id },
       // Drives "This run used X credits. You have Y credits available."
-      credits: { ...reportRunCredits(user.id, jobId), lowCredit: summary.lowCredit },
+      credits: { ...(await reportRunCredits(user.id, jobId, summary)), lowCredit: summary.lowCredit },
     });
   } catch (err) {
     return errorResponse(err);

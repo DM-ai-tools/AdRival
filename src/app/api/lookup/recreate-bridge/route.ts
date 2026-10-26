@@ -33,14 +33,14 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "adId is required" }, { status: 400 });
     }
 
-    const ad = getLookupAd(adId);
+    const ad = await getLookupAd(adId);
     if (!ad) {
       return NextResponse.json({ error: "Lookup ad not found" }, { status: 404 });
     }
 
-    resolveProjectAccess("lookup", ad.lookupId, user, "run");
+    await resolveProjectAccess("lookup", ad.lookupId, user, "run");
 
-    const lookup = getLookupJob(ad.lookupId);
+    const lookup = await getLookupJob(ad.lookupId);
     if (!lookup) {
       return NextResponse.json({ error: "Lookup job not found" }, { status: 404 });
     }
@@ -81,7 +81,7 @@ export async function POST(request: Request) {
             profileName: lookup.businessProfile?.businessName,
             competitorName: lookup.queryName,
           });
-          setLookupBusinessBrand(ad.lookupId, {
+          await setLookupBusinessBrand(ad.lookupId, {
             businessUrl: brand.finalUrl || businessUrlRaw,
             businessProfile: {
               ...(lookup.businessProfile || {
@@ -106,14 +106,14 @@ export async function POST(request: Request) {
         } catch (err) {
           if (isCreditError(err)) throw err;
           // Still store the URL so recreate can retry brand resolve later
-          setLookupBusinessBrand(ad.lookupId, {
+          await setLookupBusinessBrand(ad.lookupId, {
             businessUrl: businessUrlRaw,
             businessProfile: lookup.businessProfile || null,
           });
           console.warn("[lookup recreate-bridge] brand analyze failed", err);
         }
       } else if (!lookup.businessUrl) {
-        setLookupBusinessBrand(ad.lookupId, {
+        await setLookupBusinessBrand(ad.lookupId, {
           businessUrl: businessUrlRaw,
           businessProfile: lookup.businessProfile || null,
         });
@@ -126,8 +126,8 @@ export async function POST(request: Request) {
       ad.youtubeUrl ||
       null;
 
-    const prior = findExistingRecreationsForUrl(landingUrl, {
-      visibleRunIds: visibleRunIds(user, "search"),
+    const prior = await findExistingRecreationsForUrl(landingUrl, {
+      visibleRunIds: await visibleRunIds(user, "search"),
     });
     const confirmRedesign = Boolean(body.confirmRedesign || body.force);
     const alreadyDone = prior.filter(
@@ -145,11 +145,11 @@ export async function POST(request: Request) {
         existing: alreadyDone[0],
         allExisting: alreadyDone.slice(0, 5),
         landingUrl,
-        lookupJob: getLookupJob(ad.lookupId),
+        lookupJob: await getLookupJob(ad.lookupId),
       });
     }
 
-    const bridged = ensureLookupRecreationCompetitor(adId);
+    const bridged = await ensureLookupRecreationCompetitor(adId);
 
     return NextResponse.json({
       needsConfirm: false,
@@ -157,8 +157,8 @@ export async function POST(request: Request) {
       created: bridged.created,
       existingSameUrl: bridged.existingSameUrl,
       recreatePath: `/recreate/${encodeURIComponent(bridged.competitorId)}`,
-      lookupJob: getLookupJob(ad.lookupId),
-      ad: getLookupAd(adId),
+      lookupJob: await getLookupJob(ad.lookupId),
+      ad: await getLookupAd(adId),
     });
   } catch (err) {
     if (isCreditError(err)) {
@@ -179,25 +179,25 @@ export async function GET(request: Request) {
     if (!adId) {
       return NextResponse.json({ error: "adId is required" }, { status: 400 });
     }
-    const ad = getLookupAd(adId);
+    const ad = await getLookupAd(adId);
     if (!ad) {
       return NextResponse.json({ error: "Lookup ad not found" }, { status: 404 });
     }
-    resolveProjectAccess("lookup", ad.lookupId, user, "view");
+    await resolveProjectAccess("lookup", ad.lookupId, user, "view");
     const landingUrl =
       ad.pageAnalysis?.analyzedUrl ||
       ad.landingPageUrl ||
       ad.youtubeUrl ||
       null;
-    const existing = findExistingRecreationsForUrl(landingUrl, {
-      visibleRunIds: visibleRunIds(user, "search"),
+    const existing = await findExistingRecreationsForUrl(landingUrl, {
+      visibleRunIds: await visibleRunIds(user, "search"),
     });
     return NextResponse.json({
       adId,
       landingUrl,
       recreationCompetitorId: ad.recreationCompetitorId || null,
       existing,
-      lookupJob: getLookupJob(ad.lookupId),
+      lookupJob: await getLookupJob(ad.lookupId),
     });
   } catch (err) {
     return errorResponse(err);

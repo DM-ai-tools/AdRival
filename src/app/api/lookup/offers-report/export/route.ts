@@ -20,8 +20,8 @@ export async function GET(request: Request) {
     const part = PARTS.includes(partParam) ? partParam : "all";
     if (!lookupId) return NextResponse.json({ error: "lookupId is required" }, { status: 400 });
 
-    resolveProjectAccess("lookup", lookupId, user, "view");
-    const job = getLookupJob(lookupId);
+    await resolveProjectAccess("lookup", lookupId, user, "view");
+    const job = await getLookupJob(lookupId);
     if (!job) return NextResponse.json({ error: "Lookup not found" }, { status: 404 });
     const report = job.offersReport;
     if (!report || report.status !== "completed") {
@@ -34,7 +34,7 @@ export async function GET(request: Request) {
       subtitle: "",
       platform: job.platform ?? null,
       report,
-      ads: getLookupAds(lookupId).map((ad) => ({ ...ad, competitorName: ad.pageName || brand })),
+      ads: (await getLookupAds(lookupId)).map((ad) => ({ ...ad, competitorName: ad.pageName || brand })),
       // The lookup dashboard shows the whole report, without a service filter.
       focus: null,
       part,

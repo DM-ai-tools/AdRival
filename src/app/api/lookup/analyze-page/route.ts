@@ -17,11 +17,11 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "adId is required" }, { status: 400 });
     }
 
-    const existing = getLookupAd(adId);
+    const existing = await getLookupAd(adId);
     if (!existing) {
       return NextResponse.json({ error: "Lookup ad not found" }, { status: 404 });
     }
-    resolveProjectAccess("lookup", existing.lookupId, user, "run");
+    await resolveProjectAccess("lookup", existing.lookupId, user, "run");
 
     // Return cached completed analysis unless force=true or missing same-LP ads
     if (

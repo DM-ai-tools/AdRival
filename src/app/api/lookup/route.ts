@@ -17,7 +17,7 @@ export async function POST(request: Request) {
   try {
     const user = await requireUser();
 
-    const precheck = precheckRun(user);
+    const precheck = await precheckRun(user);
     if (!precheck.ok) {
       return NextResponse.json(
         {
@@ -84,11 +84,11 @@ export async function POST(request: Request) {
       typeof body.spaceId === "string" && body.spaceId.trim()
         ? body.spaceId.trim()
         : null;
-    if (spaceId) resolveSpaceAccess(spaceId, user, "run");
+    if (spaceId) await resolveSpaceAccess(spaceId, user, "run");
 
     // Stamp ownership before dispatching so the row is never world-readable.
     const startedAt = new Date().toISOString();
-    saveLookupJob({
+    await saveLookupJob({
       id: lookupId,
       queryName,
       platform,
@@ -133,17 +133,21 @@ export async function POST(request: Request) {
           ? (err as Error).message
           : maskClientFacingText(`Lookup failed: ${(err as Error).message}`) ||
             "Lookup failed";
-        // Keep the counts the lookup reached.
-        const reached = getLookupJob(lookupId)?.progress;
-        updateLookupJob(lookupId, {
-          status: "failed",
-          error: message,
-          progress: {
-            ...(reached ?? { candidatesFound: 0, adsFetched: 0, pagesScanned: 0 }),
-            stage: "failed",
-            message,
-          },
-        });
+        try {
+          // Keep the counts the lookup reached.
+          const reached = (await getLookupJob(lookupId))?.progress;
+          await updateLookupJob(lookupId, {
+            status: "failed",
+            error: message,
+            progress: {
+              ...(reached ?? { candidatesFound: 0, adsFetched: 0, pagesScanned: 0 }),
+              stage: "failed",
+              message,
+            },
+          });
+        } catch (writeErr) {
+          console.error(`[lookup] could not mark lookup ${lookupId} failed:`, writeErr);
+        }
       }
     });
 

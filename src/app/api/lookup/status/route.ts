@@ -18,24 +18,31 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: "lookupId is required" }, { status: 400 });
     }
 
-    const access = resolveProjectAccess("lookup", lookupId, user, "view");
+    const access = await resolveProjectAccess("lookup", lookupId, user, "view");
 
-    const job = getLookupJob(lookupId);
+    const job = await getLookupJob(lookupId);
     if (!job) {
       return NextResponse.json({ error: "Lookup not found" }, { status: 404 });
     }
 
-    const ads = getLookupAds(lookupId).map((ad) => ({
+    const [lookupAds, summary] = await Promise.all([getLookupAds(lookupId), getCreditSummary(user.id)]);
+    const ads = lookupAds.map((ad) => ({
       ...ad,
       pageAnalysis: maskPageAnalysis(ad.pageAnalysis),
     }));
-    const summary = getCreditSummary(user.id);
     // Users see a generic provider message; administrators also see which provider ran out.
-    let adminNote: string | null | undefined;
+    const masked = (text: string | null | undefined) => maskClientFacingText(redactProviderCreditText(text, false));
+    const showsProviderNote = (out: string | null | undefined): out is string =>
+      user.role === "admin" && Boolean(out) && out!.includes(USER_PROVIDER_CREDIT_MESSAGE);
+    // The provider calls are read only when an admin is shown that message.
+    const adminNote = [job.error, job.offersReport?.error, job.progress?.message].some((text) =>
+      showsProviderNote(masked(text)),
+    )
+      ? providerOutOfCreditsNote((await queryProviderCalls({ runId: lookupId, limit: 300 })).rows)
+      : null;
     const visible = (text: string | null | undefined) => {
-      const out = maskClientFacingText(redactProviderCreditText(text, false));
-      if (user.role !== "admin" || !out || !out.includes(USER_PROVIDER_CREDIT_MESSAGE)) return out;
-      if (adminNote === undefined) adminNote = providerOutOfCreditsNote(queryProviderCalls({ runId: lookupId, limit: 300 }).rows);
+      const out = masked(text);
+      if (!showsProviderNote(out)) return out;
       return adminNote ? `${out} ${adminNote}` : out;
     };
     return NextResponse.json({
@@ -55,7 +62,7 @@ export async function GET(request: Request) {
         ownerIsSelf: access.project.ownerUserId === user.id,
       },
       credits: {
-        ...reportRunCredits(user.id, lookupId),
+        ...(await reportRunCredits(user.id, lookupId, summary)),
         lowCredit: summary.lowCredit,
       },
     });

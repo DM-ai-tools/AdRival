@@ -30,9 +30,9 @@ export async function POST(request: Request) {
       );
     }
 
-    resolveProjectAccess("lookup", lookupId, user, "run");
+    await resolveProjectAccess("lookup", lookupId, user, "run");
 
-    const lookup = getLookupJob(lookupId);
+    const lookup = await getLookupJob(lookupId);
     if (!lookup) {
       return NextResponse.json({ error: "Lookup not found" }, { status: 404 });
     }
@@ -82,7 +82,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const job = setLookupBusinessBrand(lookupId, {
+    const job = await setLookupBusinessBrand(lookupId, {
       businessUrl,
       businessProfile: profile,
     });

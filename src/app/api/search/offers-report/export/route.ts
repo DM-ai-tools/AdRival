@@ -29,8 +29,8 @@ export async function GET(request: Request) {
     if (!jobId) return NextResponse.json({ error: "jobId is required" }, { status: 400 });
 
     // Downloads are authorized like any other read.
-    resolveProjectAccess("search", jobId, user, "view");
-    const job = getJob(jobId);
+    await resolveProjectAccess("search", jobId, user, "view");
+    const job = await getJob(jobId);
     if (!job) return NextResponse.json({ error: "Search not found" }, { status: 404 });
     const report = job.offersReport;
     if (!report || report.status !== "completed") {
@@ -41,7 +41,7 @@ export async function GET(request: Request) {
     const focus = searchedServiceFocus(keywords, job.selectedCategory?.label || null);
     const selected = job.offersCompetitorIds?.length ? new Set(job.offersCompetitorIds) : null;
     // The same ads the dashboard shows: the chosen competitors, on the searched service.
-    const ads = getSearchCompetitorAdsByRun(jobId)
+    const ads = (await getSearchCompetitorAdsByRun(jobId))
       .filter((ad) => !selected || selected.has(ad.competitorId))
       .filter((ad) => offerFitsSearchedService(`${ad.title || ""} ${ad.body || ""} ${ad.ctaText || ""}`, focus))
       .map((ad) => ({ ...ad, competitorName: ad.pageName }));

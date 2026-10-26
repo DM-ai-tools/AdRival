@@ -31,9 +31,9 @@ export async function POST(request: Request) {
     }
 
     // Viewers of a shared project cannot start paid analysis.
-    resolveProjectAccess("search", jobId, user, "run");
+    await resolveProjectAccess("search", jobId, user, "run");
 
-    const precheck = precheckRun(user);
+    const precheck = await precheckRun(user);
     if (!precheck.ok) {
       return NextResponse.json(
         {
@@ -45,11 +45,11 @@ export async function POST(request: Request) {
       );
     }
 
-    const job = getJob(jobId);
+    const job = await getJob(jobId);
     if (!job) {
       return NextResponse.json({ error: "Search job not found" }, { status: 404 });
     }
-    const competitors = getCompetitorsByRun(jobId);
+    const competitors = await getCompetitorsByRun(jobId);
     if (!competitors.length) {
       return NextResponse.json(
         { error: "No competitors found for this search run" },
@@ -94,7 +94,7 @@ export async function POST(request: Request) {
     // A Stop pressed earlier (on this report, or anything else in the run)
     // leaves a stop flag that makes the offers phase exit at once. Clear it,
     // unless the competitor search itself is still running.
-    if (job.status !== "running") clearSearchJobSuppression(jobId);
+    if (job.status !== "running") await clearSearchJobSuppression(jobId);
 
     const selectedCount = job.offersCompetitorIds?.length || competitors.length;
     job.progress = {
@@ -111,7 +111,7 @@ export async function POST(request: Request) {
         : `Starting offers dashboard for ${selectedCount} competitor${selectedCount === 1 ? "" : "s"}…`,
     };
     job.updatedAt = new Date().toISOString();
-    saveJob(job);
+    await saveJob(job);
 
     after(() => {
       // The run is charged to whoever pressed the button, even inside a project
@@ -130,44 +130,17 @@ export async function POST(request: Request) {
             refetchAds,
             competitorIds: job.offersCompetitorIds || undefined,
           }),
-      ).catch((err) => {
-        const current = getJob(jobId);
-        if (!current) return;
-        current.progress = {
-          ...current.progress,
-          stage: "done",
-          offersPhase: "failed",
-          offersPct: 100,
-          offersCurrentName: null,
-          message: `Offers analysis failed: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        };
-        current.offersReport = {
-          status: "failed",
-          createdAt: current.offersReport?.createdAt || new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-          error: err instanceof Error ? err.message : String(err),
-          adsAnalyzed: current.offersReport?.adsAnalyzed || 0,
-          adCopy: current.offersReport?.adCopy || {
-            uniqueCreatives: 0,
-            creatives: [],
-            uniqueOffers: [],
-          },
-          landingPages: current.offersReport?.landingPages || {
-            uniqueUrls: 0,
-            analyzed: 0,
-            failed: 0,
-            pages: [],
-            uniqueOffers: [],
-          },
-        };
-        saveJob(current);
+      ).catch(async (err: unknown) => {
+        try {
+          await markOffersFailed(jobId, err);
+        } catch (writeErr) {
+          console.error(`[offers] could not mark the offers report of ${jobId} failed:`, writeErr);
+        }
       });
     });
 
     return NextResponse.json({
-      job: getJob(jobId),
+      job: await getJob(jobId),
       competitors: competitors.map(competitorForList),
       started: true,
       chargedTo: user.username,
@@ -181,4 +154,40 @@ export async function POST(request: Request) {
     }
     return errorResponse(err);
   }
+}
+
+/** Records a failed offers report on the run (the HTTP response was already sent). */
+async function markOffersFailed(jobId: string, err: unknown): Promise<void> {
+  const current = await getJob(jobId);
+  if (!current) return;
+  current.progress = {
+    ...current.progress,
+    stage: "done",
+    offersPhase: "failed",
+    offersPct: 100,
+    offersCurrentName: null,
+    message: `Offers analysis failed: ${
+      err instanceof Error ? err.message : String(err)
+    }`,
+  };
+  current.offersReport = {
+    status: "failed",
+    createdAt: current.offersReport?.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    error: err instanceof Error ? err.message : String(err),
+    adsAnalyzed: current.offersReport?.adsAnalyzed || 0,
+    adCopy: current.offersReport?.adCopy || {
+      uniqueCreatives: 0,
+      creatives: [],
+      uniqueOffers: [],
+    },
+    landingPages: current.offersReport?.landingPages || {
+      uniqueUrls: 0,
+      analyzed: 0,
+      failed: 0,
+      pages: [],
+      uniqueOffers: [],
+    },
+  };
+  await saveJob(current);
 }

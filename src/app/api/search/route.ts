@@ -29,7 +29,7 @@ export async function POST(request: Request) {
 
     // Cheap pre-flight so the caller gets a clear message instead of a run that
     // dies on its first provider call. runBillable() re-checks atomically.
-    const precheck = precheckRun(user);
+    const precheck = await precheckRun(user);
     if (!precheck.ok) {
       return NextResponse.json(
         {
@@ -155,12 +155,12 @@ export async function POST(request: Request) {
         ? body.spaceId.trim()
         : null;
     if (spaceId) {
-      resolveSpaceAccess(spaceId, user, "run");
+      await resolveSpaceAccess(spaceId, user, "run");
     }
 
     // Stamp ownership before any work starts, so the run is private from its
     // first tick. The pipeline's own saveJob() calls preserve ownerUserId.
-    saveJob({
+    await saveJob({
       id: jobId,
       keyword: keywords.join(", "),
       keywords,
@@ -221,23 +221,27 @@ export async function POST(request: Request) {
           ? (err as Error).message
           : maskClientFacingText(`Search failed: ${(err as Error).message}`) ||
             "Search failed";
-        // Keep the counts the run reached, so the user can see how far it got.
-        const reached = getJob(jobId)?.progress;
-        updateJob(jobId, {
-          status: "failed",
-          error: message,
-          progress: {
-            ...(reached ?? {
-              scannedAds: 0,
-              scannedPages: 0,
-              accepted: 0,
-              target: 0,
-              rejected: 0,
-            }),
-            stage: "failed",
-            message,
-          },
-        });
+        try {
+          // Keep the counts the run reached, so the user can see how far it got.
+          const reached = (await getJob(jobId))?.progress;
+          await updateJob(jobId, {
+            status: "failed",
+            error: message,
+            progress: {
+              ...(reached ?? {
+                scannedAds: 0,
+                scannedPages: 0,
+                accepted: 0,
+                target: 0,
+                rejected: 0,
+              }),
+              stage: "failed",
+              message,
+            },
+          });
+        } catch (writeErr) {
+          console.error(`[search] could not mark run ${jobId} failed:`, writeErr);
+        }
       }
     });
 

@@ -36,9 +36,9 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const jobId = String(searchParams.get("jobId") || "").trim();
     if (!jobId) return NextResponse.json({ error: "jobId is required" }, { status: 400 });
-    const access = resolveProjectAccess("search", jobId, user, "view");
+    const access = await resolveProjectAccess("search", jobId, user, "view");
     const pages: Record<string, ReturnType<typeof pageView>> = {};
-    for (const [key, c] of landingPageRecordsByKey(jobId)) pages[key] = pageView(c);
+    for (const [key, c] of await landingPageRecordsByKey(jobId)) pages[key] = pageView(c);
     return NextResponse.json({ pages, canRun: access.role !== "viewer" });
   } catch (err) {
     return errorResponse(err);
@@ -60,9 +60,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "jobId and url are required" }, { status: 400 });
     }
     // Analysing the page spends credits, so viewers cannot do it.
-    resolveProjectAccess("search", jobId, user, "run");
+    await resolveProjectAccess("search", jobId, user, "run");
 
-    const { competitor } = ensureLandingPageRecord(jobId, url);
+    const { competitor } = await ensureLandingPageRecord(jobId, url);
 
     if (body.force || competitor.pageAnalysis?.status !== "completed") {
       await runBillable(
@@ -76,7 +76,7 @@ export async function POST(request: Request) {
         () => analyzeCompetitorLandingPage(competitor.id),
       );
     }
-    const latest = getCompetitor(competitor.id) || competitor;
+    const latest = (await getCompetitor(competitor.id)) || competitor;
     return NextResponse.json({ page: pageView(latest) });
   } catch (err) {
     if (isCreditError(err)) {

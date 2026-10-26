@@ -24,14 +24,14 @@ export async function POST(request: Request) {
       );
     }
 
-    resolveProjectAccess("lookup", lookupId, user, "run");
+    await resolveProjectAccess("lookup", lookupId, user, "run");
 
-    const job = getLookupJob(lookupId);
+    const job = await getLookupJob(lookupId);
     if (!job) {
       return NextResponse.json({ error: "Lookup not found" }, { status: 404 });
     }
 
-    const ads = getLookupAds(lookupId);
+    const ads = await getLookupAds(lookupId);
     if (ads.length === 0) {
       return NextResponse.json(
         { error: "No ads on this lookup to analyze" },
@@ -50,7 +50,7 @@ export async function POST(request: Request) {
 
     // Clear a stop flag left by an earlier Stop so the report can run again,
     // unless the lookup is still fetching ads.
-    if (job.status !== "running") clearLookupJobSuppression(lookupId);
+    if (job.status !== "running") await clearLookupJobSuppression(lookupId);
 
     const updated = await runBillable(
       {
@@ -67,11 +67,16 @@ export async function POST(request: Request) {
         }),
     );
 
+    const [latestJob, latestAds, credits] = await Promise.all([
+      updated ? Promise.resolve(updated) : getLookupJob(lookupId),
+      getLookupAds(lookupId),
+      reportRunCredits(user.id, lookupId),
+    ]);
     return NextResponse.json({
-      job: updated || getLookupJob(lookupId),
-      ads: getLookupAds(lookupId),
+      job: latestJob,
+      ads: latestAds,
       cached: false,
-      credits: reportRunCredits(user.id, lookupId),
+      credits,
     });
   } catch (err) {
     if (isCreditError(err)) {
