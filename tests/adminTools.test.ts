@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
-import { readFileSync, existsSync } from "node:fs";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { validateConversionRules } from "../src/lib/accounting/conversionValidation";
 import { auditActionLabel, auditDetailsText } from "../src/lib/admin/auditView";
 import { callStatusLabel, confidenceLabel, operationLabel } from "../src/lib/admin/labels";
+import {
+  getActiveConversionRuleSet,
+  listConversionRuleSets,
+  publishConversionRuleSet,
+} from "../src/lib/accounting/records";
+import { useTempStore } from "./helpers/store";
 
-test("well-formed conversion rules pass, including the rules this install uses", () => {
+const store = await useTempStore("admin-tools");
+after(() => store.cleanup());
+
+test("well-formed conversion rules pass, including the rules this install uses", async () => {
   assert.deepEqual(
     validateConversionRules({
       rates: { openai: { default: { perThousandInputTokens: 2000, perThousandOutputTokens: 8000 } } },
@@ -13,14 +21,19 @@ test("well-formed conversion rules pass, including the rules this install uses",
     }),
     [],
   );
-  // The live store's newest rule set must stay publishable as-is.
-  if (existsSync("data/store.json")) {
-    const store = JSON.parse(readFileSync("data/store.json", "utf8")) as {
-      conversionRuleSets?: Array<{ rates: unknown; perCallReservationCeiling: unknown }>;
-    };
-    const latest = store.conversionRuleSets?.at(-1);
-    if (latest) assert.deepEqual(validateConversionRules(latest), []);
-  }
+  // The rule set a fresh install charges with must stay publishable as-is,
+  // and so must the newest one after a round trip through the database.
+  const active = await getActiveConversionRuleSet();
+  assert.deepEqual(validateConversionRules(active), []);
+  const published = await publishConversionRuleSet({
+    rates: active.rates,
+    perCallReservationCeiling: active.perCallReservationCeiling,
+    note: "republished unchanged",
+    actorUserId: "admin-tools-test",
+  });
+  const latest = (await listConversionRuleSets()).reduce((a, b) => (b.version > a.version ? b : a));
+  assert.equal(latest?.version, published.version);
+  assert.deepEqual(validateConversionRules(latest!), []);
 });
 
 test("malformed conversion rules are reported in plain words", () => {
