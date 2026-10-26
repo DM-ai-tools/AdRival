@@ -5,6 +5,7 @@ import type {
   LookupOffersReport,
   SearchJob,
 } from "../types";
+import { deleteArchivedFor } from "./archive";
 import { getDb, withTx, type Queryable } from "./client";
 import { MAX_DELETED_RUN_IDS } from "./legacyStore";
 
@@ -659,7 +660,8 @@ export async function listHistoryRuns(
  */
 export async function deleteHistoryRun(runId: string): Promise<{ ok: boolean; removedCompetitors: number }> {
   suppressedSearchJobIds.add(runId);
-  return withTx(async (tx) => {
+  let pageRows: string[] = [];
+  const result = await withTx(async (tx) => {
     await lockRun(tx, runId);
     const lookupIds = await offersLookupIds(tx, runId);
     await lockRunIds(tx, lookupIds);
@@ -675,7 +677,9 @@ export async function deleteHistoryRun(runId: string): Promise<{ ok: boolean; re
     const { rows: jobRows } = await tx.query("select 1 from jobs where id = $1 for update", [runId]);
     if (!jobRows.length) return { ok: true, removedCompetitors: 0 };
 
-    // recreated_pages rows go with their competitors (on delete cascade).
+    // recreated_pages rows go with their competitors (on delete cascade); their
+    // archive objects are deleted after commit.
+    pageRows = await pageRowIds(tx, runId);
     const removed = await tx.query<{ page_id: string | null }>(
       "delete from competitors where run_id = $1 returning data->>'pageId' as page_id",
       [runId],
@@ -694,11 +698,27 @@ export async function deleteHistoryRun(runId: string): Promise<{ ok: boolean; re
     }
     return { ok: true, removedCompetitors: removed.rowCount };
   });
+  await deleteArchivedFor(pageRows);
+  return result;
+}
+
+/** Competitors (of one run, or all) that have a recreated_pages row: their archive objects may exist. */
+async function pageRowIds(tx: Queryable, runId: string | null): Promise<string[]> {
+  const { rows } = await tx.query<{ id: string }>(
+    runId === null
+      ? "select competitor_id as id from recreated_pages"
+      : `select r.competitor_id as id
+           from recreated_pages r join competitors c on c.id = r.competitor_id
+          where c.run_id = $1`,
+    runId === null ? [] : [runId],
+  );
+  return rows.map((r) => r.id);
 }
 
 /** Delete every run + competitor + clear seen page ids. */
 export async function clearAllHistory(): Promise<{ removedRuns: number; removedCompetitors: number }> {
-  return withTx(async (tx) => {
+  let pageRows: string[] = [];
+  const result = await withTx(async (tx) => {
     // Exclusive: every per-run writer holds this key shared until it commits,
     // so all saves that started earlier have committed (their rows are deleted
     // here) and every later save waits, then finds the tombstone and is refused.
@@ -706,12 +726,16 @@ export async function clearAllHistory(): Promise<{ removedRuns: number; removedC
     const ids = await deletedIds(tx, "jobs");
     for (const id of ids) suppressedSearchJobIds.add(id);
     await rememberDeletedRuns(tx, ids);
+    pageRows = await pageRowIds(tx, null);
     const competitors = await tx.query("delete from competitors");
     await tx.query("delete from search_competitor_ads");
     await tx.query("delete from icps where source_kind = 'search'");
     await tx.query("delete from seen_page_ids");
     return { removedRuns: ids.length, removedCompetitors: competitors.rowCount };
   });
+  // After commit, best effort: a failure leaves files in Storage, never a failed delete.
+  await deleteArchivedFor(pageRows);
+  return result;
 }
 
 /* ── lookup jobs ── */
