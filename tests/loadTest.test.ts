@@ -37,9 +37,12 @@ test("summarize groups by endpoint and counts errors apart from 401s", () => {
   assert.equal(total.p95, 300);
 });
 
-test("verdict fails on errors or a slow p95, passes on 401s alone", () => {
+test("verdict fails on errors, 401s (unless allowed) or a slow p95", () => {
   const base = { endpoint: "total", count: 10, p50: 100, p95: 900, max: 1000, errors: 0, unauthorized: 2 };
-  assert.deepEqual(verdict(base, 2000), { ok: true, reasons: [] });
+  assert.equal(verdict(base, 2000).ok, false, "401s fail by default");
+  assert.match(verdict(base, 2000).reasons.join(), /2 401/);
+  assert.deepEqual(verdict(base, 2000, true), { ok: true, reasons: [] });
+  assert.deepEqual(verdict({ ...base, unauthorized: 0 }, 2000), { ok: true, reasons: [] });
   assert.equal(verdict({ ...base, errors: 1 }, 2000).ok, false);
   assert.match(verdict({ ...base, p95: 2500 }, 2000).reasons.join(), /p95 2500/);
 });
@@ -52,11 +55,20 @@ test("arguments: defaults, flags and refusals", () => {
     job: null,
     p95Ms: 2000,
     reserve: false,
+    allow401: false,
   });
   const full = parseLoadArgs([
-    "--base", "http://localhost:3000", "--users", "3", "--duration", "10", "--job", "job-1", "--p95-ms", "800", "--reserve",
+    "--base", "http://localhost:3000", "--users", "3", "--duration", "10", "--job", "job-1", "--p95-ms", "800", "--reserve", "--allow-401",
   ]);
-  assert.deepEqual(full, { base: "http://localhost:3000", users: 3, durationSec: 10, job: "job-1", p95Ms: 800, reserve: true });
+  assert.deepEqual(full, {
+    base: "http://localhost:3000",
+    users: 3,
+    durationSec: 10,
+    job: "job-1",
+    p95Ms: 800,
+    reserve: true,
+    allow401: true,
+  });
   assert.throws(() => parseLoadArgs([]), /--base/);
   assert.throws(() => parseLoadArgs(["--base", "ftp://x"]), /http/);
   assert.throws(() => parseLoadArgs(["--base", "http://x", "--users", "0"]), /positive/);

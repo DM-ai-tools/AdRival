@@ -12,8 +12,8 @@
  * no credits are reserved (--reserve is accepted but only prints that).
  *
  * Prints p50/p95/max latency and error counts per endpoint and in total.
- * Exits non-zero when any response is non-2xx other than 401, or when the
- * total p95 is above --p95-ms. Never prints passwords or cookies.
+ * Exits non-zero when any response is non-2xx (401 included, unless
+ * --allow-401), or when the total p95 is above --p95-ms. Never prints passwords or cookies.
  */
 import { pathToFileURL } from "node:url";
 
@@ -24,10 +24,12 @@ export interface LoadArgs {
   job: string | null;
   p95Ms: number;
   reserve: boolean;
+  /** Count 401 responses as expected instead of errors. */
+  allow401: boolean;
 }
 
 export function parseLoadArgs(argv: string[]): LoadArgs {
-  const args: LoadArgs = { base: "", users: 6, durationSec: 60, job: null, p95Ms: 2000, reserve: false };
+  const args: LoadArgs = { base: "", users: 6, durationSec: 60, job: null, p95Ms: 2000, reserve: false, allow401: false };
   const positive = (flag: string, raw: string) => {
     const n = Number(raw);
     if (!Number.isFinite(n) || n <= 0) throw new Error(`${flag} must be a positive number, got ${raw}`);
@@ -47,6 +49,7 @@ export function parseLoadArgs(argv: string[]): LoadArgs {
     else if (flag === "--job") args.job = value();
     else if (flag === "--p95-ms") args.p95Ms = positive(flag, value());
     else if (flag === "--reserve") args.reserve = true;
+    else if (flag === "--allow-401") args.allow401 = true;
     else throw new Error(`unknown argument: ${flag}`);
   }
   if (!args.base) throw new Error("--base <url> is required");
@@ -106,10 +109,11 @@ export function summarize(samples: Sample[]): { endpoints: EndpointSummary[]; to
   return { endpoints, total: summarizeGroup("total", samples) };
 }
 
-/** Pass/fail for a summary. */
-export function verdict(total: EndpointSummary, p95Ms: number): { ok: boolean; reasons: string[] } {
+/** Pass/fail for a summary. A 401 is an error unless `allow401` (a session that expired mid-test is a finding). */
+export function verdict(total: EndpointSummary, p95Ms: number, allow401 = false): { ok: boolean; reasons: string[] } {
   const reasons: string[] = [];
   if (total.errors > 0) reasons.push(`${total.errors} non-2xx (other than 401) or failed request(s)`);
+  if (!allow401 && total.unauthorized > 0) reasons.push(`${total.unauthorized} 401 response(s) (pass --allow-401 if expected)`);
   if (total.p95 > p95Ms) reasons.push(`total p95 ${total.p95} ms is above ${p95Ms} ms`);
   return { ok: reasons.length === 0, reasons };
 }
@@ -217,7 +221,7 @@ async function main(): Promise<void> {
 
   const { endpoints, total } = summarize(samples);
   printSummary(endpoints, total);
-  const result = verdict(total, args.p95Ms);
+  const result = verdict(total, args.p95Ms, args.allow401);
   if (!result.ok) {
     console.error(`FAIL: ${result.reasons.join("; ")}`);
     process.exit(1);
