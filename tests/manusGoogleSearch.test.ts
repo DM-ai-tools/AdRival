@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { after, test } from "node:test";
 import { useTempStore } from "./helpers/store";
 
-const store = useTempStore("manus-google-search");
+const store = await useTempStore("manus-google-search");
 
 // No real provider is reached: Manus and SociaVault are faked through fetch,
 // and the AI review is a local server standing in for OpenAI.
@@ -51,9 +51,9 @@ const aiReady = new Promise<void>((resolve) => {
     resolve();
   });
 });
-after(() => {
+after(async () => {
   aiServer?.close();
-  store.cleanup();
+  await store.cleanup();
 });
 
 type Event = Record<string, unknown> & { id: string; type: string; timestamp: number };
@@ -190,7 +190,7 @@ test("a Google search takes sponsored advertisers from the agent, reads their ad
       } as never,
     }));
 
-    const job = getJob("job-google-1")!;
+    const job = (await getJob("job-google-1"))!;
     assert.equal(job.manusSearch?.taskId, "S1");
     // The agent ran first; its confirmed advertiser was fetched from SociaVault for Australia only.
     assert.equal(manusCalls.filter((m) => m !== "project.list")[0], "task.create");
@@ -202,7 +202,7 @@ test("a Google search takes sponsored advertisers from the agent, reads their ad
     // The advertiser with no ads in the Transparency Center was never sent to SociaVault.
     assert.ok(!svCalls.some((c) => c.params.get("domain") === "teethdirectory.com.au"));
 
-    const competitors = getCompetitorsByRun("job-google-1");
+    const competitors = await getCompetitorsByRun("job-google-1");
     assert.deepEqual(competitors.map((c) => c.pageName), ["Rival Dental Pty Ltd"]);
     assert.equal(competitors[0].activeAdsCount, 12);
     assert.equal(job.progress.sponsored?.withAds, 1);
@@ -213,10 +213,10 @@ test("a Google search takes sponsored advertisers from the agent, reads their ad
     assert.equal(job.status, "partial");
 
     // The agent's 120 credits are in the ledger for this run, with a cost and app credits charged.
-    const { readDb } = await import("../src/lib/db");
+    const { queryProviderCalls } = await import("../src/lib/accounting/service");
     let manusCall = null as null | { usage: { requests?: number }; estimatedCostUsdMicros: number | null; creditsCharged: number; runId: string | null };
     for (let i = 0; i < 50 && !manusCall; i += 1) {
-      manusCall = (readDb().providerCalls ?? []).find((c) => c.provider === "manus") ?? null;
+      manusCall = (await queryProviderCalls({ provider: "manus" })).rows[0] ?? null;
       if (!manusCall) await new Promise((r) => setTimeout(r, 20));
     }
     assert.ok(manusCall, "Manus credits were recorded");
@@ -274,8 +274,8 @@ test("a city/suburb run sends the agent at most three rounds, and a rival with n
     assert.equal(fake.manusCalls.filter((m) => m === "task.create").length, 1);
     assert.ok(fake.manusCalls.filter((m) => m === "task.sendMessage").length <= 2);
     // No address was found for the rival, so it waited for the country-wide round and was then taken.
-    assert.deepEqual(getCompetitorsByRun("job-google-local").map((c) => c.pageName), ["Rival Dental Pty Ltd"]);
-    assert.equal(getJob("job-google-local")!.progress.accepted, 1);
+    assert.deepEqual((await getCompetitorsByRun("job-google-local")).map((c) => c.pageName), ["Rival Dental Pty Ltd"]);
+    assert.equal((await getJob("job-google-local"))!.progress.accepted, 1);
   } finally {
     globalThis.fetch = realFetch;
   }
@@ -300,7 +300,7 @@ test("by default a Google search uses the web search only, without the Manus age
     // The web steps ran: SociaVault's Google search (Firecrawl has no key here) and the Transparency name search.
     assert.ok(fake.svCalls.some((c) => c.path.endsWith("/google/search")));
     assert.ok(fake.svCalls.some((c) => c.path.endsWith("/search-advertisers")));
-    assert.equal(getJob("job-google-web")!.manusSearch ?? null, null);
+    assert.equal((await getJob("job-google-web"))!.manusSearch ?? null, null);
   } finally {
     process.env.MANUS_SEARCH = "on";
     globalThis.fetch = realFetch;

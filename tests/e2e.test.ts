@@ -49,19 +49,19 @@ before(async () => {
         await import("./helpers/factories");
 
       const passwordHash = await hashPassword(PASSWORD);
-      const make = (
+      const make = async (
         username: string,
         role: "admin" | "user",
         credits: number,
       ) => {
-        const user = createUser({
+        const user = await createUser({
           username,
           displayName: username,
           passwordHash,
           role,
           status: "active",
         });
-        initializeUserCredits(user.id, {
+        await initializeUserCredits(user.id, {
           allowanceSubunits: creditsToSubunits(credits),
           resetCadence: "none",
           reason: "e2e fixture",
@@ -72,29 +72,35 @@ before(async () => {
       // Nothing in this suite should reach a provider. Disabling them all means
       // meterProviderCall() refuses before the network is touched, even if a
       // route's own configuration check passes.
-      updateAppSettings({ disabledProviders: [...PROVIDER_IDS] }, null);
+      await updateAppSettings({ disabledProviders: [...PROVIDER_IDS] }, null);
 
-      ids.admin = make("rootadmin", "admin", 500);
-      ids.alice = make("alice", "user", 500);
-      ids.bob = make("bob", "user", 500);
-      ids.broke = make("broke", "user", 0);
-      ids.suspendable = make("suspendme", "user", 500);
-      ids.throttled = make("throttled", "user", 500);
+      ids.admin = await make("rootadmin", "admin", 500);
+      ids.alice = await make("alice", "user", 500);
+      ids.bob = await make("bob", "user", 500);
+      ids.broke = await make("broke", "user", 0);
+      ids.suspendable = await make("suspendme", "user", 500);
+      ids.throttled = await make("throttled", "user", 500);
 
-      ids.aliceSearch = makeSearchProject({
-        ownerUserId: ids.alice,
-        keyword: "alice private keyword",
-      }).id;
-      ids.aliceCompetitor = makeCompetitor({ runId: ids.aliceSearch }).id;
-      ids.aliceLookup = makeLookupProject({
-        ownerUserId: ids.alice,
-        queryName: "alice private brand",
-      }).id;
+      ids.aliceSearch = (
+        await makeSearchProject({
+          ownerUserId: ids.alice,
+          keyword: "alice private keyword",
+        })
+      ).id;
+      ids.aliceCompetitor = (await makeCompetitor({ runId: ids.aliceSearch })).id;
+      ids.aliceLookup = (
+        await makeLookupProject({
+          ownerUserId: ids.alice,
+          queryName: "alice private brand",
+        })
+      ).id;
       // A row from before the migration: no owner.
-      ids.legacySearch = makeSearchProject({
-        ownerUserId: null,
-        keyword: "legacy keyword",
-      }).id;
+      ids.legacySearch = (
+        await makeSearchProject({
+          ownerUserId: null,
+          keyword: "legacy keyword",
+        })
+      ).id;
     },
   });
 });

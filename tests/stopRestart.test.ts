@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { useTempStore } from "./helpers/store";
 
-const store = useTempStore("stop-restart");
+const store = await useTempStore("stop-restart");
 after(() => store.cleanup());
 
 test("a stopped lookup can run its offers report again once the flag is cleared", async () => {
@@ -15,7 +15,7 @@ test("a stopped lookup can run its offers report again once the flag is cleared"
 
   const id = `lookup-restart-${Date.now()}`;
   const now = new Date().toISOString();
-  saveLookupJob({
+  await saveLookupJob({
     id,
     queryName: "Echelonn",
     platform: "facebook",
@@ -33,15 +33,15 @@ test("a stopped lookup can run its offers report again once the flag is cleared"
     updatedAt: now,
   });
 
-  stopLookupJob(id, "Stopped by user");
-  assert.equal(isLookupJobSuppressed(id), true);
+  await stopLookupJob(id, "Stopped by user");
+  assert.equal(await isLookupJobSuppressed(id), true);
 
-  const cleared = clearLookupJobSuppression(id);
+  const cleared = await clearLookupJobSuppression(id);
   assert.equal(cleared?.progress.stopRequested, false);
-  assert.equal(isLookupJobSuppressed(id), false);
+  assert.equal(await isLookupJobSuppressed(id), false);
   // Pipeline saves are accepted again.
   assert.equal(
-    saveLookupJob({ ...cleared!, progress: { ...cleared!.progress, stage: "analyzing_offers" } }),
+    await saveLookupJob({ ...cleared!, progress: { ...cleared!.progress, stage: "analyzing_offers" } }),
     true,
   );
 });
@@ -52,7 +52,7 @@ test("a stopped search can run its offers report again once the flag is cleared"
 
   const id = `search-restart-${Date.now()}`;
   const now = new Date().toISOString();
-  saveJob({
+  await saveJob({
     id,
     keyword: "teeth whitening",
     keywords: ["teeth whitening"],
@@ -74,14 +74,14 @@ test("a stopped search can run its offers report again once the flag is cleared"
     updatedAt: now,
   } as Parameters<typeof saveJob>[0]);
 
-  stopSearchJob(id, "Stopped by user");
-  assert.equal(isSearchJobSuppressed(id), true);
+  await stopSearchJob(id, "Stopped by user");
+  assert.equal(await isSearchJobSuppressed(id), true);
 
-  clearSearchJobSuppression(id);
-  assert.equal(isSearchJobSuppressed(id), false);
-  const job = getJob(id)!;
+  await clearSearchJobSuppression(id);
+  assert.equal(await isSearchJobSuppressed(id), false);
+  const job = (await getJob(id))!;
   assert.equal(
-    saveJob({ ...job, progress: { ...job.progress, stage: "analyzing_offers" } }),
+    await saveJob({ ...job, progress: { ...job.progress, stage: "analyzing_offers" } }),
     true,
   );
 });

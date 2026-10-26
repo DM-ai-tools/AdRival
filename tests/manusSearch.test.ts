@@ -158,7 +158,7 @@ test("finds stream in while the agent works, a follow-up step reuses the task, a
     const tasks: string[] = [];
     const agent = new SponsoredSearchAgent(
       { title: "Google sponsored search: dentist (AU)", country: "AU", platform: "google", industry: "Dental" },
-      { isStopped: () => stopped, onActivity: (t) => activity.push(t), onTask: (t) => tasks.push(t.taskId) },
+      { isStopped: () => stopped, onActivity: (t) => activity.push(t), onTask: (t) => { tasks.push(t.taskId); } },
     );
 
     const batches: string[][] = [];

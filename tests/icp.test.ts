@@ -1,13 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import test, { after } from "node:test";
+import { useTempStore } from "./helpers/store";
 
-const dir = mkdtempSync(join(tmpdir(), "adrival-icp-"));
-process.env.ADRIVAL_DATA_DIR = dir;
-process.env.SESSION_SECRET = "test-session-secret-do-not-use-in-production";
-after(() => rmSync(dir, { recursive: true, force: true }));
+const store = await useTempStore("icp");
+after(() => store.cleanup());
 
 import { generateIcp, icpBelongsToRun, icpProfileReady } from "../src/lib/pipeline/awareness/icp";
 import { maskIcp } from "../src/lib/clientFacing";
@@ -132,12 +128,12 @@ test("upsertIcp keeps one row per source and stage and deletes with the run", as
     stage,
     createdAt: new Date().toISOString(),
   });
-  upsertIcp(mk("a", "unaware"));
-  upsertIcp(mk("b", "unaware"));
-  upsertIcp(mk("c", "most_aware"));
-  assert.equal(getIcps("search", "run-x").length, 2);
-  assert.equal(getIcp("a"), null);
-  assert.ok(getIcp("b"));
-  deleteHistoryRun("run-x");
-  assert.equal(getIcps("search", "run-x").length, 0);
+  await upsertIcp(mk("a", "unaware"));
+  await upsertIcp(mk("b", "unaware"));
+  await upsertIcp(mk("c", "most_aware"));
+  assert.equal((await getIcps("search", "run-x")).length, 2);
+  assert.equal(await getIcp("a"), null);
+  assert.ok(await getIcp("b"));
+  await deleteHistoryRun("run-x");
+  assert.equal((await getIcps("search", "run-x")).length, 0);
 });

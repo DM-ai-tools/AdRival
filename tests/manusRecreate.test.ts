@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { useTempStore } from "./helpers/store";
 
-const store = useTempStore("manus-recreate");
+const store = await useTempStore("manus-recreate");
 after(() => store.cleanup());
 
 // No real provider is reached: Manus and the file downloads are faked below,
@@ -147,12 +147,12 @@ test("the design agent builds the page, its question is answered, and a change r
   const realFetch = globalThis.fetch;
   globalThis.fetch = fake.fetchImpl as typeof fetch;
   try {
-    const { saveJob, updateCompetitor, getCompetitor } = await import("../src/lib/db");
+    const { saveJob, updateCompetitor, getCompetitor, getRecreatedPage } = await import("../src/lib/db");
     const { makeSearchProject, makeCompetitor } = await import("./helpers/factories");
     const { runManusRecreation, editManusRecreation } = await import("../src/lib/pipeline/manus/run");
 
-    const job = makeSearchProject({ keyword: "dentist" });
-    saveJob({
+    const job = await makeSearchProject({ keyword: "dentist" });
+    await saveJob({
       ...job,
       businessUrl: "https://brightdental.example",
       businessProfile: {
@@ -168,8 +168,8 @@ test("the design agent builds the page, its question is answered, and a change r
         analyzedAt: new Date().toISOString(),
       } as never,
     });
-    const competitor = makeCompetitor({ runId: job.id, pageName: "Rival Clinic" });
-    updateCompetitor(competitor.id, {
+    const competitor = await makeCompetitor({ runId: job.id, pageName: "Rival Clinic" });
+    await updateCompetitor(competitor.id, {
       pageAnalysis: {
         status: "completed",
         analyzedUrl: "https://rivalclinic.example/offer",
@@ -189,16 +189,19 @@ test("the design agent builds the page, its question is answered, and a change r
     const built = await runManusRecreation(competitor.id, { styleDirection: "brand", assets });
     // The images are kept, so a later rebuild without new ones still uses them.
     assert.deepEqual(loadAssets(competitor.id).map((a) => [a.name, a.caption, a.dataUrl]), [["asset-1.png", "Q3 results stat", png]]);
+    // The competitor row carries the light page; the HTML is read from the page store.
     const page = built.recreatedPage!;
     assert.equal(page.status, "completed", page.error || "");
+    assert.equal(page.hasPage, true);
+    const content = (await getRecreatedPage(competitor.id))!;
     assert.equal(page.pipelineVersion, "manus-1");
-    assert.match(page.html || "", /Version one/);
+    assert.match(content.html || "", /Version one/);
     // The first delivery used a photo twice: it went back to the agent once, and the fixed page was kept.
     assert.equal(fake.sent.filter((s) => s.method === "task.sendMessage" && /appear more than once/.test(JSON.stringify(s.body))).length, 1);
-    assert.equal((page.html || "").split("Smiling patient").length - 1, 1);
+    assert.equal((content.html || "").split("Smiling patient").length - 1, 1);
     assert.ok(!page.publishBlockers?.some((b) => /same image/.test(b)));
     // The sibling image the page referred to by a relative path is now inside the page.
-    assert.match(page.html || "", /src="data:image\/png;base64,/);
+    assert.match(content.html || "", /src="data:image\/png;base64,/);
     // The competitor's name was left in the page: flagged, not published as ready.
     assert.equal(page.publishReady, false);
     assert.ok(page.publishBlockers?.some((b) => /Rival Clinic/.test(b)));
@@ -237,12 +240,13 @@ test("the design agent builds the page, its question is answered, and a change r
     const edited = await editManusRecreation(competitor.id, "Make the hero darker");
     const after = edited.recreatedPage!;
     assert.equal(after.status, "completed", after.error || "");
-    assert.match(after.html || "", /Version two/);
-    assert.match(after.previousHtml || "", /Version one/);
+    const afterContent = (await getRecreatedPage(competitor.id))!;
+    assert.match(afterContent.html || "", /Version two/);
+    assert.match(afterContent.previousHtml || "", /Version one/);
     assert.equal(after.lastEdit?.request, "Make the hero darker");
     // Same task, no second task.create.
     assert.equal(fake.sent.filter((s) => s.method === "task.create").length, 1);
-    assert.equal(getCompetitor(competitor.id)?.recreatedPage?.manus?.taskId, "T1");
+    assert.equal((await getCompetitor(competitor.id))?.recreatedPage?.manus?.taskId, "T1");
   } finally {
     globalThis.fetch = realFetch;
   }

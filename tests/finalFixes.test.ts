@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { useTempStore } from "./helpers/store";
 
-const store = useTempStore("final-fixes");
+const store = await useTempStore("final-fixes");
 after(() => store.cleanup());
 process.env.MANUS_API_KEY = "test-key";
 process.env.MANUS_POLL_MS = "10";
@@ -110,10 +110,10 @@ test("an already labelled page returns without a fetch or model call", async () 
   const { updateCompetitor, saveJob } = await import("../src/lib/db");
   const { makeSearchProject, makeCompetitor } = await import("./helpers/factories");
   const { labelCompetitorLevels } = await import("../src/lib/pipeline/landingPageAnalysis");
-  const job = makeSearchProject({ keyword: "dentist" });
-  saveJob(job);
-  const c = makeCompetitor({ runId: job.id, pageName: "Labelled" });
-  updateCompetitor(c.id, {
+  const job = await makeSearchProject({ keyword: "dentist" });
+  await saveJob(job);
+  const c = await makeCompetitor({ runId: job.id, pageName: "Labelled" });
+  await updateCompetitor(c.id, {
     pageAnalysis: {
       status: "completed",
       analyzedUrl: "https://labelled.example",
@@ -185,8 +185,8 @@ function icp(id: string, runId: string, stage: "problem_aware" | "unaware") {
 async function recreateSetup() {
   const { saveJob, updateCompetitor } = await import("../src/lib/db");
   const { makeSearchProject, makeCompetitor } = await import("./helpers/factories");
-  const job = makeSearchProject({ keyword: "dentist" });
-  saveJob({
+  const job = await makeSearchProject({ keyword: "dentist" });
+  await saveJob({
     ...job,
     businessUrl: "https://brightdental.example",
     businessProfile: {
@@ -202,8 +202,8 @@ async function recreateSetup() {
       analyzedAt: new Date().toISOString(),
     } as never,
   });
-  const c = makeCompetitor({ runId: job.id, pageName: "Rival Clinic" });
-  updateCompetitor(c.id, {
+  const c = await makeCompetitor({ runId: job.id, pageName: "Rival Clinic" });
+  await updateCompetitor(c.id, {
     pageAnalysis: {
       status: "completed",
       analyzedUrl: "https://rivalclinic.example/offer",
@@ -219,10 +219,10 @@ test("a replaced ICP is resolved to the current one for the same source and stag
   const { upsertIcp, getCompetitor, updateCompetitor } = await import("../src/lib/db");
   const { runManusRecreation } = await import("../src/lib/pipeline/manus/run");
   const { job, c } = await recreateSetup();
-  upsertIcp(icp("icp-old", job.id, "problem_aware"));
+  await upsertIcp(icp("icp-old", job.id, "problem_aware"));
   // Regenerating replaces the row under a new id.
-  upsertIcp(icp("icp-new", job.id, "problem_aware"));
-  updateCompetitor(c.id, {
+  await upsertIcp(icp("icp-new", job.id, "problem_aware"));
+  await updateCompetitor(c.id, {
     recreatedPage: {
       status: "completed",
       targetIcp: { icpId: "icp-old", stage: "problem_aware" },
@@ -252,14 +252,14 @@ test("a replaced ICP is resolved to the current one for the same source and stag
   }
   assert.match(brief, /The reader this page is for/);
   assert.match(brief, /Where did my money go/);
-  assert.equal(getCompetitor(c.id)?.recreatedPage?.targetIcp?.icpId, "icp-new");
+  assert.equal((await getCompetitor(c.id))?.recreatedPage?.targetIcp?.icpId, "icp-new");
 });
 
 test("a page whose ICP was removed throws before any Manus call", async () => {
-  const { updateCompetitor, getCompetitor } = await import("../src/lib/db");
+  const { updateCompetitor, getCompetitor, getRecreatedPage } = await import("../src/lib/db");
   const { runManusRecreation } = await import("../src/lib/pipeline/manus/run");
   const { c } = await recreateSetup();
-  updateCompetitor(c.id, {
+  await updateCompetitor(c.id, {
     recreatedPage: {
       status: "completed",
       html: "<p>old</p>",
@@ -278,6 +278,10 @@ test("a page whose ICP was removed throws before any Manus call", async () => {
     globalThis.fetch = realFetch;
   }
   assert.equal(calls, 0);
-  // The saved page is untouched and no task was created.
-  assert.equal(getCompetitor(c.id)?.recreatedPage?.html, "<p>old</p>");
+  // The saved page is untouched and no task was created. The competitor row
+  // keeps the light page; its HTML lives in the page store.
+  const stored = (await getCompetitor(c.id))?.recreatedPage;
+  assert.equal(stored?.hasPage, true);
+  assert.equal(stored?.targetIcp?.icpId, "gone");
+  assert.equal((await getRecreatedPage(c.id))?.html, "<p>old</p>");
 });

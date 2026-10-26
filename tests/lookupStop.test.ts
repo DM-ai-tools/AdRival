@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { useTempStore } from "./helpers/store";
 
-const store = useTempStore("lookup-stop");
+const store = await useTempStore("lookup-stop");
 after(() => store.cleanup());
 
 test("stopLookupJob blocks further pipeline saves (durable stopRequested)", async () => {
@@ -16,7 +16,7 @@ test("stopLookupJob blocks further pipeline saves (durable stopRequested)", asyn
   const id = `lookup-stop-${Date.now()}`;
   const now = new Date().toISOString();
   assert.equal(
-    saveLookupJob({
+    await saveLookupJob({
       id,
       queryName: "Echelonn",
       platform: "facebook",
@@ -36,15 +36,15 @@ test("stopLookupJob blocks further pipeline saves (durable stopRequested)", asyn
     true,
   );
 
-  const stopped = stopLookupJob(id, "Stopped by user");
+  const stopped = await stopLookupJob(id, "Stopped by user");
   assert.ok(stopped);
   assert.equal(stopped.status, "partial");
   assert.equal(stopped.progress.stopRequested, true);
   assert.equal(stopped.progress.message, "Stopped by user");
-  assert.equal(isLookupJobSuppressed(id), true);
+  assert.equal(await isLookupJobSuppressed(id), true);
 
   // Simulate a late pipeline progress write after Stop (same race as live runs).
-  const revived = saveLookupJob({
+  const revived = await saveLookupJob({
     id,
     queryName: "Echelonn",
     platform: "facebook",
@@ -63,7 +63,7 @@ test("stopLookupJob blocks further pipeline saves (durable stopRequested)", asyn
   });
   assert.equal(revived, false);
 
-  const persisted = getLookupJob(id);
+  const persisted = await getLookupJob(id);
   assert.ok(persisted);
   assert.equal(persisted.status, "partial");
   assert.equal(persisted.progress.stopRequested, true);
@@ -77,7 +77,7 @@ test("isLookupJobSuppressed reads stopRequested from the store", async () => {
 
   const id = `lookup-stop-durable-${Date.now()}`;
   const now = new Date().toISOString();
-  saveLookupJob({
+  await saveLookupJob({
     id,
     queryName: "Brand",
     platform: "facebook",
@@ -94,10 +94,10 @@ test("isLookupJobSuppressed reads stopRequested from the store", async () => {
     createdAt: now,
     updatedAt: now,
   });
-  stopLookupJob(id);
+  await stopLookupJob(id);
 
   // Even if the in-memory tombstone were missing, the durable flag must still halt.
-  const job = getLookupJob(id);
+  const job = await getLookupJob(id);
   assert.equal(job?.progress.stopRequested, true);
-  assert.equal(isLookupJobSuppressed(id), true);
+  assert.equal(await isLookupJobSuppressed(id), true);
 });
