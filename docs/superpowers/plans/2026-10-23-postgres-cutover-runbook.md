@@ -304,10 +304,24 @@ These tests check that credits and run locks hold up under real parallel
 connections. They create and drop their own temporary schemas in the
 scratch database. They skip themselves if the variable is missing.
 
+Use the scratch project's **session pooler** string (port **5432**), never the
+port-6543 one: the tests set a per-connection `search_path`, which the
+transaction pooler does not keep. Run this in the repo folder, with your real
+string in place of the placeholder (one line):
+
+Git Bash:
 ```sh
-DATABASE_TEST_URL="$SCRATCH_SESSION" npx tsx --test --test-timeout=300000 tests/dataCreditsStaging.test.ts tests/dataRunsStaging.test.ts tests/backupStaging.test.ts
+DATABASE_TEST_URL="postgresql://postgres.<ref>:<password>@<host>.pooler.supabase.com:5432/postgres" npx tsx --test --test-timeout=300000 tests/dataCreditsStaging.test.ts tests/dataRunsStaging.test.ts tests/backupStaging.test.ts
 ```
-(Git Bash. Verified names: those three files exist in `tests/`.)
+
+PowerShell:
+```powershell
+$env:DATABASE_TEST_URL = "postgresql://postgres.<ref>:<password>@<host>.pooler.supabase.com:5432/postgres"
+npx tsx --test --test-timeout=300000 tests/dataCreditsStaging.test.ts tests/dataRunsStaging.test.ts tests/backupStaging.test.ts
+Remove-Item Env:DATABASE_TEST_URL
+```
+(Verified names: those three files exist in `tests/`. A password with special
+characters such as `@` or `/` must be URL-encoded, for example `@` as `%40`.)
 
 Expect: all tests pass, none "skipped". Note the total time. Each
 staging test is bounded to 120 s by its own option, and every wait for a
