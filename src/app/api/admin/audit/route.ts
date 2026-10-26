@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getJob, getLookupJob, getProjectSpace, getUserById } from "@/lib/db";
+import { getJob, getLookupJob, getProjectSpacesByIds, getUsersByIds } from "@/lib/db";
 import { adminScope, errorResponse, requireAdmin, scopedUserIds } from "@/lib/authz";
 import { queryAudit } from "@/lib/accounting/records";
 import {
@@ -16,11 +16,25 @@ function csvCell(value: unknown): string {
   return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
-function projectTitle(kind?: string | null, id?: string | null): string | null {
+async function projectTitle(kind?: string | null, id?: string | null): Promise<string | null> {
   if (!kind || !id) return null;
-  if (kind === "search") return getJob(id)?.keyword ?? id;
-  if (kind === "lookup") return getLookupJob(id)?.queryName ?? id;
+  if (kind === "search") return (await getJob(id))?.keyword ?? id;
+  if (kind === "lookup") return (await getLookupJob(id))?.queryName ?? id;
   return id;
+}
+
+/** Each distinct run title once (an audit page repeats the same runs). */
+async function projectTitles(
+  entries: Array<{ projectKind?: string | null; projectId?: string | null }>,
+): Promise<Map<string, string | null>> {
+  const keys = [...new Set(entries.map((e) => `${e.projectKind ?? ""}:${e.projectId ?? ""}`))];
+  const titles = await Promise.all(
+    keys.map(async (key) => {
+      const [kind, ...rest] = key.split(":");
+      return [key, await projectTitle(kind || null, rest.join(":") || null)] as const;
+    }),
+  );
+  return new Map(titles);
 }
 
 /**
@@ -36,7 +50,7 @@ export async function GET(request: Request) {
     const p = url.searchParams;
     const limit = Math.min(Math.max(Number(p.get("limit")) || 200, 1), 2000);
     const toDate = p.get("to");
-    const rows = queryAudit({
+    const rows = await queryAudit({
       actorUserId: p.get("actor") || undefined,
       targetUserId: p.get("target") || undefined,
       actionPrefix: p.get("area") || undefined,
@@ -45,25 +59,31 @@ export async function GET(request: Request) {
       // An end date includes that whole day.
       to: toDate ? (toDate.length === 10 ? `${toDate}T23:59:59.999Z` : toDate) : undefined,
       limit,
-      userIds: scopedUserIds(adminScope(admin)),
+      userIds: await scopedUserIds(adminScope(admin)),
     });
 
+    const users = await getUsersByIds(rows.flatMap((e) => [e.targetUserId, e.actorUserId]));
+    const spaceIdOf = (e: (typeof rows)[number]) =>
+      typeof e.details?.spaceId === "string" ? e.details.spaceId : null;
+    const spaces = await getProjectSpacesByIds(rows.map(spaceIdOf));
+    const titles = await projectTitles(rows);
+
     const view = rows.map((e) => {
-      const target = e.targetUserId ? getUserById(e.targetUserId) : null;
-      const spaceId = typeof e.details?.spaceId === "string" ? e.details.spaceId : null;
+      const target = e.targetUserId ? users.get(e.targetUserId) ?? null : null;
+      const spaceId = spaceIdOf(e);
       return {
         id: e.id,
         createdAt: e.createdAt,
         action: e.action,
         actionLabel: auditActionLabel(e.action),
         actorUserId: e.actorUserId,
-        actor: e.actorUsername ?? (e.actorUserId ? getUserById(e.actorUserId)?.username : null) ?? "system",
+        actor: e.actorUsername ?? (e.actorUserId ? users.get(e.actorUserId)?.username : null) ?? "system",
         targetUserId: e.targetUserId ?? null,
         target: target ? target.username : null,
-        project: projectTitle(e.projectKind, e.projectId),
+        project: titles.get(`${e.projectKind ?? ""}:${e.projectId ?? ""}`) ?? null,
         projectKind: e.projectKind ?? null,
         projectId: e.projectId ?? null,
-        space: spaceId ? getProjectSpace(spaceId)?.clientName ?? null : null,
+        space: spaceId ? spaces.get(spaceId)?.clientName ?? null : null,
         details: auditDetailsText(e),
       };
     });

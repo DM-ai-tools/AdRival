@@ -41,15 +41,15 @@ export async function POST(request: Request) {
 
     const projectKind = parseKind(body.projectKind);
     const projectId = String(body.projectId ?? "");
-    const project = getProject(projectKind, projectId);
+    const project = await getProject(projectKind, projectId);
     const scope = adminScope(admin);
-    if (!project || !ownerInScope(scope, project.ownerUserId)) {
+    if (!project || !(await ownerInScope(scope, project.ownerUserId))) {
       throw new HttpError(404, "Project not found", "not_found");
     }
 
     if (body.archived !== undefined) {
-      setProjectArchived(projectKind, projectId, Boolean(body.archived));
-      recordAudit({
+      await setProjectArchived(projectKind, projectId, Boolean(body.archived));
+      await recordAudit({
         actorUserId: admin.id,
         actorUsername: admin.username,
         action: body.archived
@@ -66,14 +66,14 @@ export async function POST(request: Request) {
         throw new HttpError(400, "Choose a new owner in your organisation");
       }
       if (nextOwnerId !== null) {
-        const owner = getUserById(String(nextOwnerId));
+        const owner = await getUserById(String(nextOwnerId));
         if (!owner || owner.status !== "active" || !userInScope(scope, owner)) {
           throw new HttpError(400, "Owner must be an active user");
         }
       }
       const previousOwnerId = project.ownerUserId ?? null;
-      setProjectOwner(projectKind, projectId, nextOwnerId as string | null);
-      recordAudit({
+      await setProjectOwner(projectKind, projectId, nextOwnerId as string | null);
+      await recordAudit({
         actorUserId: admin.id,
         actorUsername: admin.username,
         action: previousOwnerId
@@ -88,7 +88,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       ok: true,
-      project: getProject(projectKind, projectId),
+      project: await getProject(projectKind, projectId),
     });
   } catch (err) {
     return errorResponse(err, { audience: "admin" });

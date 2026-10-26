@@ -50,7 +50,7 @@ export async function GET(req: NextRequest) {
   try {
     return NextResponse.json({
       ok: true,
-      stats: getStoreStats(),
+      stats: await getStoreStats(),
       modes: ["replace", "merge"],
     });
   } catch (err) {
@@ -72,7 +72,7 @@ export async function POST(req: NextRequest) {
   const mode = modeParam === "merge" ? "merge" : "replace";
   // Runs whose owner can't be matched on this server go to this account.
   const ownerParam = req.nextUrl.searchParams.get("owner")?.trim() || "";
-  const fallbackOwner = ownerParam ? getUserByUsername(ownerParam) : null;
+  const fallbackOwner = ownerParam ? await getUserByUsername(ownerParam) : null;
   if (ownerParam && (!fallbackOwner || fallbackOwner.status === "deleted")) {
     return NextResponse.json({ error: `No account named "${ownerParam}" on this server` }, { status: 400 });
   }
@@ -93,8 +93,8 @@ export async function POST(req: NextRequest) {
 
   try {
     const options = { fallbackOwnerUserId: fallbackOwner?.id ?? null };
-    const result = mode === "merge" ? mergeStore(payload, options) : replaceStore(payload, options);
-    recordAudit({
+    const result = mode === "merge" ? await mergeStore(payload, options) : await replaceStore(payload, options);
+    await recordAudit({
       actorUserId: auth.actorUserId,
       actorUsername: auth.actorUsername,
       action: "admin.store.import",

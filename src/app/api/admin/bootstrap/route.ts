@@ -12,7 +12,7 @@ export const runtime = "nodejs";
 export async function GET() {
   return NextResponse.json({
     configured: isBootstrapConfigured(),
-    needsBootstrap: countActiveAdmins() === 0,
+    needsBootstrap: (await countActiveAdmins()) === 0,
   });
 }
 

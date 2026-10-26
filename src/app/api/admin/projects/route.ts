@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getUserById, listProjects } from "@/lib/db";
+import { getUsersByIds, listProjects } from "@/lib/db";
 import { adminScope, errorResponse, ownerInScope, requireAdmin } from "@/lib/authz";
 import { listMemberships } from "@/lib/accounting/records";
 import type { ProjectKind } from "@/lib/types";
@@ -18,15 +18,27 @@ export async function GET(request: Request) {
     const unassignedOnly = url.searchParams.get("unassigned") === "1";
     const ownerUserId = url.searchParams.get("ownerUserId") || undefined;
 
-    const projects = listProjects({ unassignedOnly, ownerUserId }).filter((p) =>
-      ownerInScope(scope, p.ownerUserId),
+    const listed = await listProjects({ unassignedOnly, ownerUserId });
+    // Each distinct owner checked once; the check must be awaited (a Promise is truthy).
+    const ownerKeys = [...new Set(listed.map((p) => p.ownerUserId ?? ""))];
+    const ownerAllowed = new Map(
+      await Promise.all(
+        ownerKeys.map(async (id) => [id, await ownerInScope(scope, id || null)] as const),
+      ),
     );
-    const memberships = listMemberships();
+    const projects = listed.filter((p) => ownerAllowed.get(p.ownerUserId ?? "") === true);
+    const memberships = await listMemberships();
+    const users = await getUsersByIds([
+      ...projects.map((p) => p.ownerUserId),
+      ...memberships.map((m) => m.userId),
+    ]);
+    const unassignedCount =
+      scope.kind === "platform" ? (await listProjects({ unassignedOnly: true })).length : 0;
 
     return NextResponse.json({
       projects: projects.map((project) => {
         const owner = project.ownerUserId
-          ? getUserById(project.ownerUserId)
+          ? users.get(project.ownerUserId) ?? null
           : null;
         const shares = memberships
           .filter(
@@ -35,7 +47,7 @@ export async function GET(request: Request) {
               m.projectId === project.id,
           )
           .map((m) => {
-            const user = getUserById(m.userId);
+            const user = users.get(m.userId);
             return {
               userId: m.userId,
               username: user?.username ?? null,
@@ -52,7 +64,7 @@ export async function GET(request: Request) {
         };
       }),
       // Unowned legacy runs are a platform matter.
-      unassignedCount: scope.kind === "platform" ? listProjects({ unassignedOnly: true }).length : 0,
+      unassignedCount,
     });
   } catch (err) {
     return errorResponse(err, { audience: "admin" });

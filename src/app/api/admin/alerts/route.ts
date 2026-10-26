@@ -18,9 +18,12 @@ export async function GET(request: Request) {
     const admin = await requireAdmin();
     const scope = adminScope(admin);
     const showAll = new URL(request.url).searchParams.get("all") === "1";
-    const lowCredit = listUsers()
-      .filter((user) => user.status === "active" && user.role !== "admin" && userInScope(scope, user))
-      .map((user) => ({ user, credits: getCreditSummary(user.id) }))
+    const candidates = (await listUsers()).filter(
+      (user) => user.status === "active" && user.role !== "admin" && userInScope(scope, user),
+    );
+    const lowCredit = (
+      await Promise.all(candidates.map(async (user) => ({ user, credits: await getCreditSummary(user.id) })))
+    )
       .filter((row) => row.credits.lowCredit)
       .map((row) => ({
         userId: row.user.id,
@@ -32,7 +35,7 @@ export async function GET(request: Request) {
       }));
 
     // Out-of-credit vendor accounts are the platform's to fix, not a client organisation's.
-    const all = scope.kind === "platform" ? listAdminAlerts() : [];
+    const all = scope.kind === "platform" ? await listAdminAlerts() : [];
     const open = all.filter((alert) => !alert.acknowledgedAt);
     const providerCredits = (showAll ? all : open).map((alert) => ({
       id: alert.id,
@@ -71,8 +74,8 @@ export async function POST(request: Request) {
     const body = (await request.json().catch(() => ({}))) as { alertIds?: unknown };
     const ids = Array.isArray(body.alertIds) ? body.alertIds.map(String).filter(Boolean) : [];
     if (!ids.length) throw new HttpError(400, "Choose at least one alert");
-    const dismissed = acknowledgeAdminAlerts(ids, admin.id);
-    recordAudit({
+    const dismissed = await acknowledgeAdminAlerts(ids, admin.id);
+    await recordAudit({
       actorUserId: admin.id,
       actorUsername: admin.username,
       action: "admin.alert.acknowledge",

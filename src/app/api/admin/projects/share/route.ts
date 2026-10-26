@@ -40,8 +40,8 @@ export async function POST(request: Request) {
     const userId = String(body.userId ?? "");
     const role = body.role === "editor" ? "editor" : "viewer";
 
-    const project = getProject(projectKind, projectId);
-    if (!project || !ownerInScope(adminScope(admin), project.ownerUserId)) {
+    const project = await getProject(projectKind, projectId);
+    if (!project || !(await ownerInScope(adminScope(admin), project.ownerUserId))) {
       throw new HttpError(404, "Project not found", "not_found");
     }
     if (!project.ownerUserId) {
@@ -52,7 +52,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const recipient = getUserById(userId);
+    const recipient = await getUserById(userId);
     if (!recipient || recipient.status !== "active" || !userInScope(adminScope(admin), recipient)) {
       throw new HttpError(400, "Recipient must be an active user");
     }
@@ -60,14 +60,14 @@ export async function POST(request: Request) {
       throw new HttpError(409, "That user already owns this project");
     }
 
-    upsertMembership({
+    await upsertMembership({
       projectKind,
       projectId,
       userId,
       role,
       grantedByUserId: admin.id,
     });
-    recordAudit({
+    await recordAudit({
       actorUserId: admin.id,
       actorUsername: admin.username,
       action: "admin.project.share_grant",
@@ -91,14 +91,14 @@ export async function DELETE(request: Request) {
     const projectKind = parseKind(url.searchParams.get("projectKind"));
     const projectId = url.searchParams.get("projectId") ?? "";
     const userId = url.searchParams.get("userId") ?? "";
-    if (!ownerInScope(adminScope(admin), getProject(projectKind, projectId)?.ownerUserId)) {
+    if (!(await ownerInScope(adminScope(admin), (await getProject(projectKind, projectId))?.ownerUserId))) {
       throw new HttpError(404, "Share not found", "not_found");
     }
 
-    const removed = removeMembership(projectKind, projectId, userId);
+    const removed = await removeMembership(projectKind, projectId, userId);
     if (!removed) throw new HttpError(404, "Share not found", "not_found");
 
-    recordAudit({
+    await recordAudit({
       actorUserId: admin.id,
       actorUsername: admin.username,
       action: "admin.project.share_revoke",

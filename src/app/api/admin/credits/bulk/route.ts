@@ -37,7 +37,7 @@ export async function POST(request: Request) {
     const updated: Array<{ userId: string; availableSubunits: number }> = [];
     const skipped: Array<{ userId: string; reason: string }> = [];
     for (const userId of ids) {
-      const user = getUserById(userId);
+      const user = await getUserById(userId);
       if (!user || !userInScope(adminScope(admin), user)) {
         skipped.push({ userId, reason: "not found" });
         continue;
@@ -46,15 +46,15 @@ export async function POST(request: Request) {
         skipped.push({ userId, reason: "deleted" });
         continue;
       }
-      addCredits({ userId, actorUserId: admin.id, reason, amountSubunits: subunits });
-      recordAudit({
+      await addCredits({ userId, actorUserId: admin.id, reason, amountSubunits: subunits });
+      await recordAudit({
         actorUserId: admin.id,
         actorUsername: admin.username,
         action: "admin.credits.add",
         targetUserId: userId,
         details: { amountSubunits: subunits, reason, bulk: true },
       });
-      updated.push({ userId, availableSubunits: getCreditSummary(userId).availableSubunits });
+      updated.push({ userId, availableSubunits: (await getCreditSummary(userId)).availableSubunits });
     }
     return NextResponse.json({ ok: true, updated, skipped }, { headers: { "Cache-Control": "no-store" } });
   } catch (err) {

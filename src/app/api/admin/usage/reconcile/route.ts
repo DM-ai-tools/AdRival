@@ -12,7 +12,7 @@ export const runtime = "nodejs";
 export async function GET() {
   try {
     await requirePlatformAdmin();
-    return NextResponse.json({ pending: listPendingReconciliation() });
+    return NextResponse.json({ pending: await listPendingReconciliation() });
   } catch (err) {
     return errorResponse(err, { audience: "admin" });
   }
@@ -46,7 +46,7 @@ export async function POST(request: Request) {
 
     let charge: number | null;
     if (body.outcome === "billed" || body.outcome === "not_billed") {
-      const pending = listPendingReconciliation().find((r) => r.id === reservationId);
+      const pending = (await listPendingReconciliation()).find((r) => r.id === reservationId);
       if (!pending) {
         throw new HttpError(404, "No pending reservation with that id", "not_found");
       }
@@ -58,7 +58,7 @@ export async function POST(request: Request) {
       throw new HttpError(400, "Charge must be a non-negative number");
     }
 
-    const ok = resolveReconciliation({
+    const ok = await resolveReconciliation({
       reservationId,
       actorUserId: admin.id,
       chargeSubunits: charge,
@@ -72,7 +72,7 @@ export async function POST(request: Request) {
       );
     }
 
-    recordAudit({
+    await recordAudit({
       actorUserId: admin.id,
       actorUsername: admin.username,
       action: "admin.usage.reconcile",

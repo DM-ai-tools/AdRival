@@ -27,9 +27,12 @@ export const runtime = "nodejs";
 export async function GET() {
   try {
     await requirePlatformAdmin();
-    const users = listUsers({ includeDeleted: true });
-    const projects = listProjects();
-    const orgs = listOrganizations({ includeArchived: true }).map((org) => {
+    const [users, projects, organizations] = await Promise.all([
+      listUsers({ includeDeleted: true }),
+      listProjects(),
+      listOrganizations({ includeArchived: true }),
+    ]);
+    const orgs = organizations.map((org) => {
       const members = users.filter((u) => u.orgId === org.id && u.status !== "deleted");
       const ids = new Set(members.map((u) => u.id));
       const runs = projects.filter((p) => p.ownerUserId && ids.has(p.ownerUserId));
@@ -76,10 +79,10 @@ export async function POST(request: Request) {
     }
 
     if (body.action === "rename") {
-      const org = getOrganization(String(body.orgId ?? ""));
+      const org = await getOrganization(String(body.orgId ?? ""));
       if (!org) throw new HttpError(404, "Organisation not found", "not_found");
-      const renamed = renameOrganization(org.id, String(body.name ?? ""));
-      recordAudit({
+      const renamed = await renameOrganization(org.id, String(body.name ?? ""));
+      await recordAudit({
         actorUserId: admin.id,
         actorUsername: admin.username,
         action: "admin.org.rename",
@@ -95,32 +98,42 @@ export async function POST(request: Request) {
     const displayErr = validateDisplayName(String(body.adminDisplayName ?? ""));
     if (displayErr) throw new HttpError(400, displayErr);
     const username = normalizeUsername(String(body.adminUsername ?? ""));
-    if (getUserByUsername(username)) throw new HttpError(409, "Username already taken");
+    if (await getUserByUsername(username)) throw new HttpError(409, "Username already taken");
 
     let org;
     try {
-      org = createOrganization({ name, createdByUserId: admin.id });
+      org = await createOrganization({ name, createdByUserId: admin.id });
     } catch (err) {
       throw new HttpError(409, err instanceof Error ? err.message : "Could not create the organisation");
     }
     const temporaryPassword = generateTemporaryPassword();
-    const user = createUser({
-      username,
-      displayName: String(body.adminDisplayName ?? "").trim(),
-      passwordHash: await hashPassword(temporaryPassword),
-      role: "admin",
-      status: "active",
-      mustChangePassword: true,
-      createdByUserId: admin.id,
-      orgId: org.id,
-    });
-    const settings = getAppSettings();
-    initializeUserCredits(user.id, {
+    const passwordHash = await hashPassword(temporaryPassword);
+    let user;
+    try {
+      user = await createUser({
+        username,
+        displayName: String(body.adminDisplayName ?? "").trim(),
+        passwordHash,
+        role: "admin",
+        status: "active",
+        mustChangePassword: true,
+        createdByUserId: admin.id,
+        orgId: org.id,
+      });
+    } catch (err) {
+      // Taken between the check above and the insert (checked again under the users lock).
+      if (err instanceof Error && err.message === "Username already taken") {
+        throw new HttpError(409, "Username already taken");
+      }
+      throw err;
+    }
+    const settings = await getAppSettings();
+    await initializeUserCredits(user.id, {
       allowanceSubunits: settings.defaultAllowanceSubunits,
       resetCadence: settings.defaultResetCadence,
       reason: `Initial allowance set by ${admin.username}`,
     });
-    recordAudit({
+    await recordAudit({
       actorUserId: admin.id,
       actorUsername: admin.username,
       action: "admin.org.create",

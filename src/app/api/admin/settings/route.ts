@@ -28,12 +28,17 @@ export const runtime = "nodejs";
 export async function GET() {
   try {
     await requirePlatformAdmin();
+    const [settings, conversionRuleSets, activeRuleSet] = await Promise.all([
+      getAppSettings(),
+      listConversionRuleSets(),
+      getActiveConversionRuleSet(),
+    ]);
     return NextResponse.json({
-      settings: getAppSettings(),
-      conversionRuleSets: listConversionRuleSets(),
+      settings,
+      conversionRuleSets,
       // The version new charges really use (falls back to the newest when the
       // setting names a version that does not exist).
-      effectiveConversionRuleVersion: getActiveConversionRuleSet().version,
+      effectiveConversionRuleVersion: activeRuleSet.version,
       providers: PROVIDER_IDS,
       // Credentials stay server-side: only whether each key is present.
       providerKeyConfigured: Object.fromEntries(
@@ -117,8 +122,8 @@ export async function PUT(request: Request) {
         .filter(Boolean);
     }
 
-    const settings = updateAppSettings(patch, admin.id);
-    recordAudit({
+    const settings = await updateAppSettings(patch, admin.id);
+    await recordAudit({
       actorUserId: admin.id,
       actorUsername: admin.username,
       action: "admin.settings.update",
@@ -169,13 +174,13 @@ export async function POST(request: Request) {
       throw new HttpError(400, `Conversion rules not published: ${problems.slice(0, 5).join(" ")}`);
     }
 
-    const created = publishConversionRuleSet({
+    const created = await publishConversionRuleSet({
       rates: body.rates as never,
       perCallReservationCeiling: body.perCallReservationCeiling,
       note: String(body.note ?? "").trim() || null,
       actorUserId: admin.id,
     });
-    recordAudit({
+    await recordAudit({
       actorUserId: admin.id,
       actorUsername: admin.username,
       action: "admin.conversion_rules.publish",
