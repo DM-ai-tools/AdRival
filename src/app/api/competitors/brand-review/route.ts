@@ -94,13 +94,15 @@ export async function POST(request: Request) {
           { status: precheck.reason === "suspended" ? 403 : 402 },
         );
       }
-      // Already running in this app: follow it. A saved "brand_review" stage
-      // with nothing running was interrupted by a restart and starts again.
-      const competitorCount = (await getCompetitorsByRun(runId)).length;
-      if (job.progress.stage === "brand_review" && isBrandReviewRunning(runId)) {
+      // Already running in this app (a batch, or another request starting
+      // one): follow it. The in-process mark decides, not the saved stage: a
+      // request that read the run before the other one saved its stage would
+      // otherwise start a second paid batch. A saved "brand_review" stage with
+      // nothing marked was interrupted by a restart and starts again.
+      if (isBrandReviewRunning(runId)) {
         return NextResponse.json({ ok: true, mode: "batch", runId, started: true, job });
       }
-      // Checked and marked with no await in between, so two clicks cannot
+      // Checked and marked with no await in between, so two requests cannot
       // both start a batch.
       markBrandReviewRunning(runId);
       try {
@@ -108,6 +110,7 @@ export async function POST(request: Request) {
         // in the background and the panel follows it through the status poll.
         // The stage is set before replying so the first poll already sees it.
         // Like runBrandReviewForJob, a new batch clears an earlier Stop.
+        const competitorCount = (await getCompetitorsByRun(runId)).length;
         await clearSearchJobSuppression(runId);
         job.progress = {
           ...job.progress,

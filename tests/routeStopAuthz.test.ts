@@ -9,7 +9,7 @@ import * as audit from "../src/lib/data/audit";
 import * as runs from "../src/lib/data/runs";
 import * as spaces from "../src/lib/data/spaces";
 import { initializeUserCredits } from "../src/lib/data/accountingService";
-import type { AppUser, CompetitorRecord, RecreatedPageLight, SearchJob } from "../src/lib/types";
+import type { AppUser, CompetitorRecord, LookupJob, RecreatedPageLight, SearchJob } from "../src/lib/types";
 import { asUser, jsonRequest, readJson } from "./helpers/routeRequest";
 import { createPgliteClient, type PgliteTestClient } from "./helpers/testDb";
 
@@ -94,6 +94,38 @@ function runningJob(owner: AppUser): SearchJob {
   const job = searchJob(owner, { status: "running" });
   job.progress = { ...job.progress, stage: "searching_ads", message: "Searching" };
   return job;
+}
+
+/** A lookup that is still fetching ads. */
+function runningLookup(owner: AppUser): LookupJob {
+  seq += 1;
+  const at = new Date(Date.UTC(2026, 0, 2, 0, 0, seq)).toISOString();
+  return {
+    id: `lookup-${seq}-${Date.now()}`,
+    queryName: `Brand ${seq}`,
+    platform: "facebook",
+    status: "running",
+    progress: { stage: "fetching_ads", message: "Fetching", candidatesFound: 0, adsFetched: 0, pagesScanned: 0 },
+    candidates: [],
+    adIds: [],
+    ownerUserId: owner.id,
+    createdAt: at,
+    updatedAt: at,
+  };
+}
+
+async function saveLookup(job: LookupJob): Promise<LookupJob> {
+  assert.equal(await runs.saveLookupJob(job), true);
+  return job;
+}
+
+/** Many newer runs of `owner` in one transaction (more than a history page holds). */
+async function seedNewerRuns(owner: AppUser, count: number): Promise<void> {
+  await client.tx(async (t) => {
+    for (let i = 0; i < count; i += 1) {
+      await runs.upsertRun(t, "jobs", searchJob(owner, { createdAt: new Date(Date.UTC(2027, 0, 1, 0, 0, i)).toISOString() }));
+    }
+  });
 }
 
 async function saveRun(job: SearchJob): Promise<SearchJob> {
@@ -232,15 +264,51 @@ test("POST /api/search/stop with stopAll stops the caller's running searches onl
   assert.equal((await runs.getJob(theirs.id))?.status, "running");
 });
 
+test("POST /api/stop stops the owner's running lookup; a stranger is refused", async () => {
+  const owner = await makeUser("owner");
+  const stranger = await makeUser("stranger");
+  const lookup = await saveLookup(runningLookup(owner));
+
+  const refused = await post(stopRoute, stranger, "/stop", { lookupId: lookup.id });
+  assert.equal(refused.status, 404);
+  assert.equal((await runs.getLookupJob(lookup.id))?.status, "running");
+  assert.equal(await runs.isLookupJobSuppressed(lookup.id), false);
+
+  const res = await post(stopRoute, owner, "/stop", { lookupId: lookup.id });
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.lookupIds, [lookup.id]);
+  const stored = await runs.getLookupJob(lookup.id);
+  assert.equal(stored?.progress.stopRequested, true);
+  assert.equal(stored?.status, "failed", "a lookup with no ads yet ends failed");
+  assert.equal(await runs.saveLookupJob({ ...lookup, updatedAt: new Date().toISOString() }), false, "not resurrected");
+});
+
+test("POST /api/stop with all: true stops only the caller's own running lookups", async () => {
+  const owner = await makeUser("owner");
+  const other = await makeUser("other");
+  const mine = await saveLookup(runningLookup(owner));
+  const theirs = await saveLookup(runningLookup(other));
+
+  const res = await post(stopRoute, owner, "/stop", { all: true });
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.lookupIds, [mine.id]);
+  assert.equal((await runs.getLookupJob(mine.id))?.progress.stopRequested, true);
+  assert.equal((await runs.getLookupJob(theirs.id))?.status, "running");
+  assert.notEqual((await runs.getLookupJob(theirs.id))?.progress.stopRequested, true);
+});
+
 /* ── history ── */
 
-test("GET /api/history lists only the caller's runs, also behind many newer runs of others", async () => {
+test("GET /api/history lists only the caller's runs, also behind more newer runs of others than a page holds", async () => {
   const owner = await makeUser("owner");
   const other = await makeUser("other");
   const shared = await makeUser("shared");
   const oldest = await saveRun(searchJob(owner, { createdAt: "2020-01-01T00:00:00.000Z" }));
   const recent = await saveRun(searchJob(owner));
-  for (let i = 0; i < 5; i += 1) await saveRun(searchJob(other));
+  // More than the old read windows (newest 500 runs of everyone for the
+  // history list, 150 for the unified one): reading those and then filtering
+  // by visibility lost the caller's older runs.
+  await seedNewerRuns(other, 510);
   const sharedRun = await saveRun(searchJob(shared));
   await audit.upsertMembership({
     projectKind: "search",

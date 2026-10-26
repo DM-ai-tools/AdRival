@@ -327,7 +327,9 @@ export async function POST(request: Request) {
       if (!change && !screenshots.length) {
         return NextResponse.json({ error: "Describe the changes you want." }, { status: 400 });
       }
-      if (!existing.recreatedPage?.hasPage || !(await pageContent(competitorId))?.html) {
+      // The stored-content marker is enough here; editManusRecreation reads the
+      // content itself (and rebuilds the page if it has no HTML after all).
+      if (!existing.recreatedPage?.hasPage) {
         return NextResponse.json({ error: "There is no finished page to change yet. Create the page first." }, { status: 400 });
       }
       return startBuild(competitorId, () =>
