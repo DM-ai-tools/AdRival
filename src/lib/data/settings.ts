@@ -1,6 +1,7 @@
 import type { AdminAlert, AppSettings } from "../types";
 import { getDb, withTx, type Queryable } from "./client";
 import { defaultAppSettings } from "./legacyStore";
+import { isoOrNull } from "./runs";
 
 /* App settings (one row) and admin alerts, ported from db.ts. */
 
@@ -93,11 +94,7 @@ export async function recordProviderCreditAlert(input: {
       runId: input.runId,
       createdAt: new Date().toISOString(),
     };
-    await tx.query(
-      `insert into admin_alerts (id, created_at, data) values ($1, $2::timestamptz, $3::jsonb)
-       on conflict (id) do update set created_at = excluded.created_at, data = excluded.data`,
-      [alert.id, alert.createdAt, JSON.stringify(alert)],
-    );
+    await upsertAdminAlertRow(tx, alert);
     // Keep the newest MAX_ADMIN_ALERTS, as db.ts did.
     await tx.query(
       `delete from admin_alerts
@@ -105,6 +102,15 @@ export async function recordProviderCreditAlert(input: {
       [MAX_ADMIN_ALERTS],
     );
   });
+}
+
+/** Inserts or replaces one alert; created_at is the alert's createdAt (the dedupe window reads it). */
+export async function upsertAdminAlertRow(tx: Queryable, alert: AdminAlert): Promise<void> {
+  await tx.query(
+    `insert into admin_alerts (id, created_at, data) values ($1, coalesce($2::timestamptz, now()), $3::jsonb)
+     on conflict (id) do update set created_at = excluded.created_at, data = excluded.data`,
+    [alert.id, isoOrNull(alert.createdAt), JSON.stringify(alert)],
+  );
 }
 
 export async function listAdminAlerts(): Promise<AdminAlert[]> {

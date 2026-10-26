@@ -144,6 +144,15 @@ export function setClientForTests(c: TestClient | null): void {
   testClient = c;
 }
 
+/**
+ * Points getDb/withTx at a given client, or back at the pool with null. The
+ * store import/verify scripts use it to run every repository on their own
+ * direct (session) connection. Same effect as setClientForTests.
+ */
+export function setClient(c: TestClient | null): void {
+  testClient = c;
+}
+
 /** Ends the pool (if one was built). The next getDb() builds a fresh one. */
 export async function closeDb(): Promise<void> {
   const current = pool;

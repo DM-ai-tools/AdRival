@@ -1,5 +1,5 @@
 import type { LoginAttemptRecord } from "../types";
-import { getDb, withTx } from "./client";
+import { getDb, withTx, type Queryable } from "./client";
 import { isoOrNull } from "./runs";
 
 /*
@@ -32,14 +32,19 @@ export async function changeLoginAttempt(
       [key],
     );
     const next = change(rows[0]?.data ?? null);
-    await tx.query(
-      `insert into login_attempts (id, created_at, data)
-       values ($1, coalesce($2::timestamptz, now()), $3::jsonb)
-       on conflict (id) do update set created_at = excluded.created_at, data = excluded.data`,
-      [key, isoOrNull(next.firstAttemptAt), JSON.stringify(next)],
-    );
+    await upsertLoginAttemptRow(tx, key, next);
     return next;
   });
+}
+
+/** Inserts or replaces one counter row under `key` (also used by the store import). */
+export async function upsertLoginAttemptRow(tx: Queryable, key: string, record: LoginAttemptRecord): Promise<void> {
+  await tx.query(
+    `insert into login_attempts (id, created_at, data)
+     values ($1, coalesce($2::timestamptz, now()), $3::jsonb)
+     on conflict (id) do update set created_at = excluded.created_at, data = excluded.data`,
+    [key, isoOrNull(record.firstAttemptAt), JSON.stringify(record)],
+  );
 }
 
 export async function deleteLoginAttempt(key: string): Promise<void> {

@@ -250,7 +250,7 @@ export async function setProjectArchived(kind: ProjectKind, id: string, archived
 /* ── spaces ── */
 
 /** Upserts a space; org_id is the owner's organisation at the time of the write. */
-async function saveSpace(tx: Queryable, space: ProjectSpace): Promise<void> {
+export async function saveSpace(tx: Queryable, space: ProjectSpace): Promise<void> {
   await tx.query(
     `insert into project_spaces (id, org_id, owner_user_id, archived_at, data)
      values ($1, (select org_id from users where id = $2), $2, $3::timestamptz, $4::jsonb)
@@ -499,13 +499,18 @@ export async function upsertSpaceMembership(input: {
           createdAt: now,
           updatedAt: now,
         };
-    await tx.query(
-      `insert into space_memberships (id, space_id, user_id, data) values ($1, $2, $3, $4::jsonb)
-       on conflict (id) do update set space_id = excluded.space_id, user_id = excluded.user_id, data = excluded.data`,
-      [record.id, record.spaceId, record.userId, JSON.stringify(record)],
-    );
+    await upsertSpaceMembershipRow(tx, record);
     return record;
   });
+}
+
+/** Inserts or replaces one space membership row (also used by the store import). */
+export async function upsertSpaceMembershipRow(tx: Queryable, record: SpaceMembership): Promise<void> {
+  await tx.query(
+    `insert into space_memberships (id, space_id, user_id, data) values ($1, $2, $3, $4::jsonb)
+     on conflict (id) do update set space_id = excluded.space_id, user_id = excluded.user_id, data = excluded.data`,
+    [record.id, record.spaceId, record.userId, JSON.stringify(record)],
+  );
 }
 
 export async function removeSpaceMembership(spaceId: string, userId: string): Promise<boolean> {

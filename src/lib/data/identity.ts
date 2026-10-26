@@ -27,7 +27,8 @@ async function lockOrganizations(tx: Queryable): Promise<void> {
 
 /* ── users ── */
 
-async function upsertUser(tx: Queryable, user: AppUser): Promise<void> {
+/** Inserts or replaces one user row (also used by the store import). */
+export async function upsertUser(tx: Queryable, user: AppUser): Promise<void> {
   await tx.query(
     `insert into users (id, username, org_id, role, status, data)
      values ($1, $2, $3, $4, $5, $6::jsonb)
@@ -230,7 +231,8 @@ export function toPublicUser(user: AppUser): AppUserPublic {
 
 /* ── organisations ── */
 
-async function upsertOrganization(tx: Queryable, org: Organization): Promise<void> {
+/** Inserts or replaces one organisation row (also used by the store import). */
+export async function upsertOrganization(tx: Queryable, org: Organization): Promise<void> {
   await tx.query(
     `insert into organizations (id, archived_at, data)
      values ($1, $2::timestamptz, $3::jsonb)

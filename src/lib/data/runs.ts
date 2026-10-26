@@ -907,6 +907,31 @@ export async function clearAllLookupHistory(): Promise<{ removedRuns: number; re
 export const INTERRUPTED_MESSAGE = "Interrupted by restart";
 
 /**
+ * A `running` run ended the way a stop ends it: status failed, progress stage
+ * failed with `message`, the offers phase failed when it was in offers
+ * analysis. Pure; used on restart (markInterruptedJobs) and by the store import.
+ */
+export function interruptedRun<T extends SearchJob | LookupJob>(data: T, message: string, now: string): T {
+  // `progress` can be missing or JSON null in old rows.
+  const prev: Partial<SearchJob["progress"] & LookupJob["progress"]> =
+    data.progress && typeof data.progress === "object" ? data.progress : {};
+  const inOffers = prev.stage === "analyzing_offers";
+  return {
+    ...data,
+    status: "failed",
+    offersReport: inOffers ? failedOffersReport(data.offersReport, message, now) : data.offersReport,
+    progress: {
+      ...prev,
+      stage: "failed",
+      message,
+      offersPhase: inOffers ? "failed" : prev.offersPhase,
+      offersCurrentName: null,
+    },
+    updatedAt: now,
+  } as T;
+}
+
+/**
  * On startup no pipeline of this (single) instance is running yet, so any job
  * or lookup still marked `running` was cut off: mark it failed, with its
  * progress ended the way a stop ends it (stage failed, offers phase failed when
@@ -923,24 +948,7 @@ export async function markInterruptedJobs(): Promise<number> {
         `select data from ${table} where status = 'running' for update`,
       );
       for (const { data } of rows) {
-        // `progress` can be missing or JSON null in old rows.
-        const prev: Partial<SearchJob["progress"] & LookupJob["progress"]> =
-          data.progress && typeof data.progress === "object" ? data.progress : {};
-        const inOffers = prev.stage === "analyzing_offers";
-        const next = {
-          ...data,
-          status: "failed",
-          offersReport: inOffers ? failedOffersReport(data.offersReport, INTERRUPTED_MESSAGE, now) : data.offersReport,
-          progress: {
-            ...prev,
-            stage: "failed",
-            message: INTERRUPTED_MESSAGE,
-            offersPhase: inOffers ? "failed" : prev.offersPhase,
-            offersCurrentName: null,
-          },
-          updatedAt: now,
-        } as SearchJob | LookupJob;
-        await upsertRun(tx, table, next);
+        await upsertRun(tx, table, interruptedRun(data, INTERRUPTED_MESSAGE, now));
         changed += 1;
       }
     }

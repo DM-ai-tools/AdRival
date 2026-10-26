@@ -40,7 +40,8 @@ export async function getActiveConversionRuleSet(): Promise<ConversionRuleSet> {
   return sets.find((r) => r.version === wanted) ?? sets[0] ?? seedConversionRuleSet();
 }
 
-async function insertRuleSet(tx: Queryable, set: ConversionRuleSet): Promise<void> {
+/** Inserts or replaces one rule set version (also used by the store import). */
+export async function insertRuleSet(tx: Queryable, set: ConversionRuleSet): Promise<void> {
   await tx.query(
     `insert into conversion_rule_sets (version, data) values ($1, $2::jsonb)
      on conflict (version) do update set data = excluded.data`,
@@ -169,18 +170,23 @@ export async function upsertMembership(input: {
           createdAt: now,
           updatedAt: now,
         };
-    await tx.query(
-      `insert into project_memberships (id, project_kind, project_id, user_id, data)
-       values ($1, $2, $3, $4, $5::jsonb)
-       on conflict (id) do update set
-         project_kind = excluded.project_kind,
-         project_id   = excluded.project_id,
-         user_id      = excluded.user_id,
-         data         = excluded.data`,
-      [record.id, record.projectKind, record.projectId, record.userId, JSON.stringify(record)],
-    );
+    await upsertMembershipRow(tx, record);
     return record;
   });
+}
+
+/** Inserts or replaces one membership row (also used by the store import). */
+export async function upsertMembershipRow(tx: Queryable, record: ProjectMembership): Promise<void> {
+  await tx.query(
+    `insert into project_memberships (id, project_kind, project_id, user_id, data)
+     values ($1, $2, $3, $4, $5::jsonb)
+     on conflict (id) do update set
+       project_kind = excluded.project_kind,
+       project_id   = excluded.project_id,
+       user_id      = excluded.user_id,
+       data         = excluded.data`,
+    [record.id, record.projectKind, record.projectId, record.userId, JSON.stringify(record)],
+  );
 }
 
 export async function removeMembership(projectKind: ProjectKind, projectId: string, userId: string): Promise<boolean> {

@@ -175,7 +175,8 @@ export async function selectLedger(q: Queryable, query: LedgerQuery = {}): Promi
 
 /* ── reservations ── */
 
-async function upsertReservation(tx: Queryable, reservation: CreditReservation): Promise<void> {
+/** Inserts or replaces one reservation row (also used by the store import). */
+export async function upsertReservation(tx: Queryable, reservation: CreditReservation): Promise<void> {
   await tx.query(
     `insert into credit_reservations (id, user_id, period_id, status, expires_at, data)
      values ($1, $2, $3, $4, $5::timestamptz, $6::jsonb)
