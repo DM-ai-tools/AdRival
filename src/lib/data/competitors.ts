@@ -13,7 +13,8 @@ import {
 /*
  * Competitors found by a search run, ported from db.ts. The row keeps the
  * record in `data` with a light recreatedPage (see recreatedPages.ts); the
- * page content is in recreated_pages and is never read here.
+ * page content is in recreated_pages and is read here only by
+ * updateCompetitorWith({ withContent: true }) (inside its write transaction).
  *
  * Every write takes lockRun(runId) first (see runs.ts), so it serializes with
  * the run's own saves, deletion and the bulk clears.

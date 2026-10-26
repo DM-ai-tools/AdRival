@@ -291,6 +291,7 @@ export async function runCompetitorLookup(
           }
         }
 
+        // Checked once per page of ads: the loop over its ads below does not wait on anything.
         if (await haltIfStopped(job)) return;
 
         pages += 1;
@@ -300,7 +301,6 @@ export async function runCompetitorLookup(
         cursor = extractCursor(response);
 
         for (const ad of ads) {
-          if (await haltIfStopped(job)) return;
           if (platform === "instagram" && !adRunsOnInstagram(ad)) continue;
           if (platform === "facebook" && !adRunsOnFacebook(ad)) continue;
           const adArchiveId = ad.ad_archive_id

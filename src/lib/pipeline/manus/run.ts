@@ -394,9 +394,14 @@ function beginRun(competitorId: string): AbortSignal {
   return controller.signal;
 }
 
+/** Ends a run; it runs in `finally`, so a failure recording credits is logged and never replaces the run's result. */
 async function endRun(competitorId: string, signal: AbortSignal): Promise<void> {
   if (runs.get(competitorId)?.signal === signal) runs.delete(competitorId);
-  await recordCredits(competitorId);
+  try {
+    await recordCredits(competitorId);
+  } catch (err) {
+    console.error(`[manus] could not record credits for competitor ${competitorId}`, err);
+  }
 }
 
 /** The agent's credits for this page's task go to the ledger (charged to the run's owner after a restart). */
@@ -570,6 +575,10 @@ export async function runManusRecreation(
   const targetIcp = resolved?.target ?? null;
   const icp = resolved ? { stage: resolved.record.stage, content: resolved.record } : null;
 
+  // The content as it was when this build was asked for (the light page above is from then too).
+  // Read before a running build is stopped: a failed read leaves that build alone.
+  const existingContent = await getRecreatedPage(competitorId);
+
   // A new build replaces a running one.
   const previous = competitor.recreatedPage;
   if (previous?.manus?.taskId && isManusRunActive(previous)) {
@@ -586,8 +595,6 @@ export async function runManusRecreation(
     userAssets: assets.map((a) => ({ name: a.name, caption: a.caption })),
   };
   const existing = competitor.recreatedPage;
-  // The content as it was when this build was asked for (the light page above is from then too).
-  const existingContent = await getRecreatedPage(competitorId);
   const now = new Date().toISOString();
   const base: RecreatedLandingPage = {
     createdAt: existing?.createdAt || now,
@@ -621,14 +628,14 @@ export async function runManusRecreation(
     manus: null,
     progress: progress("send", "Sending the brief to the design agent…", 2),
   };
-  // The new page replaces the old one whole (its source archive is not carried over).
   const { html: baseHtml, previousHtml: basePrevious, generatedImages: baseImages, ...baseLight } = base;
-  await updateCompetitorWith(competitorId, () => ({
-    recreatedPage: baseLight as RecreatedPageLight,
-    recreatedPageHeavy: { html: baseHtml ?? null, previousHtml: basePrevious, generatedImages: baseImages },
-  }));
 
   try {
+    // The new page replaces the old one whole (its source archive is not carried over).
+    await updateCompetitorWith(competitorId, () => ({
+      recreatedPage: baseLight as RecreatedPageLight,
+      recreatedPageHeavy: { html: baseHtml ?? null, previousHtml: basePrevious, generatedImages: baseImages },
+    }));
     const brief = buildManusBrief(input);
     const shots = options.screenshots || [];
     const taskMessage = `${buildManusTaskMessage(input)}${screenshotNote(shots)}`;
@@ -804,7 +811,7 @@ export async function resumeManusRecreation(competitorId: string): Promise<void>
     } finally {
       await endRun(competitorId, signal);
     }
-  })();
+  })().catch((err: unknown) => console.error(`[manus] resumed run for competitor ${competitorId} ended with an error`, err));
 }
 
 // ── Following the task ──────────────────────────────────────────────────

@@ -1485,7 +1485,9 @@ async function tryAcceptFromAds(args: {
       await updateCompetitor(competitor.id, { sampleAd: richer });
       break;
     }
-  })();
+  })().catch((err: unknown) =>
+    console.warn(`[googleSearch] could not save a richer sample ad for ${competitor.id}`, (err as Error)?.message || err),
+  );
 
   const locNote = competitor.locationLabel
     ? ` · ${competitor.locationLabel}`

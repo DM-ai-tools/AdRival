@@ -768,6 +768,12 @@ export async function updateLookupJob(id: string, patch: Partial<LookupJob>): Pr
  * suppressed. A null patch writes nothing and returns the stored lookup.
  * The updater must be synchronous. A pending throttled progress write is
  * dropped, as with any save.
+ *
+ * Limitation: the patch is not known when the call is made, so the progress
+ * throttle is settled as for a running lookup (status "running", no stage).
+ * A terminal status set by the updater does not clear the throttle entry the
+ * way updateLookupJob does; use it for progress patches, and finish a lookup
+ * with saveLookupJob or updateLookupJob.
  */
 export async function updateLookupJobWith(
   id: string,
