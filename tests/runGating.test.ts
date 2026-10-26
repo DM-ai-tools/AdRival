@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { after, describe } from "node:test";
 import { useTempStore } from "./helpers/store";
 
-const store = useTempStore("run-gating");
+const store = await useTempStore("run-gating");
 after(() => store.cleanup());
 
 const { makeUser, makeSearchProject } = await import("./helpers/factories");
@@ -65,7 +65,7 @@ function fakeProviderCall(spy: { calls: number }) {
 describe("hard enforcement before any provider is contacted", () => {
   test("a zero-credit user is rejected and no provider call is made", async () => {
     const user = await makeUser({ credits: 0 });
-    const project = makeSearchProject({ ownerUserId: user.id });
+    const project = await makeSearchProject({ ownerUserId: user.id });
     const spy = { calls: 0 };
 
     await assert.rejects(
@@ -93,17 +93,17 @@ describe("hard enforcement before any provider is contacted", () => {
     assert.equal(spy.calls, 0, "the provider was never contacted");
 
     // Nothing was recorded as spend, and the precheck agrees with the outcome.
-    assert.equal(getCreditSummary(user.id).consumedSubunits, 0);
-    const pre = precheckRun(user);
+    assert.equal((await getCreditSummary(user.id)).consumedSubunits, 0);
+    const pre = await precheckRun(user);
     assert.equal(pre.ok, false);
     assert.equal(pre.reason, "insufficient_credits");
   });
 
   test("a suspended user is rejected even with a positive balance", async () => {
     const user = await makeUser({ credits: 100 });
-    const project = makeSearchProject({ ownerUserId: user.id });
-    updateUser(user.id, { status: "suspended", bumpSessionEpoch: true });
-    const suspended = getUserById(user.id)!;
+    const project = await makeSearchProject({ ownerUserId: user.id });
+    await updateUser(user.id, { status: "suspended", bumpSessionEpoch: true });
+    const suspended = (await getUserById(user.id))!;
     const spy = { calls: 0 };
 
     await assert.rejects(
@@ -121,7 +121,7 @@ describe("hard enforcement before any provider is contacted", () => {
       SpendAuthorizationRevokedError,
     );
     assert.equal(spy.calls, 0);
-    assert.equal(precheckRun(suspended).reason, "suspended");
+    assert.equal((await precheckRun(suspended)).reason, "suspended");
   });
 
   test("an unmetered provider call is refused outright", async () => {
@@ -135,8 +135,8 @@ describe("hard enforcement before any provider is contacted", () => {
 
   test("a provider disabled by an admin is blocked before the call", async () => {
     const user = await makeUser({ credits: 100 });
-    const project = makeSearchProject({ ownerUserId: user.id });
-    updateAppSettings({ disabledProviders: ["sociavault"] }, null);
+    const project = await makeSearchProject({ ownerUserId: user.id });
+    await updateAppSettings({ disabledProviders: ["sociavault"] }, null);
     const spy = { calls: 0 };
 
     await assert.rejects(
@@ -154,13 +154,13 @@ describe("hard enforcement before any provider is contacted", () => {
       ProviderNotPermittedError,
     );
     assert.equal(spy.calls, 0);
-    updateAppSettings({ disabledProviders: [] }, null);
+    await updateAppSettings({ disabledProviders: [] }, null);
   });
 
   test("the concurrency limit is enforced on the server", async () => {
     const user = await makeUser({ credits: 500 });
-    const project = makeSearchProject({ ownerUserId: user.id });
-    updateAppSettings({ maxConcurrentRunsPerUser: 1 }, null);
+    const project = await makeSearchProject({ ownerUserId: user.id });
+    await updateAppSettings({ maxConcurrentRunsPerUser: 1 }, null);
 
     // Hold the first run open while the second one tries to start.
     let releaseFirst: () => void = () => {};
@@ -192,7 +192,7 @@ describe("hard enforcement before any provider is contacted", () => {
 
     releaseFirst();
     await firstDone;
-    updateAppSettings({ maxConcurrentRunsPerUser: 3 }, null);
+    await updateAppSettings({ maxConcurrentRunsPerUser: 3 }, null);
   });
 });
 
@@ -201,9 +201,9 @@ describe("who pays inside a shared project", () => {
     const owner = await makeUser({ credits: 100 });
     const editor = await makeUser({ credits: 100 });
     const admin = await makeUser({ role: "admin" });
-    const project = makeSearchProject({ ownerUserId: owner.id });
+    const project = await makeSearchProject({ ownerUserId: owner.id });
 
-    upsertMembership({
+    await upsertMembership({
       projectKind: "search",
       projectId: project.id,
       userId: editor.id,
@@ -211,7 +211,7 @@ describe("who pays inside a shared project", () => {
       grantedByUserId: admin.id,
     });
 
-    const access = resolveProjectAccess("search", project.id, editor, "run");
+    const access = await resolveProjectAccess("search", project.id, editor, "run");
     assert.equal(canRunInProject(access), true);
 
     const spy = { calls: 0 };
@@ -227,8 +227,8 @@ describe("who pays inside a shared project", () => {
     );
     assert.equal(spy.calls, 1);
 
-    const editorSummary = getCreditSummary(editor.id);
-    const ownerSummary = getCreditSummary(owner.id);
+    const editorSummary = await getCreditSummary(editor.id);
+    const ownerSummary = await getCreditSummary(owner.id);
     assert.ok(
       editorSummary.consumedSubunits > 0,
       "the editor who ran the task paid for it",
@@ -252,18 +252,18 @@ describe("who pays inside a shared project", () => {
     );
 
     // The call is attributed to the editor as both initiator and payer.
-    const { rows } = queryProviderCalls({ runId: `${project.id}-editor-run` });
+    const { rows } = await queryProviderCalls({ runId: `${project.id}-editor-run` });
     assert.equal(rows.length, 1);
     assert.equal(rows[0].chargedUserId, editor.id);
     assert.equal(rows[0].initiatedByUserId, editor.id);
     assert.equal(rows[0].projectId, project.id);
 
     // And the run summary the UI shows reports only the editor's own spend.
-    const report = reportRunCredits(editor.id, `${project.id}-editor-run`);
+    const report = await reportRunCredits(editor.id, `${project.id}-editor-run`);
     assert.ok(report.runCreditsCharged > 0);
     assert.equal(report.pendingCalls, 0);
     assert.equal(
-      reportRunCredits(owner.id, `${project.id}-editor-run`).runCreditsCharged,
+      (await reportRunCredits(owner.id, `${project.id}-editor-run`)).runCreditsCharged,
       0,
     );
   });
@@ -272,9 +272,9 @@ describe("who pays inside a shared project", () => {
     const owner = await makeUser({ credits: 100 });
     const viewer = await makeUser({ credits: 100 });
     const admin = await makeUser({ role: "admin" });
-    const project = makeSearchProject({ ownerUserId: owner.id });
+    const project = await makeSearchProject({ ownerUserId: owner.id });
 
-    upsertMembership({
+    await upsertMembership({
       projectKind: "search",
       projectId: project.id,
       userId: viewer.id,
@@ -283,24 +283,24 @@ describe("who pays inside a shared project", () => {
     });
 
     // The API resolves access before it ever reaches runBillable.
-    assert.throws(
+    await assert.rejects(
       () => resolveProjectAccess("search", project.id, viewer, "run"),
       /view-only/i,
     );
     assert.equal(
       canRunInProject(
-        resolveProjectAccess("search", project.id, viewer, "view"),
+        await resolveProjectAccess("search", project.id, viewer, "view"),
       ),
       false,
     );
-    assert.equal(getCreditSummary(viewer.id).consumedSubunits, 0);
+    assert.equal((await getCreditSummary(viewer.id)).consumedSubunits, 0);
   });
 });
 
 describe("authorization revoked mid-run", () => {
   test("suspending a user stops the next paid step of a running job", async () => {
     const user = await makeUser({ credits: 500 });
-    const project = makeSearchProject({ ownerUserId: user.id });
+    const project = await makeSearchProject({ ownerUserId: user.id });
     const spy = { calls: 0 };
 
     await assert.rejects(
@@ -317,7 +317,7 @@ describe("authorization revoked mid-run", () => {
             // First paid step succeeds …
             await fakeProviderCall(spy);
             // … then an admin suspends the account mid-run.
-            updateUser(user.id, { status: "suspended", bumpSessionEpoch: true });
+            await updateUser(user.id, { status: "suspended", bumpSessionEpoch: true });
             // The next paid step must not reach the provider.
             await fakeProviderCall(spy);
           },
@@ -329,13 +329,13 @@ describe("authorization revoked mid-run", () => {
 
     // The work already done is still charged — we do not hand back credits for
     // provider usage that actually happened.
-    const { rows } = queryProviderCalls({ runId: `${project.id}-revoked` });
+    const { rows } = await queryProviderCalls({ runId: `${project.id}-revoked` });
     const succeeded = rows.filter((r) => r.status === "succeeded");
     assert.equal(succeeded.length, 1);
     assert.ok(succeeded[0].creditsCharged > 0);
 
     // And the hold from the interrupted run is not left dangling.
-    assert.equal(getCreditSummary(user.id).reservedSubunits, 0);
+    assert.equal((await getCreditSummary(user.id)).reservedSubunits, 0);
   });
 });
 
@@ -373,7 +373,7 @@ describe("credit failures are never swallowed by a pipeline step", () => {
 describe("run reporting", () => {
   test("the post-run line reports this run's spend and the remaining balance", async () => {
     const user = await makeUser({ credits: 200 });
-    const project = makeSearchProject({ ownerUserId: user.id });
+    const project = await makeSearchProject({ ownerUserId: user.id });
     const runId = `${project.id}-report`;
 
     await runBillable(
@@ -390,8 +390,8 @@ describe("run reporting", () => {
       },
     );
 
-    const report = reportRunCredits(user.id, runId);
-    const summary = getCreditSummary(user.id);
+    const report = await reportRunCredits(user.id, runId);
+    const summary = await getCreditSummary(user.id);
 
     // "This run used X credits. You have Y credits available."
     assert.ok(report.runCreditsCharged > 0);

@@ -2,16 +2,16 @@ import assert from "node:assert/strict";
 import test, { after, describe } from "node:test";
 import { useTempStore } from "./helpers/store";
 
-const store = useTempStore("accounting");
+const store = await useTempStore("accounting");
 after(() => store.cleanup());
 
-// Imported after useTempStore so `db.ts` picks up ADRIVAL_DATA_DIR.
 const { makeUser, makeSearchProject } = await import("./helpers/factories");
 const {
   addCredits,
   availableSubunits,
   creditsForRun,
   getCreditSummary,
+  getReservation,
   listPendingReconciliation,
   listPeriods,
   recordAdjustment,
@@ -32,7 +32,33 @@ const { convertUsage, seedConversionRuleSet } = await import(
 const { extractSociavaultUsage, extractOpenAiUsage, extractAnthropicUsage } =
   await import("@/lib/accounting/meter");
 const { queryLedger } = await import("@/lib/accounting/records");
-const { readDb, transaction } = await import("@/lib/db");
+const { getDb, withTx } = await import("@/lib/data/client");
+
+async function providerCallsWithKey(key: string): Promise<Array<{ id: string; creditsCharged: number }>> {
+  const { rows } = await getDb().query<{ data: { id: string; creditsCharged: number } }>(
+    "select data from provider_calls where data->>'idempotencyKey' = $1",
+    [key],
+  );
+  return rows.map((r) => r.data);
+}
+
+async function providerCallById(id: string): Promise<{ id: string; creditsCharged: number } | undefined> {
+  const { rows } = await getDb().query<{ data: { id: string; creditsCharged: number } }>(
+    "select data from provider_calls where id = $1",
+    [id],
+  );
+  return rows[0]?.data;
+}
+
+/** Simulates a process that died without releasing: the hold's heartbeat expired a minute ago. */
+async function expireReservation(reservationId: string): Promise<void> {
+  const expiredAt = new Date(Date.now() - 60_000).toISOString();
+  const result = await getDb().query(
+    "update credit_reservations set expires_at = $2::timestamptz, data = data || jsonb_build_object('expiresAt', $2::text) where id = $1",
+    [reservationId, expiredAt],
+  );
+  assert.equal(result.rowCount, 1, "the reservation to expire exists");
+}
 
 function settleOnce(
   overrides: Partial<Parameters<typeof settleProviderCall>[0]> & {
@@ -199,20 +225,20 @@ describe("provider usage conversion", () => {
 describe("hard credit enforcement", () => {
   test("an admin is not blocked by a zero allowance", async () => {
     const admin = await makeUser({ role: "admin", credits: 0 });
-    const result = reserveCredits({
+    const result = await reserveCredits({
       userId: admin.id,
       amountSubunits: creditsToSubunits(25),
       operation: "test.admin-unlimited",
     });
     assert.equal(result.ok, true);
-    const summary = getCreditSummary(admin.id);
+    const summary = await getCreditSummary(admin.id);
     assert.equal(summary.unlimited, true);
     assert.equal(summary.lowCredit, false);
   });
 
   test("a zero-credit user cannot reserve anything", async () => {
     const user = await makeUser({ credits: 0 });
-    const result = reserveCredits({
+    const result = await reserveCredits({
       userId: user.id,
       amountSubunits: 1,
       operation: "test.reserve",
@@ -223,7 +249,7 @@ describe("hard credit enforcement", () => {
 
   test("a suspended user cannot reserve even with a balance", async () => {
     const user = await makeUser({ credits: 100, status: "suspended" });
-    const result = reserveCredits({
+    const result = await reserveCredits({
       userId: user.id,
       amountSubunits: creditsToSubunits(1),
       operation: "test.reserve",
@@ -239,19 +265,17 @@ describe("hard credit enforcement", () => {
     // Fired together; each reservation is one atomic read-modify-write.
     const results = await Promise.all(
       Array.from({ length: 5 }, () =>
-        Promise.resolve().then(() =>
-          reserveCredits({
-            userId: user.id,
-            amountSubunits: hold,
-            operation: "test.concurrent",
-          }),
-        ),
+        reserveCredits({
+          userId: user.id,
+          amountSubunits: hold,
+          operation: "test.concurrent",
+        }),
       ),
     );
 
     const granted = results.filter((r) => r.ok);
     assert.equal(granted.length, 2, "only 2 x 4 credits fit inside 10");
-    const summary = getCreditSummary(user.id);
+    const summary = await getCreditSummary(user.id);
     assert.equal(summary.reservedSubunits, hold * 2);
     assert.ok(
       summary.availableSubunits >= 0,
@@ -261,14 +285,14 @@ describe("hard credit enforcement", () => {
 
   test("available = allowance - consumed - reserved", async () => {
     const user = await makeUser({ credits: 10 });
-    const reservation = reserveCredits({
+    const reservation = await reserveCredits({
       userId: user.id,
       amountSubunits: creditsToSubunits(3),
       operation: "test.identity",
     });
     assert.ok(reservation.ok);
 
-    settleOnce({
+    await settleOnce({
       idempotencyKey: `identity-${user.id}`,
       chargedUserId: user.id,
       reservationId: reservation.ok ? reservation.reservation.id : null,
@@ -276,7 +300,7 @@ describe("hard credit enforcement", () => {
       releaseSubunits: creditsToSubunits(1),
     });
 
-    const s = getCreditSummary(user.id);
+    const s = await getCreditSummary(user.id);
     assert.equal(
       s.availableSubunits,
       s.allowanceSubunits - s.consumedSubunits - s.reservedSubunits,
@@ -289,23 +313,23 @@ describe("settlement", () => {
     const user = await makeUser({ credits: 10 });
     const key = `dupe-${user.id}`;
 
-    const first = settleOnce({ idempotencyKey: key, chargedUserId: user.id });
-    const consumedAfterFirst = getCreditSummary(user.id).consumedSubunits;
+    const first = await settleOnce({ idempotencyKey: key, chargedUserId: user.id });
+    const consumedAfterFirst = (await getCreditSummary(user.id)).consumedSubunits;
 
-    const second = settleOnce({ idempotencyKey: key, chargedUserId: user.id });
-    const third = settleOnce({ idempotencyKey: key, chargedUserId: user.id });
+    const second = await settleOnce({ idempotencyKey: key, chargedUserId: user.id });
+    const third = await settleOnce({ idempotencyKey: key, chargedUserId: user.id });
 
     assert.equal(first.duplicate, false);
     assert.equal(second.duplicate, true);
     assert.equal(third.duplicate, true);
     assert.equal(second.call.id, first.call.id);
     assert.equal(
-      getCreditSummary(user.id).consumedSubunits,
+      (await getCreditSummary(user.id)).consumedSubunits,
       consumedAfterFirst,
       "repeat settlements leave the balance untouched",
     );
     assert.equal(
-      readDb().providerCalls!.filter((c) => c.idempotencyKey === key).length,
+      (await providerCallsWithKey(key)).length,
       1,
       "only one provider-call row exists for the key",
     );
@@ -313,9 +337,9 @@ describe("settlement", () => {
 
   test("a call that never reached the provider is recorded but not charged", async () => {
     const user = await makeUser({ credits: 10 });
-    const before = getCreditSummary(user.id).consumedSubunits;
+    const before = (await getCreditSummary(user.id)).consumedSubunits;
 
-    const result = settleOnce({
+    const result = await settleOnce({
       idempotencyKey: `not-billable-${user.id}`,
       chargedUserId: user.id,
       status: "not_billable",
@@ -325,19 +349,19 @@ describe("settlement", () => {
 
     assert.equal(result.call.status, "not_billable");
     assert.equal(result.call.creditsCharged, 0);
-    assert.equal(getCreditSummary(user.id).consumedSubunits, before);
+    assert.equal((await getCreditSummary(user.id)).consumedSubunits, before);
     // Still auditable: every call produces a row.
     assert.ok(
-      readDb().providerCalls!.some((c) => c.id === result.call.id),
+      Boolean(await providerCallById(result.call.id)),
       "a non-billable call is still recorded",
     );
   });
 
   test("a failed call that did reach the provider is still charged", async () => {
     const user = await makeUser({ credits: 10 });
-    const before = getCreditSummary(user.id).consumedSubunits;
+    const before = (await getCreditSummary(user.id)).consumedSubunits;
 
-    settleOnce({
+    await settleOnce({
       idempotencyKey: `failed-billed-${user.id}`,
       chargedUserId: user.id,
       status: "failed",
@@ -346,7 +370,7 @@ describe("settlement", () => {
     });
 
     assert.equal(
-      getCreditSummary(user.id).consumedSubunits,
+      (await getCreditSummary(user.id)).consumedSubunits,
       before + creditsToSubunits(0.5),
       "billable work completed before the failure is charged",
     );
@@ -354,11 +378,11 @@ describe("settlement", () => {
 
   test("every settlement appends a ledger entry", async () => {
     const user = await makeUser({ credits: 10 });
-    settleOnce({
+    await settleOnce({
       idempotencyKey: `ledger-${user.id}`,
       chargedUserId: user.id,
     });
-    const entries = queryLedger({ userId: user.id });
+    const entries = await queryLedger({ userId: user.id });
     const charge = entries.find((e) => e.type === "charge");
     assert.ok(charge, "a charge entry exists for the settled call");
     assert.equal(charge?.provider, "sociavault");
@@ -371,14 +395,14 @@ describe("settlement", () => {
 
   test("charging more than was held is reported as an overage", async () => {
     const user = await makeUser({ credits: 10 });
-    const reservation = reserveCredits({
+    const reservation = await reserveCredits({
       userId: user.id,
       amountSubunits: creditsToSubunits(1),
       operation: "test.overage",
     });
     assert.ok(reservation.ok);
 
-    const result = settleOnce({
+    const result = await settleOnce({
       idempotencyKey: `overage-${user.id}`,
       chargedUserId: user.id,
       reservationId: reservation.ok ? reservation.reservation.id : null,
@@ -396,7 +420,7 @@ describe("settlement", () => {
 describe("timeouts and reconciliation", () => {
   test("an unknown billing outcome keeps the hold instead of assuming free", async () => {
     const user = await makeUser({ credits: 10 });
-    const reservation = reserveCredits({
+    const reservation = await reserveCredits({
       userId: user.id,
       amountSubunits: creditsToSubunits(2),
       operation: "test.timeout",
@@ -404,7 +428,7 @@ describe("timeouts and reconciliation", () => {
     assert.ok(reservation.ok);
     const reservationId = reservation.ok ? reservation.reservation.id : "";
 
-    settleOnce({
+    await settleOnce({
       idempotencyKey: `timeout-${user.id}`,
       chargedUserId: user.id,
       reservationId,
@@ -414,13 +438,13 @@ describe("timeouts and reconciliation", () => {
       errorMessage: "request timed out; billing outcome unknown",
       releaseSubunits: 0,
     });
-    releaseReservation(
+    await releaseReservation(
       reservationId,
       "Billing outcome unknown",
       "pending_reconciliation",
     );
 
-    const summary = getCreditSummary(user.id);
+    const summary = await getCreditSummary(user.id);
     assert.equal(summary.pendingReconciliationCount, 1);
     assert.equal(summary.reservedSubunits, creditsToSubunits(2));
     assert.equal(
@@ -429,7 +453,7 @@ describe("timeouts and reconciliation", () => {
       "a pending call is not charged yet",
     );
     assert.ok(
-      listPendingReconciliation().some((r) => r.id === reservationId),
+      (await listPendingReconciliation()).some((r) => r.id === reservationId),
       "admins can see the pending item",
     );
   });
@@ -437,16 +461,16 @@ describe("timeouts and reconciliation", () => {
   test("resolving a pending item as billed converts the hold to a charge", async () => {
     const user = await makeUser({ credits: 10 });
     const admin = await makeUser({ role: "admin", credits: 0 });
-    const reservation = reserveCredits({
+    const reservation = await reserveCredits({
       userId: user.id,
       amountSubunits: creditsToSubunits(2),
       operation: "test.reconcile.billed",
     });
     assert.ok(reservation.ok);
     const reservationId = reservation.ok ? reservation.reservation.id : "";
-    releaseReservation(reservationId, "unknown", "pending_reconciliation");
+    await releaseReservation(reservationId, "unknown", "pending_reconciliation");
 
-    const ok = resolveReconciliation({
+    const ok = await resolveReconciliation({
       reservationId,
       actorUserId: admin.id,
       chargeSubunits: creditsToSubunits(2),
@@ -454,7 +478,7 @@ describe("timeouts and reconciliation", () => {
     });
 
     assert.equal(ok, true);
-    const summary = getCreditSummary(user.id);
+    const summary = await getCreditSummary(user.id);
     assert.equal(summary.consumedSubunits, creditsToSubunits(2));
     assert.equal(summary.reservedSubunits, 0);
     assert.equal(summary.pendingReconciliationCount, 0);
@@ -463,23 +487,23 @@ describe("timeouts and reconciliation", () => {
   test("resolving a pending item as not billed returns the hold", async () => {
     const user = await makeUser({ credits: 10 });
     const admin = await makeUser({ role: "admin", credits: 0 });
-    const reservation = reserveCredits({
+    const reservation = await reserveCredits({
       userId: user.id,
       amountSubunits: creditsToSubunits(2),
       operation: "test.reconcile.free",
     });
     assert.ok(reservation.ok);
     const reservationId = reservation.ok ? reservation.reservation.id : "";
-    releaseReservation(reservationId, "unknown", "pending_reconciliation");
+    await releaseReservation(reservationId, "unknown", "pending_reconciliation");
 
-    resolveReconciliation({
+    await resolveReconciliation({
       reservationId,
       actorUserId: admin.id,
       chargeSubunits: 0,
       reason: "Provider confirmed the request never reached billing",
     });
 
-    const summary = getCreditSummary(user.id);
+    const summary = await getCreditSummary(user.id);
     assert.equal(summary.consumedSubunits, 0);
     assert.equal(summary.reservedSubunits, 0);
     assert.equal(summary.availableSubunits, creditsToSubunits(10));
@@ -489,7 +513,7 @@ describe("timeouts and reconciliation", () => {
 describe("crash recovery", () => {
   test("an abandoned reservation is recovered and its hold released", async () => {
     const user = await makeUser({ credits: 10 });
-    const reservation = reserveCredits({
+    const reservation = await reserveCredits({
       userId: user.id,
       amountSubunits: creditsToSubunits(4),
       operation: "test.crash",
@@ -498,27 +522,24 @@ describe("crash recovery", () => {
     const reservationId = reservation.ok ? reservation.reservation.id : "";
 
     assert.equal(
-      getCreditSummary(user.id).reservedSubunits,
+      (await getCreditSummary(user.id)).reservedSubunits,
       creditsToSubunits(4),
     );
 
     // Simulate a process that died without releasing: expire the heartbeat.
-    transaction((db) => {
-      const row = db.creditReservations!.find((r) => r.id === reservationId)!;
-      row.expiresAt = new Date(Date.now() - 60_000).toISOString();
-    });
+    await expireReservation(reservationId);
 
-    const recovered = sweepAbandonedReservations();
+    const recovered = await sweepAbandonedReservations();
     assert.ok(recovered >= 1);
 
-    const summary = getCreditSummary(user.id);
+    const summary = await getCreditSummary(user.id);
     assert.equal(summary.reservedSubunits, 0, "the hold is returned");
     assert.equal(summary.availableSubunits, creditsToSubunits(10));
 
-    const row = readDb().creditReservations!.find((r) => r.id === reservationId);
+    const row = await getReservation(reservationId);
     assert.equal(row?.status, "expired");
     assert.ok(
-      queryLedger({ userId: user.id }).some(
+      (await queryLedger({ userId: user.id })).some(
         (e) =>
           e.reservationId === reservationId && e.type === "reservation_release",
       ),
@@ -528,23 +549,20 @@ describe("crash recovery", () => {
 
   test("recovery is idempotent and never double-releases", async () => {
     const user = await makeUser({ credits: 10 });
-    const reservation = reserveCredits({
+    const reservation = await reserveCredits({
       userId: user.id,
       amountSubunits: creditsToSubunits(3),
       operation: "test.crash.twice",
     });
     assert.ok(reservation.ok);
     const reservationId = reservation.ok ? reservation.reservation.id : "";
-    transaction((db) => {
-      const row = db.creditReservations!.find((r) => r.id === reservationId)!;
-      row.expiresAt = new Date(Date.now() - 60_000).toISOString();
-    });
+    await expireReservation(reservationId);
 
-    transaction((db) => recoverAbandonedReservations(db));
-    transaction((db) => recoverAbandonedReservations(db));
-    transaction((db) => recoverAbandonedReservations(db));
+    await withTx((tx) => recoverAbandonedReservations(tx));
+    await withTx((tx) => recoverAbandonedReservations(tx));
+    await withTx((tx) => recoverAbandonedReservations(tx));
 
-    const summary = getCreditSummary(user.id);
+    const summary = await getCreditSummary(user.id);
     assert.equal(summary.reservedSubunits, 0);
     assert.equal(
       summary.availableSubunits,
@@ -559,7 +577,7 @@ describe("allowances and periods", () => {
     const user = await makeUser({ credits: 5 });
     const admin = await makeUser({ role: "admin" });
 
-    setAllowance({
+    await setAllowance({
       userId: user.id,
       actorUserId: admin.id,
       reason: "Quarterly top-up approved",
@@ -567,10 +585,10 @@ describe("allowances and periods", () => {
     });
 
     assert.equal(
-      getCreditSummary(user.id).allowanceSubunits,
+      (await getCreditSummary(user.id)).allowanceSubunits,
       creditsToSubunits(20),
     );
-    const entry = queryLedger({ userId: user.id }).find(
+    const entry = (await queryLedger({ userId: user.id })).find(
       (e) => e.type === "allowance_set" && e.actorUserId === admin.id,
     );
     assert.ok(entry, "the change is in the ledger");
@@ -580,14 +598,14 @@ describe("allowances and periods", () => {
   test("adjustments are new ledger entries, not edits to past charges", async () => {
     const user = await makeUser({ credits: 10 });
     const admin = await makeUser({ role: "admin" });
-    const settled = settleOnce({
+    const settled = await settleOnce({
       idempotencyKey: `adjust-src-${user.id}`,
       chargedUserId: user.id,
       creditsCharged: creditsToSubunits(2),
     });
     const originalCharge = settled.call.creditsCharged;
 
-    recordAdjustment({
+    await recordAdjustment({
       userId: user.id,
       actorUserId: admin.id,
       reason: "Goodwill refund for a provider outage",
@@ -595,32 +613,32 @@ describe("allowances and periods", () => {
       providerCallId: settled.call.id,
     });
 
-    const call = readDb().providerCalls!.find((c) => c.id === settled.call.id)!;
+    const call = (await providerCallById(settled.call.id))!;
     assert.equal(
       call.creditsCharged,
       originalCharge,
       "the historical charge is untouched",
     );
     assert.ok(
-      queryLedger({ userId: user.id }).some((e) => e.type === "adjustment"),
+      (await queryLedger({ userId: user.id })).some((e) => e.type === "adjustment"),
       "the refund is a separate adjustment entry",
     );
-    assert.equal(getCreditSummary(user.id).consumedSubunits, 0);
+    assert.equal((await getCreditSummary(user.id)).consumedSubunits, 0);
   });
 
   test("a negative adjustment lowers remaining credits and leaves the allowance", async () => {
     const user = await makeUser({ credits: 27 });
     const admin = await makeUser({ role: "admin" });
-    const before = getCreditSummary(user.id);
+    const before = await getCreditSummary(user.id);
 
-    recordAdjustment({
+    await recordAdjustment({
       userId: user.id,
       actorUserId: admin.id,
       reason: "Manual correction",
       amountSubunits: parseCreditsInput("- 20")!,
     });
 
-    const after = getCreditSummary(user.id);
+    const after = await getCreditSummary(user.id);
     assert.equal(after.allowanceSubunits, before.allowanceSubunits);
     assert.equal(
       after.availableSubunits,
@@ -632,12 +650,12 @@ describe("allowances and periods", () => {
     const user = await makeUser({ credits: 10 });
     const admin = await makeUser({ role: "admin" });
 
-    settleOnce({
+    await settleOnce({
       idempotencyKey: `reset-history-${user.id}`,
       chargedUserId: user.id,
       creditsCharged: creditsToSubunits(3),
     });
-    const openHold = reserveCredits({
+    const openHold = await reserveCredits({
       userId: user.id,
       amountSubunits: creditsToSubunits(2),
       operation: "test.reset.hold",
@@ -645,21 +663,21 @@ describe("allowances and periods", () => {
     assert.ok(openHold.ok);
 
     // Force the current period past its reset date, then touch the account.
-    transaction((db) => {
-      const period = db.creditPeriods!.find(
-        (p) => p.userId === user.id && p.status === "current",
-      )!;
-      period.resetCadence = "monthly";
-      period.nextResetAt = new Date(Date.now() - 60_000).toISOString();
-    });
-    addCredits({
+    const forced = await getDb().query(
+      `update credit_periods
+          set data = data || jsonb_build_object('resetCadence', 'monthly', 'nextResetAt', $2::text)
+        where user_id = $1 and status = 'current'`,
+      [user.id, new Date(Date.now() - 60_000).toISOString()],
+    );
+    assert.equal(forced.rowCount, 1, "the user has one current period to roll");
+    await addCredits({
       userId: user.id,
       actorUserId: admin.id,
       reason: "trigger period roll",
       amountSubunits: 1,
     });
 
-    const periods = listPeriods(user.id);
+    const periods = await listPeriods(user.id);
     assert.ok(periods.length >= 2, "the previous period is preserved");
     const closed = periods.find((p) => p.status !== "current")!;
     assert.equal(
@@ -674,7 +692,7 @@ describe("allowances and periods", () => {
       "the new period never starts overdrawn",
     );
     assert.equal(
-      creditsForRun("nonexistent-run").creditsCharged,
+      (await creditsForRun("nonexistent-run")).creditsCharged,
       0,
       "unrelated runs report no charge",
     );
@@ -685,9 +703,9 @@ describe("per-user attribution", () => {
   test("run credits are scoped to the payer, not the project owner", async () => {
     const owner = await makeUser({ credits: 10 });
     const collaborator = await makeUser({ credits: 10 });
-    const project = makeSearchProject({ ownerUserId: owner.id });
+    const project = await makeSearchProject({ ownerUserId: owner.id });
 
-    settleOnce({
+    await settleOnce({
       idempotencyKey: `owner-spend-${project.id}`,
       chargedUserId: owner.id,
       runId: project.id,
@@ -695,7 +713,7 @@ describe("per-user attribution", () => {
       projectId: project.id,
       creditsCharged: creditsToSubunits(5),
     });
-    settleOnce({
+    await settleOnce({
       idempotencyKey: `collab-spend-${project.id}`,
       chargedUserId: collaborator.id,
       runId: project.id,
@@ -705,16 +723,16 @@ describe("per-user attribution", () => {
     });
 
     assert.equal(
-      creditsForRun(project.id, collaborator.id).creditsCharged,
+      (await creditsForRun(project.id, collaborator.id)).creditsCharged,
       creditsToSubunits(1),
       "a collaborator sees only their own spend on a shared project",
     );
     assert.equal(
-      creditsForRun(project.id, owner.id).creditsCharged,
+      (await creditsForRun(project.id, owner.id)).creditsCharged,
       creditsToSubunits(5),
     );
     assert.equal(
-      creditsForRun(project.id).creditsCharged,
+      (await creditsForRun(project.id)).creditsCharged,
       creditsToSubunits(6),
       "the unscoped total is available to admins",
     );

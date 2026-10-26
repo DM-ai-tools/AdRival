@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { useTempStore } from "./helpers/store";
 
-const store = useTempStore("offer-tiers");
+const store = await useTempStore("offer-tiers");
 test.after(() => store.cleanup());
 
 test("dollar prices set the ticket tier", async () => {

@@ -3,7 +3,7 @@ import { after, test } from "node:test";
 import { useTempStore } from "./helpers/store";
 import type { BusinessProfile } from "../src/lib/types";
 
-const store = useTempStore("competitor-quality");
+const store = await useTempStore("competitor-quality");
 after(() => store.cleanup());
 
 // The seed from run 1f2d3c75: an Australian SEO agency.

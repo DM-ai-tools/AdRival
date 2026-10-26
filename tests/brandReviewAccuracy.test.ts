@@ -2,10 +2,9 @@ import assert from "node:assert/strict";
 import test, { after } from "node:test";
 import { useTempStore } from "./helpers/store";
 
-const store = useTempStore("brand-review-accuracy");
+const store = await useTempStore("brand-review-accuracy");
 after(() => store.cleanup());
 
-// Imported after useTempStore so `db.ts` picks up ADRIVAL_DATA_DIR.
 const { makeUser, makeSearchProject } = await import("./helpers/factories");
 const { runBillable } = await import("@/lib/accounting/run");
 const { runBrandReview } = await import("@/lib/pipeline/brandReview");
@@ -75,7 +74,7 @@ test("every platform on the site gets its real count; a searched account of anot
 
   try {
     const user = await makeUser({ credits: 1000 });
-    const job = makeSearchProject({ ownerUserId: user.id });
+    const job = await makeSearchProject({ ownerUserId: user.id });
     const brand = await runBillable(
       { user, operation: "test.brand_review", projectKind: "search", projectId: job.id, runId: job.id },
       () =>
@@ -151,7 +150,7 @@ test("a site that links its parent brand's accounts keeps them; one stray link t
 
   try {
     const user = await makeUser({ credits: 1000 });
-    const job = makeSearchProject({ ownerUserId: user.id });
+    const job = await makeSearchProject({ ownerUserId: user.id });
     const brand = await runBillable(
       { user, operation: "test.brand_review", projectKind: "search", projectId: job.id, runId: job.id },
       () =>

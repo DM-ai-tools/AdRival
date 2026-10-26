@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { useTempStore } from "./helpers/store";
 
-const store = useTempStore("offer-relevance");
+const store = await useTempStore("offer-relevance");
 after(() => store.cleanup());
 
 test("text for the searched service scores above generic and other-service text", async () => {
