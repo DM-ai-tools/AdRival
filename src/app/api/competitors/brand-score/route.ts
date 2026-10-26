@@ -22,12 +22,12 @@ export async function POST(request: Request) {
     };
 
     if (body.competitorId) {
-      const competitor = getCompetitor(body.competitorId);
+      const competitor = await getCompetitor(body.competitorId);
       if (!competitor) {
         return NextResponse.json({ error: "Competitor not found" }, { status: 404 });
       }
-      resolveProjectAccess("search", competitor.runId, user, "run");
-      const updated = updateCompetitor(competitor.id, {
+      await resolveProjectAccess("search", competitor.runId, user, "run");
+      const updated = await updateCompetitor(competitor.id, {
         brand: withBrandScore(competitor.brand || {}),
       });
       return NextResponse.json({
@@ -38,17 +38,17 @@ export async function POST(request: Request) {
     }
 
     if (body.runId) {
-      resolveProjectAccess("search", body.runId, user, "run");
-      if (!getJob(body.runId)) {
+      await resolveProjectAccess("search", body.runId, user, "run");
+      if (!(await getJob(body.runId))) {
         return NextResponse.json({ error: "Run not found" }, { status: 404 });
       }
-      const result = applyBrandScoresForJob(body.runId);
+      const result = await applyBrandScoresForJob(body.runId);
       return NextResponse.json({
         ok: true,
         mode: "batch",
         runId: body.runId,
         ...result,
-        competitors: getCompetitorsByRun(body.runId).map(competitorForList),
+        competitors: (await getCompetitorsByRun(body.runId)).map(competitorForList),
       });
     }
 

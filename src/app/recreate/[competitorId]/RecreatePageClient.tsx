@@ -303,8 +303,9 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     let cancelled = false;
     const tick = async () => {
       try {
+        // light=1: status and progress only; the finished page is fetched by load() below.
         const res = await fetch(
-          `/api/competitors/recreate-page?competitorId=${encodeURIComponent(competitorId)}`,
+          `/api/competitors/recreate-page?competitorId=${encodeURIComponent(competitorId)}&light=1`,
         );
         const data = await readJson(res);
         if (cancelled || !res.ok) return;

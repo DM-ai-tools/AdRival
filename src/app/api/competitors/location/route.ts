@@ -28,15 +28,15 @@ export async function POST(request: Request) {
     };
 
     if (body.competitorId) {
-      const competitor = getCompetitor(body.competitorId);
+      const competitor = await getCompetitor(body.competitorId);
       if (!competitor) {
         return NextResponse.json(
           { error: "Competitor not found" },
           { status: 404 },
         );
       }
-      resolveProjectAccess("search", competitor.runId, user, "run");
-      const job = getJob(competitor.runId);
+      await resolveProjectAccess("search", competitor.runId, user, "run");
+      const job = await getJob(competitor.runId);
 
       const location = await runBillable(
         {
@@ -60,7 +60,7 @@ export async function POST(request: Request) {
           }),
       );
 
-      const updated = getCompetitor(body.competitorId);
+      const updated = await getCompetitor(body.competitorId);
       return NextResponse.json({
         ok: true,
         mode: "single",
@@ -71,8 +71,8 @@ export async function POST(request: Request) {
     }
 
     if (body.runId) {
-      resolveProjectAccess("search", body.runId, user, "run");
-      const job = getJob(body.runId);
+      await resolveProjectAccess("search", body.runId, user, "run");
+      const job = await getJob(body.runId);
       if (!job) {
         return NextResponse.json({ error: "Run not found" }, { status: 404 });
       }
@@ -95,7 +95,7 @@ export async function POST(request: Request) {
         mode: "batch",
         runId,
         ...result,
-        competitors: getCompetitorsByRun(runId).map(competitorForList),
+        competitors: (await getCompetitorsByRun(runId)).map(competitorForList),
       });
     }
 

@@ -40,14 +40,14 @@ export async function POST(request: Request) {
     };
 
     if (body.competitorId) {
-      const competitor = getCompetitor(body.competitorId);
+      const competitor = await getCompetitor(body.competitorId);
       if (!competitor) {
         return NextResponse.json(
           { error: "Competitor not found" },
           { status: 404 },
         );
       }
-      resolveProjectAccess("search", competitor.runId, user, "run");
+      await resolveProjectAccess("search", competitor.runId, user, "run");
 
       let brand;
       try {
@@ -68,7 +68,7 @@ export async function POST(request: Request) {
         }
         throw err;
       }
-      const updated = getCompetitor(body.competitorId);
+      const updated = await getCompetitor(body.competitorId);
       return NextResponse.json({
         ok: true,
         mode: "single",
@@ -79,15 +79,15 @@ export async function POST(request: Request) {
     }
 
     if (body.runId) {
-      resolveProjectAccess("search", body.runId, user, "run");
-      const job = getJob(body.runId);
+      await resolveProjectAccess("search", body.runId, user, "run");
+      const job = await getJob(body.runId);
       if (!job) {
         return NextResponse.json({ error: "Run not found" }, { status: 404 });
       }
       const runId = body.runId;
       // Refuse an unfunded run before anything starts, as the synchronous
       // version did through runBillable.
-      const precheck = precheckRun(user);
+      const precheck = await precheckRun(user);
       if (!precheck.ok) {
         return NextResponse.json(
           { error: precheck.message, code: precheck.reason },
@@ -96,26 +96,35 @@ export async function POST(request: Request) {
       }
       // Already running in this app: follow it. A saved "brand_review" stage
       // with nothing running was interrupted by a restart and starts again.
+      const competitorCount = (await getCompetitorsByRun(runId)).length;
       if (job.progress.stage === "brand_review" && isBrandReviewRunning(runId)) {
         return NextResponse.json({ ok: true, mode: "batch", runId, started: true, job });
       }
+      // Checked and marked with no await in between, so two clicks cannot
+      // both start a batch.
       markBrandReviewRunning(runId);
-      // A batch takes minutes, longer than a request may stay open, so it runs
-      // in the background and the panel follows it through the status poll.
-      // The stage is set before replying so the first poll already sees it.
-      // Like runBrandReviewForJob, a new batch clears an earlier Stop.
-      clearSearchJobSuppression(runId);
-      job.progress = {
-        ...job.progress,
-        stopRequested: false,
-        stage: "brand_review",
-        brandReviewDone: 0,
-        brandReviewTotal: getCompetitorsByRun(runId).length,
-        brandReviewCurrentName: null,
-        message: "Brand review starting…",
-      };
-      job.updatedAt = new Date().toISOString();
-      saveJob(job);
+      try {
+        // A batch takes minutes, longer than a request may stay open, so it runs
+        // in the background and the panel follows it through the status poll.
+        // The stage is set before replying so the first poll already sees it.
+        // Like runBrandReviewForJob, a new batch clears an earlier Stop.
+        await clearSearchJobSuppression(runId);
+        job.progress = {
+          ...job.progress,
+          stopRequested: false,
+          stage: "brand_review",
+          brandReviewDone: 0,
+          brandReviewTotal: competitorCount,
+          brandReviewCurrentName: null,
+          message: "Brand review starting…",
+        };
+        job.updatedAt = new Date().toISOString();
+        await saveJob(job);
+      } catch (err) {
+        // Nothing was started: do not leave the run marked as reviewing.
+        markBrandReviewStopped(runId);
+        throw err;
+      }
       after(() =>
         runBillable(
           {
@@ -126,21 +135,25 @@ export async function POST(request: Request) {
             runId,
           },
           () => runBrandReviewForJob(runId, { force: body.force !== false }),
-        ).catch((err) => {
+        ).catch(async (err: unknown) => {
           markBrandReviewStopped(runId);
           console.error("[brand-review] batch failed", err);
-          const current = getJob(runId);
-          updateJob(runId, {
-            progress: {
-              ...(current?.progress ?? job.progress),
-              stage: "done",
-              brandReviewCurrentName: null,
-              message: `Brand review failed: ${(err as Error).message}`,
-            },
-          });
+          try {
+            const current = await getJob(runId);
+            await updateJob(runId, {
+              progress: {
+                ...(current?.progress ?? job.progress),
+                stage: "done",
+                brandReviewCurrentName: null,
+                message: `Brand review failed: ${(err as Error).message}`,
+              },
+            });
+          } catch (writeErr) {
+            console.error(`[brand-review] could not record the failure on ${runId}:`, writeErr);
+          }
         }),
       );
-      return NextResponse.json({ ok: true, mode: "batch", runId, started: true, job: getJob(runId) });
+      return NextResponse.json({ ok: true, mode: "batch", runId, started: true, job: await getJob(runId) });
     }
 
     return NextResponse.json(

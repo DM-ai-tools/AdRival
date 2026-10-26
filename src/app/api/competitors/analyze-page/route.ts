@@ -21,7 +21,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const existing = getCompetitor(competitorId);
+    const existing = await getCompetitor(competitorId);
     if (!existing) {
       return NextResponse.json(
         { error: "Competitor not found" },
@@ -31,7 +31,7 @@ export async function POST(request: Request) {
 
     // Competitors are reached through their run, so authorization is checked on
     // the owning project rather than the competitor id.
-    const access = resolveProjectAccess("search", existing.runId, user, "run");
+    const access = await resolveProjectAccess("search", existing.runId, user, "run");
 
     if (
       !body.force &&
