@@ -25,7 +25,7 @@ export async function POST(
   try {
     const admin = await requireAdmin();
     const { userId } = await params;
-    const user = getUserById(userId);
+    const user = await getUserById(userId);
     assertUserInScope(admin, user);
     if (user.status === "deleted") {
       throw new HttpError(409, "This account has been deleted and can't be changed", "user_deleted");
@@ -55,8 +55,8 @@ export async function POST(
         if (subunits === null || subunits < 0) {
           throw new HttpError(400, "Allowance must be a non-negative number");
         }
-        setAllowance({ userId, actorUserId: admin.id, reason, allowanceSubunits: subunits });
-        recordAudit({
+        await setAllowance({ userId, actorUserId: admin.id, reason, allowanceSubunits: subunits });
+        await recordAudit({
           actorUserId: admin.id,
           actorUsername: admin.username,
           action: "admin.credits.set_allowance",
@@ -70,8 +70,8 @@ export async function POST(
         if (subunits === null || subunits <= 0) {
           throw new HttpError(400, "Amount must be greater than zero");
         }
-        addCredits({ userId, actorUserId: admin.id, reason, amountSubunits: subunits });
-        recordAudit({
+        await addCredits({ userId, actorUserId: admin.id, reason, amountSubunits: subunits });
+        await recordAudit({
           actorUserId: admin.id,
           actorUsername: admin.username,
           action: "admin.credits.add",
@@ -86,14 +86,14 @@ export async function POST(
         if (subunits === null || subunits === 0) {
           throw new HttpError(400, "Adjustment must be a non-zero number");
         }
-        recordAdjustment({
+        await recordAdjustment({
           userId,
           actorUserId: admin.id,
           reason,
           amountSubunits: subunits,
           providerCallId: body.providerCallId ?? null,
         });
-        recordAudit({
+        await recordAudit({
           actorUserId: admin.id,
           actorUsername: admin.username,
           action: "admin.credits.adjustment",
@@ -104,8 +104,8 @@ export async function POST(
       }
       case "set_reset_cadence": {
         const cadence: ResetCadence = body.cadence === "monthly" ? "monthly" : "none";
-        setResetCadence({ userId, actorUserId: admin.id, reason, cadence });
-        recordAudit({
+        await setResetCadence({ userId, actorUserId: admin.id, reason, cadence });
+        await recordAudit({
           actorUserId: admin.id,
           actorUsername: admin.username,
           action: "admin.credits.set_reset_cadence",
@@ -119,7 +119,7 @@ export async function POST(
     }
 
     return NextResponse.json(
-      { ok: true, credits: getCreditSummary(userId) },
+      { ok: true, credits: await getCreditSummary(userId) },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (err) {

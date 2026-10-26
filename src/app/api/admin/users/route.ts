@@ -31,16 +31,16 @@ export async function GET(request: Request) {
   try {
     const admin = await requireAdmin();
     const scope = adminScope(admin);
-    const orgNames = new Map(listOrganizations({ includeArchived: true }).map((o) => [o.id, o.name]));
+    const orgNames = new Map((await listOrganizations({ includeArchived: true })).map((o) => [o.id, o.name]));
     const url = new URL(request.url);
     const search = url.searchParams.get("search")?.trim().toLowerCase() ?? "";
     const roleFilter = url.searchParams.get("role") ?? "";
     const statusFilter = url.searchParams.get("status") ?? "";
 
-    const projects = listProjects();
-    const spaces = listProjectSpaces();
+    const projects = await listProjects();
+    const spaces = await listProjectSpaces();
     const orgFilter = url.searchParams.get("org") ?? "";
-    const rows = listUsers({ includeDeleted: true })
+    const listed = (await listUsers({ includeDeleted: true }))
       .filter((user) => userInScope(scope, user))
       .filter((user) => {
         if (orgFilter === "platform" && user.orgId) return false;
@@ -55,19 +55,21 @@ export async function GET(request: Request) {
         if (roleFilter && user.role !== roleFilter) return false;
         if (statusFilter && user.status !== statusFilter) return false;
         return true;
-      })
-      .map((user) => ({
+      });
+    const rows = await Promise.all(
+      listed.map(async (user) => ({
         ...toPublicUser(user),
         maxConcurrentRuns: user.maxConcurrentRuns ?? null,
         suspendedAt: user.suspendedAt ?? null,
         deletedAt: user.deletedAt ?? null,
-        credits: getCreditSummary(user.id),
+        credits: await getCreditSummary(user.id),
         projectCount: projects.filter((p) => p.ownerUserId === user.id).length,
         spaceCount: spaces.filter((s) => s.ownerUserId === user.id).length,
         lastLoginAt: user.lastLoginAt ?? null,
-        loginLocked: isLoginLocked(user.username).locked,
+        loginLocked: (await isLoginLocked(user.username)).locked,
         orgName: user.orgId ? orgNames.get(user.orgId) ?? "Unknown organisation" : null,
-      }));
+      })),
+    );
 
     return NextResponse.json(
       {
@@ -119,7 +121,7 @@ export async function POST(request: Request) {
     }
 
     const username = normalizeUsername(String(body.username ?? ""));
-    if (getUserByUsername(username)) {
+    if (await getUserByUsername(username)) {
       return NextResponse.json({ error: "Username already taken" }, { status: 409 });
     }
 
@@ -127,13 +129,13 @@ export async function POST(request: Request) {
     // Organisation admins always create users inside their own organisation.
     let orgId: string | null = admin.orgId ?? null;
     if (!admin.orgId && body.orgId) {
-      const org = getOrganization(String(body.orgId));
+      const org = await getOrganization(String(body.orgId));
       if (!org || org.archivedAt) {
         return NextResponse.json({ error: "That organisation does not exist" }, { status: 400 });
       }
       orgId = org.id;
     }
-    const settings = getAppSettings();
+    const settings = await getAppSettings();
     const allowance =
       body.allowanceCredits === undefined || body.allowanceCredits === ""
         ? settings.defaultAllowanceSubunits
@@ -146,22 +148,32 @@ export async function POST(request: Request) {
     }
 
     const temporaryPassword = generateTemporaryPassword();
-    const user = createUser({
-      username,
-      displayName: String(body.displayName ?? "").trim(),
-      passwordHash: await hashPassword(temporaryPassword),
-      role,
-      status: "active",
-      mustChangePassword: true,
-      createdByUserId: admin.id,
-      orgId,
-    });
-    initializeUserCredits(user.id, {
+    const passwordHash = await hashPassword(temporaryPassword);
+    let user;
+    try {
+      user = await createUser({
+        username,
+        displayName: String(body.displayName ?? "").trim(),
+        passwordHash,
+        role,
+        status: "active",
+        mustChangePassword: true,
+        createdByUserId: admin.id,
+        orgId,
+      });
+    } catch (err) {
+      // Taken between the check above and the insert (checked again under the users lock).
+      if (err instanceof Error && err.message === "Username already taken") {
+        return NextResponse.json({ error: "Username already taken" }, { status: 409 });
+      }
+      throw err;
+    }
+    await initializeUserCredits(user.id, {
       allowanceSubunits: allowance,
       resetCadence: settings.defaultResetCadence,
       reason: `Initial allowance set by ${admin.username}`,
     });
-    recordAudit({
+    await recordAudit({
       actorUserId: admin.id,
       actorUsername: admin.username,
       action: "admin.user.create",

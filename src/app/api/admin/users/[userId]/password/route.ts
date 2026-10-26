@@ -19,21 +19,21 @@ export async function POST(
   try {
     const admin = await requireAdmin();
     const { userId } = await params;
-    const user = getUserById(userId);
+    const user = await getUserById(userId);
     assertUserInScope(admin, user);
     if (user.status === "deleted") {
       throw new HttpError(409, "Account is deleted", "deleted");
     }
 
     const temporaryPassword = generateTemporaryPassword();
-    const updated = updateUser(userId, {
+    const updated = await updateUser(userId, {
       passwordHash: await hashPassword(temporaryPassword),
       mustChangePassword: true,
       bumpSessionEpoch: true,
     });
     if (!updated) throw new HttpError(404, "User not found", "not_found");
 
-    recordAudit({
+    await recordAudit({
       actorUserId: admin.id,
       actorUsername: admin.username,
       action: "admin.user.password_reset",

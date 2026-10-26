@@ -1,11 +1,9 @@
 import { NextResponse } from "next/server";
 import {
-  countActiveAdmins,
   archiveProjectSpace,
   getOrganization,
-  getProjectSpace,
+  getProjectSpacesByIds,
   getUserById,
-  listUsers,
   listProjects,
   listProjectSpaces,
   listSpaceMemberships,
@@ -16,7 +14,17 @@ import {
   toPublicUser,
   updateUser,
 } from "@/lib/db";
-import { adminScope, assertUserInScope, errorResponse, HttpError, requireAdmin, userInScope } from "@/lib/authz";
+import {
+  adminScope,
+  assertNotLastActiveAdmin,
+  assertUserInScope,
+  errorResponse,
+  HttpError,
+  lastActiveAdminGuard,
+  requireAdmin,
+  userInScope,
+} from "@/lib/authz";
+import { getDb } from "@/lib/data/client";
 import {
   listMemberships,
   queryLedger,
@@ -31,35 +39,9 @@ import {
   usageByProvider,
   usageByRun,
 } from "@/lib/accounting/service";
-import type { AppUser, UserRole } from "@/lib/types";
+import type { UserRole } from "@/lib/types";
 
 export const runtime = "nodejs";
-
-/** Guard the "last active admin" invariant for demotion, suspension, deletion. */
-function assertNotLastActiveAdmin(userId: string, actor: AppUser) {
-  const user = getUserById(userId);
-  if (!user || user.role !== "admin" || user.status !== "active") return;
-  if (countActiveAdmins() <= 1) {
-    throw new HttpError(
-      409,
-      "This is the last active administrator. Promote another admin first.",
-      "last_admin",
-    );
-  }
-  // An organisation keeps at least one admin of its own; platform admins may override.
-  if (user.orgId && actor.orgId) {
-    const orgAdmins = listUsers().filter(
-      (u) => u.orgId === user.orgId && u.role === "admin" && u.status === "active",
-    ).length;
-    if (orgAdmins <= 1) {
-      throw new HttpError(
-        409,
-        "This is the organisation's last active administrator. Promote another admin first.",
-        "last_org_admin",
-      );
-    }
-  }
-}
 
 export async function GET(
   _request: Request,
@@ -68,8 +50,36 @@ export async function GET(
   try {
     const admin = await requireAdmin();
     const { userId } = await params;
-    const user = getUserById(userId);
+    const user = await getUserById(userId);
     assertUserInScope(admin, user);
+
+    const [
+      credits,
+      periods,
+      providerUsage,
+      runUsage,
+      recentCalls,
+      projects,
+      sharedWithThisUser,
+      loginLock,
+      spacesOwned,
+      sharedSpaces,
+      ledger,
+    ] = await Promise.all([
+      getCreditSummary(user.id),
+      listPeriods(user.id),
+      usageByProvider({ chargedUserId: user.id }),
+      usageByRun({ chargedUserId: user.id }),
+      queryProviderCalls({ chargedUserId: user.id, limit: 25 }),
+      listProjects({ ownerUserId: user.id }),
+      listMemberships({ userId: user.id }),
+      isLoginLocked(user.username),
+      listProjectSpaces({ ownerUserId: user.id, includeArchived: true }),
+      listSpaceMemberships().then((all) => all.filter((m) => m.userId === user.id)),
+      // Allowance changes, top-ups, adjustments and charges, newest first.
+      queryLedger({ userId: user.id, limit: 100 }),
+    ]);
+    const sharedSpaceRows = await getProjectSpacesByIds(sharedSpaces.map((m) => m.spaceId));
 
     return NextResponse.json({
       user: toPublicUser(user),
@@ -78,29 +88,26 @@ export async function GET(
         allowedProviders: user.allowedProviders ?? null,
         blockedModels: user.blockedModels ?? null,
       },
-      credits: getCreditSummary(user.id),
-      periods: listPeriods(user.id),
-      usageByProvider: usageByProvider({ chargedUserId: user.id }),
-      recentRuns: usageByRun({ chargedUserId: user.id }).slice(0, 25),
-      recentCalls: queryProviderCalls({ chargedUserId: user.id, limit: 25 }).rows,
-      projects: listProjects({ ownerUserId: user.id }),
-      sharedWithThisUser: listMemberships({ userId: user.id }),
+      credits,
+      periods,
+      usageByProvider: providerUsage,
+      recentRuns: runUsage.slice(0, 25),
+      recentCalls: recentCalls.rows,
+      projects,
+      sharedWithThisUser,
       lastLoginAt: user.lastLoginAt ?? null,
-      loginLocked: isLoginLocked(user.username).locked,
-      spacesOwned: listProjectSpaces({ ownerUserId: user.id, includeArchived: true }).map((s) => ({
+      loginLocked: loginLock.locked,
+      spacesOwned: spacesOwned.map((s) => ({
         id: s.id,
         clientName: s.clientName,
         archivedAt: s.archivedAt ?? null,
       })),
-      spacesSharedWithThisUser: listSpaceMemberships()
-        .filter((m) => m.userId === user.id)
-        .map((m) => ({
-          spaceId: m.spaceId,
-          role: m.role,
-          clientName: getProjectSpace(m.spaceId)?.clientName ?? m.spaceId,
-        })),
-      // Allowance changes, top-ups, adjustments and charges, newest first.
-      ledger: queryLedger({ userId: user.id, limit: 100 }),
+      spacesSharedWithThisUser: sharedSpaces.map((m) => ({
+        spaceId: m.spaceId,
+        role: m.role,
+        clientName: sharedSpaceRows.get(m.spaceId)?.clientName ?? m.spaceId,
+      })),
+      ledger,
     });
   } catch (err) {
     return errorResponse(err, { audience: "admin" });
@@ -114,7 +121,7 @@ export async function PATCH(
   try {
     const admin = await requireAdmin();
     const { userId } = await params;
-    const user = getUserById(userId);
+    const user = await getUserById(userId);
     assertUserInScope(admin, user);
 
     let body: {
@@ -148,9 +155,11 @@ export async function PATCH(
 
     const patch: Parameters<typeof updateUser>[1] = {};
     const details: Record<string, string | number | boolean | null> = {};
+    // Set when this change could remove the last active (org) admin.
+    let needsAdminGuard = false;
 
     if (body.unlockLogin) {
-      clearLoginAttempts(user.username);
+      await clearLoginAttempts(user.username);
       details.unlockLogin = true;
     }
 
@@ -167,7 +176,11 @@ export async function PATCH(
       if (body.role !== "admin" && body.role !== "user") {
         return NextResponse.json({ error: "Invalid role" }, { status: 400 });
       }
-      if (body.role === "user") assertNotLastActiveAdmin(userId, admin);
+      if (body.role === "user") {
+        // Early answer, as before; the guard on updateUser re-checks under the lock.
+        await assertNotLastActiveAdmin(user, admin, getDb());
+        needsAdminGuard = true;
+      }
       patch.role = body.role;
       // A role change must not keep working with an old session.
       patch.bumpSessionEpoch = true;
@@ -179,7 +192,8 @@ export async function PATCH(
         return NextResponse.json({ error: "Invalid status" }, { status: 400 });
       }
       if (body.status === "suspended") {
-        assertNotLastActiveAdmin(userId, admin);
+        await assertNotLastActiveAdmin(user, admin, getDb());
+        needsAdminGuard = true;
         patch.suspendedAt = new Date().toISOString();
         // Suspension takes effect immediately, including for open sessions.
         patch.bumpSessionEpoch = true;
@@ -221,21 +235,35 @@ export async function PATCH(
       if (userId === admin.id) {
         throw new HttpError(409, "You can't move your own account into an organisation", "self_lockout");
       }
-      const org = body.orgId ? getOrganization(String(body.orgId)) : null;
+      const org = body.orgId ? await getOrganization(String(body.orgId)) : null;
       if (body.orgId && (!org || org.archivedAt)) {
         return NextResponse.json({ error: "That organisation does not exist" }, { status: 400 });
       }
-      if (user.role === "admin" && !user.orgId) assertNotLastActiveAdmin(userId, admin);
+      if (user.role === "admin" && !user.orgId) {
+        await assertNotLastActiveAdmin(user, admin, getDb());
+        needsAdminGuard = true;
+      }
       patch.orgId = org?.id ?? null;
       // What the account can see changes, so its sessions start fresh.
       patch.bumpSessionEpoch = true;
       details.orgId = org?.id ?? null;
     }
 
-    const updated = updateUser(userId, patch);
+    // The guard runs inside updateUser's transaction on the locked row: the
+    // deleted check and the admin counts cannot go stale before the write, so
+    // two concurrent demotions cannot both pass.
+    const adminGuard = needsAdminGuard ? lastActiveAdminGuard(admin) : null;
+    const updated = await updateUser(userId, patch, {
+      guard: async (prev, tx) => {
+        if (prev.status === "deleted") {
+          throw new HttpError(409, "This account has been deleted and can't be changed", "user_deleted");
+        }
+        if (adminGuard) await adminGuard(prev, tx);
+      },
+    });
     if (!updated) throw new HttpError(404, "User not found", "not_found");
 
-    recordAudit({
+    await recordAudit({
       actorUserId: admin.id,
       actorUsername: admin.username,
       action: "admin.user.update",
@@ -259,12 +287,13 @@ export async function DELETE(
   try {
     const admin = await requireAdmin();
     const { userId } = await params;
-    const user = getUserById(userId);
+    const user = await getUserById(userId);
     assertUserInScope(admin, user);
     if (user.id === admin.id) {
       throw new HttpError(409, "You cannot delete your own account", "self_delete");
     }
-    assertNotLastActiveAdmin(userId, admin);
+    // Early answer, as before; the guard on updateUser below re-checks under the lock.
+    await assertNotLastActiveAdmin(user, admin, getDb());
 
     const url = new URL(request.url);
     const projectAction = url.searchParams.get("projects") ?? "";
@@ -278,7 +307,7 @@ export async function DELETE(
       );
     }
     if (projectAction === "transfer") {
-      const target = getUserById(transferToUserId);
+      const target = await getUserById(transferToUserId);
       if (!target || target.status !== "active" || !userInScope(adminScope(admin), target)) {
         throw new HttpError(
           400,
@@ -288,49 +317,57 @@ export async function DELETE(
       }
     }
 
-    const projects = listProjects({ ownerUserId: userId });
+    // Delete first: the last-admin guard runs in the same transaction as the
+    // write, so a concurrent demotion cannot leave no admin, and a refused
+    // delete has not touched any project yet. Access is revoked immediately,
+    // before any cleanup is observed; a cleanup that fails part-way can be
+    // finished by repeating the delete.
+    await updateUser(
+      userId,
+      {
+        status: "deleted",
+        deletedAt: new Date().toISOString(),
+        bumpSessionEpoch: true,
+      },
+      { guard: lastActiveAdminGuard(admin) },
+    );
+
+    const projects = await listProjects({ ownerUserId: userId });
     for (const project of projects) {
       if (projectAction === "archive") {
-        setProjectArchived(project.kind, project.id, true);
+        await setProjectArchived(project.kind, project.id, true);
       } else if (projectAction === "transfer") {
-        setProjectOwner(project.kind, project.id, transferToUserId);
+        await setProjectOwner(project.kind, project.id, transferToUserId);
       } else {
         // Back to the admin-only unassigned area — for an organisation admin that
         // area is theirs, so the runs stay inside the organisation.
-        setProjectOwner(project.kind, project.id, admin.orgId ? admin.id : null);
+        await setProjectOwner(project.kind, project.id, admin.orgId ? admin.id : null);
       }
     }
 
     // Client spaces follow the same choice as runs. A space always needs an
     // owner, so "unassign" hands it to the admin doing the delete.
-    const spaces = listProjectSpaces({ ownerUserId: userId });
+    const spaces = await listProjectSpaces({ ownerUserId: userId });
     for (const space of spaces) {
       if (projectAction === "archive") {
-        archiveProjectSpace(space.id);
+        await archiveProjectSpace(space.id);
       } else {
         const newOwner = projectAction === "transfer" ? transferToUserId : admin.id;
-        setProjectSpaceOwner(space.id, newOwner);
+        await setProjectSpaceOwner(space.id, newOwner);
         // The new owner doesn't also need a sharing entry on their own space.
-        removeSpaceMembership(space.id, newOwner);
+        await removeSpaceMembership(space.id, newOwner);
       }
     }
 
     // Revoke everything shared *with* this account.
-    for (const membership of listMemberships({ userId })) {
-      removeMembership(membership.projectKind, membership.projectId, userId);
+    for (const membership of await listMemberships({ userId })) {
+      await removeMembership(membership.projectKind, membership.projectId, userId);
     }
-    for (const membership of listSpaceMemberships()) {
-      if (membership.userId === userId) removeSpaceMembership(membership.spaceId, userId);
+    for (const membership of await listSpaceMemberships()) {
+      if (membership.userId === userId) await removeSpaceMembership(membership.spaceId, userId);
     }
 
-    updateUser(userId, {
-      status: "deleted",
-      deletedAt: new Date().toISOString(),
-      // Access is revoked immediately, before any cleanup is observed.
-      bumpSessionEpoch: true,
-    });
-
-    recordAudit({
+    await recordAudit({
       actorUserId: admin.id,
       actorUsername: admin.username,
       action: "admin.user.delete",
