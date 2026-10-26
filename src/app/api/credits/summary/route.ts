@@ -17,21 +17,28 @@ export const runtime = "nodejs";
 export async function GET() {
   try {
     const user = await requireUser();
-    const projects = listVisibleProjects(user);
+    const [projects, credits, periods, providerUsage, runUsage, canStartRun] = await Promise.all([
+      listVisibleProjects(user),
+      getCreditSummary(user.id),
+      listPeriods(user.id),
+      usageByProvider({ chargedUserId: user.id }),
+      usageByRun({ chargedUserId: user.id }),
+      precheckRun(user),
+    ]);
     const titleFor = (kind: string | null, id: string | null) =>
       projects.find((p) => p.kind === kind && p.id === id)?.title ?? null;
 
     return NextResponse.json({
-      credits: getCreditSummary(user.id),
-      periods: listPeriods(user.id).slice(0, 12),
-      usageByProvider: usageByProvider({ chargedUserId: user.id }),
-      recentRuns: usageByRun({ chargedUserId: user.id })
+      credits,
+      periods: periods.slice(0, 12),
+      usageByProvider: providerUsage,
+      recentRuns: runUsage
         .slice(0, 20)
         .map((run) => ({
           ...run,
           projectTitle: titleFor(run.projectKind, run.projectId),
         })),
-      canStartRun: precheckRun(user),
+      canStartRun,
     });
   } catch (err) {
     return errorResponse(err);

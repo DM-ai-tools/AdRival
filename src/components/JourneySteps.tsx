@@ -45,7 +45,7 @@ export function JourneySteps({
   const found = competitors.length || job?.progress?.accepted || 0;
   const offersDone = job?.offersReport?.status === "completed";
   const offersRunning = job?.progress?.stage === "analyzing_offers";
-  const recreated = competitors.some((c) => c.recreatedPage?.status === "completed" && c.recreatedPage.html);
+  const recreated = competitors.some((c) => c.recreatedPage?.status === "completed" && c.recreatedPage.hasPage);
   const analysed = competitors.some((c) => c.pageAnalysis?.status === "completed");
 
   let current: StepKey;

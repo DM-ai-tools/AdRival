@@ -18,9 +18,9 @@ export async function POST(request: Request) {
     const id = String(body.id ?? "").trim();
     if (!id) return NextResponse.json({ error: "id is required" }, { status: 400 });
     const confirm = body.confirm === true;
-    resolveProjectAccess(kind, id, user, confirm ? "run" : "view");
+    await resolveProjectAccess(kind, id, user, confirm ? "run" : "view");
 
-    const source = loadAbSource(kind, id);
+    const source = await loadAbSource(kind, id);
     if (!source) return NextResponse.json({ error: "Not found" }, { status: 404 });
     const todo = source.pages.filter((p) => p.status === "completed" && !p.levels);
     if (!confirm) return NextResponse.json({ count: todo.length });

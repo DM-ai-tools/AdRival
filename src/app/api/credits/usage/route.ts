@@ -14,7 +14,7 @@ export async function GET(request: Request) {
     const url = new URL(request.url);
     const value = (key: string) => url.searchParams.get(key)?.trim() || undefined;
 
-    const projects = listVisibleProjects(user);
+    const projects = await listVisibleProjects(user);
     const requestedProjectId = value("projectId");
     if (
       requestedProjectId &&
@@ -25,7 +25,7 @@ export async function GET(request: Request) {
       return NextResponse.json({ rows: [], total: 0, projects });
     }
 
-    const { rows, total } = queryProviderCalls({
+    const { rows, total } = await queryProviderCalls({
       // Always pinned to the caller — the filter cannot be widened by query args.
       chargedUserId: user.id,
       projectId: requestedProjectId,

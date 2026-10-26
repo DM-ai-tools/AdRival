@@ -12,7 +12,13 @@ export const runtime = "nodejs";
 export async function GET() {
   try {
     const user = await requireUser();
-    const projects = listVisibleProjects(user);
+    const projects = await listVisibleProjects(user);
+    // The caller's own spend on each project, not the owner's.
+    const spent = new Map(
+      await Promise.all(
+        projects.map(async (p) => [p.id, (await creditsForRun(p.id, user.id)).creditsCharged] as const),
+      ),
+    );
 
     const shape = (p: (typeof projects)[number]) => ({
       kind: p.kind,
@@ -23,8 +29,7 @@ export async function GET() {
       archivedAt: p.archivedAt,
       accessRole: p.accessRole,
       ownerDisplayName: p.ownerDisplayName,
-      // The caller's own spend on this project, not the owner's.
-      creditsCharged: creditsForRun(p.id, user.id).creditsCharged,
+      creditsCharged: spent.get(p.id) ?? 0,
     });
 
     return NextResponse.json({

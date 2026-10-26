@@ -17,9 +17,9 @@ export async function GET(request: Request) {
     const kind: ProjectKind = url.searchParams.get("kind") === "lookup" ? "lookup" : "search";
     const id = (url.searchParams.get("id") ?? "").trim();
     if (!id) return NextResponse.json({ error: "id is required" }, { status: 400 });
-    resolveProjectAccess(kind, id, user, "view");
+    await resolveProjectAccess(kind, id, user, "view");
 
-    const source = loadAbSource(kind, id);
+    const source = await loadAbSource(kind, id);
     if (!source) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
     const pages: AbPage[] = source.pages;
@@ -29,7 +29,7 @@ export async function GET(request: Request) {
     return NextResponse.json({
       pages,
       coverage: computeCoverage(pages),
-      icps: getIcps(kind, id).map(maskIcp),
+      icps: (await getIcps(kind, id)).map(maskIcp),
       profileReady: icpProfileReady(source.profile),
       businessUrl: source.businessUrl,
       baseForStage,

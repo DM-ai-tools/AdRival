@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { errorResponse, requireUser, resolveSpaceAccess } from "@/lib/authz";
 import {
   createProjectSpace,
-  getUserById,
+  getUsersByIds,
   listProjectSpaces,
   listProjects,
   listSpaceMemberships,
@@ -18,17 +18,22 @@ export const runtime = "nodejs";
 export async function GET() {
   try {
     const user = await requireUser();
-    const memberships = listSpaceMemberships().filter((m) => m.userId === user.id);
+    const memberships = (await listSpaceMemberships()).filter((m) => m.userId === user.id);
     const sharedIds = new Set(memberships.map((m) => m.spaceId));
-    const spaces = listProjectSpaces().filter(
+    const spaces = (await listProjectSpaces()).filter(
       (space) => space.ownerUserId === user.id || sharedIds.has(space.id),
     );
-    const runs = listProjects();
+    const runs = await listProjects();
+    const owners = await getUsersByIds(spaces.map((space) => space.ownerUserId));
+    // Authorize each space (throws when access was lost in between, as before).
+    const accesses = await Promise.all(
+      spaces.map((space) => resolveSpaceAccess(space.id, user, "view")),
+    );
 
     return NextResponse.json({
-      spaces: spaces.map((space) => {
-        const access = resolveSpaceAccess(space.id, user, "view");
-        const owner = getUserById(space.ownerUserId);
+      spaces: spaces.map((space, index) => {
+        const access = accesses[index];
+        const owner = owners.get(space.ownerUserId);
         return {
           id: space.id,
           clientName: space.clientName,
@@ -62,8 +67,8 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
-    const space = createProjectSpace({ clientName, ownerUserId: user.id });
-    recordAudit({
+    const space = await createProjectSpace({ clientName, ownerUserId: user.id });
+    await recordAudit({
       actorUserId: user.id,
       actorUsername: user.username,
       action: "space.create",

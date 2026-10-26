@@ -22,9 +22,9 @@ export async function POST(request: Request) {
     const stage = AWARENESS_STAGES.find((s) => s === body.stage);
     if (!id) return NextResponse.json({ error: "id is required" }, { status: 400 });
     if (!stage) return NextResponse.json({ error: "Unknown awareness stage" }, { status: 400 });
-    resolveProjectAccess(kind, id, user, "run");
+    await resolveProjectAccess(kind, id, user, "run");
 
-    const source = loadAbSource(kind, id);
+    const source = await loadAbSource(kind, id);
     if (!source) return NextResponse.json({ error: "Not found" }, { status: 404 });
     const profile = source.profile;
     // Refuse before any billing or AI call.
@@ -51,7 +51,7 @@ export async function POST(request: Request) {
       },
       () => generateIcp({ profile, stage, keywords: source.keywords, competitorPages }),
     );
-    const icp = upsertIcp({
+    const icp = await upsertIcp({
       ...content,
       id: randomUUID(),
       source: { kind, id },
