@@ -21,14 +21,14 @@ export async function makeUser(options?: {
 }): Promise<AppUser> {
   seq += 1;
   const username = options?.username ?? `user${seq}_${Date.now() % 100000}`;
-  const user = createUser({
+  const user = await createUser({
     username,
     displayName: username,
     passwordHash: await hashPassword(options?.password ?? "correct-horse-battery"),
     role: options?.role ?? "user",
     status: options?.status ?? "active",
   });
-  initializeUserCredits(user.id, {
+  await initializeUserCredits(user.id, {
     allowanceSubunits: creditsToSubunits(options?.credits ?? 0),
     resetCadence: "none",
     reason: "test fixture",
@@ -36,11 +36,11 @@ export async function makeUser(options?: {
   return user;
 }
 
-export function makeSearchProject(options?: {
+export async function makeSearchProject(options?: {
   id?: string;
   ownerUserId?: string | null;
   keyword?: string;
-}): SearchJob {
+}): Promise<SearchJob> {
   seq += 1;
   const now = new Date().toISOString();
   const job: SearchJob = {
@@ -65,16 +65,16 @@ export function makeSearchProject(options?: {
     createdAt: now,
     updatedAt: now,
   };
-  saveJob(job);
+  await saveJob(job);
   return job;
 }
 
 /** A competitor row belonging to a search run, so routes that look one up work. */
-export function makeCompetitor(options: {
+export async function makeCompetitor(options: {
   runId: string;
   id?: string;
   pageName?: string;
-}): CompetitorRecord {
+}): Promise<CompetitorRecord> {
   seq += 1;
   const competitor: CompetitorRecord = {
     id: options.id ?? `competitor-${seq}-${Date.now()}`,
@@ -96,15 +96,15 @@ export function makeCompetitor(options: {
     brand: { website: "https://example.invalid" },
     createdAt: new Date().toISOString(),
   };
-  saveCompetitor(competitor);
+  await saveCompetitor(competitor);
   return competitor;
 }
 
-export function makeLookupProject(options?: {
+export async function makeLookupProject(options?: {
   id?: string;
   ownerUserId?: string | null;
   queryName?: string;
-}): LookupJob {
+}): Promise<LookupJob> {
   seq += 1;
   const now = new Date().toISOString();
   const job: LookupJob = {
@@ -125,6 +125,6 @@ export function makeLookupProject(options?: {
     createdAt: now,
     updatedAt: now,
   };
-  saveLookupJob(job);
+  await saveLookupJob(job);
   return job;
 }

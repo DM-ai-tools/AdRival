@@ -1,4 +1,4 @@
 {
-  "//": "Marks the test directory as ESM so tsx keeps top-level await, which the tests use to import app code after the temp store env var is set.",
+  "//": "Marks the test directory as ESM so tsx keeps top-level await, which the tests use to set up their test database (useTempStore / useTestDb) before importing app code.",
   "type": "module"
 }
