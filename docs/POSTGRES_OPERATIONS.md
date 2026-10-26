@@ -67,10 +67,23 @@ dashboard (Storage, `recreated-pages-archive`) now and then. After a restore
 into the **same** project, archived pages open as before; into a **new**
 project, copy the bucket over first or those pages show as unavailable.
 
-The backup is not a single snapshot: tables are read one after another while
-the app runs. A row written during the backup can be in one table and not a
-related one; restore skips a page row whose competitor is missing and counts
-it as skipped.
+Every backup is **one consistent snapshot**: all tables are read inside a
+single `REPEATABLE READ, READ ONLY` transaction, so credit balances, ledger
+and reservations, runs and their competitors all come from the same moment,
+even while the app keeps writing. The files are uploaded from inside that
+transaction one part at a time (memory stays at about one part); it holds one
+database connection and takes no row locks. Only one backup runs at a time,
+across every instance: a second one (an overlapping deploy, a click during
+the nightly run) answers "already running".
+
+If the nightly backup and its retry 15 minutes later both fail, an alert
+"Database backup failed" appears in the admin Alerts panel.
+`GET /api/admin/backup` also shows `lastSuccess` and `lastFailure`.
+
+A single page row larger than the 40 MB part limit cannot be uploaded (the
+free plan refuses files over 50 MB); the backup then fails with a message
+naming the competitor id. Shrink or remove that page (or archive it: archived
+content is not in the database backup) and run the backup again.
 
 Run one now:
 
@@ -81,6 +94,7 @@ Run one now:
 - From a shell: `npm run backup:run` (uses `DATABASE_DIRECT_URL`, or
   `-- --url <url>`; `-- --keep 5` to keep more), or `npx tsx
   scripts/backup-db.ts list`.
+- `GET /api/admin/backup` returns `{ backups, lastSuccess, lastFailure }`.
 
 ## Restore from `db-backups`
 
@@ -101,9 +115,20 @@ Run one now:
    The script refuses a target that has rows (pass `--allow-existing` only
    when you mean to add missing rows to an existing database; existing rows
    are left as they are), applies the migrations, checks every file's sha-256
-   against the manifest **before inserting anything**, inserts table by table
-   (re-running is safe: rows that are there are skipped), and moves the
-   ledger/audit sequences past the restored rows.
+   against the manifest **before inserting anything**, inserts table by table,
+   and moves the ledger/audit sequences past the restored rows.
+   Into an empty database **every** row must land: when a table ends up with
+   fewer rows than the manifest says (a unique conflict, a missing parent,
+   a damaged count), the restore stops with an error naming each such table
+   and exits non-zero. With `--allow-existing`, rows already there are
+   skipped and only counted.
+
+   **A failed restore leaves a partial database** (the tables restored before
+   the failure keep their rows). Either drop and recreate the target (new
+   project, or in the SQL editor `drop schema public cascade; create schema
+   public;` and grant the usual Supabase privileges back, then restore again),
+   or fix the cause and re-run with `--allow-existing`, which skips the rows
+   already restored.
 4. If the target is a new project: copy the `recreated-pages-archive` bucket
    into it (see above), then point `DATABASE_URL`, `DATABASE_DIRECT_URL`,
    `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` on Railway at it.
@@ -146,7 +171,7 @@ in-process test database cannot give. Against a scratch project (never the
 production one):
 
 ```sh
-DATABASE_TEST_URL="<direct URL of a scratch project>" npx tsx --test tests/dataCreditsStaging.test.ts tests/dataRunsStaging.test.ts
+DATABASE_TEST_URL="<direct URL of a scratch project>" npx tsx --test tests/dataCreditsStaging.test.ts tests/dataRunsStaging.test.ts tests/backupStaging.test.ts
 ```
 
 They skip themselves when `DATABASE_TEST_URL` is not set.
@@ -158,8 +183,8 @@ LOADTEST_USERS='[{"username":"lt1","password":"..."}]' npm run loadtest -- --bas
 ```
 
 Read-only (history, unified history, a run's status, credit summary). Prints
-p50/p95/max per endpoint; exits non-zero on errors or a p95 over
-`--p95-ms` (default 2000).
+p50/p95/max per endpoint; exits non-zero on any non-2xx response (401 too,
+unless `--allow-401`) or a p95 over `--p95-ms` (default 2000).
 
 ## Moving to the paid plan
 
@@ -184,5 +209,8 @@ copy is cheap) or be ignored.
   columns, new indexes). No renames or drops in the same deploy as the code
   that stops using them.
 - Transactions are bounded server-side to 30 s (`SET LOCAL
-  statement_timeout`), single queries to 30 s client-side; migrations get 10
-  minutes.
+  statement_timeout`), single queries to 30 s client-side. Migrations at
+  startup get a 10-minute query timeout **only when `DATABASE_DIRECT_URL` is
+  set** (they then run on their own session connection); without it they run
+  on the runtime pool with its 30 s limit. The backup's snapshot transaction
+  allows 5 minutes per statement and 10 minutes idle.
