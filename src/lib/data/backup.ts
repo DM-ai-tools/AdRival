@@ -78,7 +78,7 @@ const DEFAULT_KEEP = 3;
 const DEFAULT_PART_BYTES = 40 * 1024 * 1024;
 const BATCH_ROWS = 2000;
 /** Tables with bytea columns (page content, up to ~25 MB a row) are read a few rows at a time. */
-const BYTEA_BATCH_ROWS = 5;
+const BYTEA_BATCH_ROWS = 2;
 const INSERT_BATCH_ROWS = 500;
 const INSERT_BATCH_BYTES = 8 * 1024 * 1024;
 const DAY_MS = 24 * 60 * 60_000;
