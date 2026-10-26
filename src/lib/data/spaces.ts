@@ -82,6 +82,8 @@ function truthySql(field: string): string {
 export async function listProjects(options?: {
   ownerUserId?: string;
   unassignedOnly?: boolean;
+  /** Only runs placed in one of these client spaces (ignored with ownerUserId/unassignedOnly). */
+  spaceIds?: Iterable<string>;
 }): Promise<ProjectOwnership[]> {
   let where = "";
   const params: unknown[] = [];
@@ -90,6 +92,11 @@ export async function listProjects(options?: {
   } else if (options?.ownerUserId) {
     where = "where owner_user_id = $1";
     params.push(options.ownerUserId);
+  } else if (options?.spaceIds) {
+    const spaceIds = [...new Set(options.spaceIds)];
+    if (!spaceIds.length) return [];
+    where = "where space_id = any($1::text[])";
+    params.push(spaceIds);
   }
   const db = getDb();
   const jobs = await db.query<{ data: SearchJob }>(`select data from jobs ${where}`, params);

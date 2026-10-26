@@ -4,13 +4,14 @@ import {
   getCompetitorsByRun,
   getJob,
   listHistoryRuns,
+  listProjects,
 } from "@/lib/db";
 import { competitorForList } from "@/lib/competitorView";
 import {
   errorResponse,
   requireUser,
   resolveProjectAccess,
-  visibleProjectKeys,
+  visibleRunIds,
 } from "@/lib/authz";
 
 export const runtime = "nodejs";
@@ -23,12 +24,12 @@ export async function GET(request: Request) {
     const runId = searchParams.get("runId");
 
     if (runId) {
-      resolveProjectAccess("search", runId, user, "view");
-      const job = getJob(runId);
+      await resolveProjectAccess("search", runId, user, "view");
+      const job = await getJob(runId);
       if (!job) {
         return NextResponse.json({ error: "Run not found" }, { status: 404 });
       }
-      const competitors = getCompetitorsByRun(runId).map(competitorForList);
+      const competitors = (await getCompetitorsByRun(runId)).map(competitorForList);
       return NextResponse.json({
         job,
         competitors,
@@ -36,12 +37,11 @@ export async function GET(request: Request) {
       });
     }
 
-    // Own + shared only. Legacy rows with no owner never appear here.
-    const visible = visibleProjectKeys(user);
-    const runs = listHistoryRuns(500).filter((run) =>
-      visible.has(`search:${run.id}`),
-    );
-    return NextResponse.json({ runs: runs.slice(0, 100) });
+    // Own + shared only. Legacy rows with no owner never appear here. Only
+    // the visible runs are read, newest first.
+    const visible = await visibleRunIds(user, "search");
+    const runs = await listHistoryRuns(100, { ids: visible });
+    return NextResponse.json({ runs });
   } catch (err) {
     return errorResponse(err);
   }
@@ -61,12 +61,12 @@ export async function DELETE(request: Request) {
     const runId = searchParams.get("runId");
 
     if (all === "1" || all === "true") {
-      const owned = listHistoryRuns(1000).filter(
-        (run) => run.ownerUserId === user.id,
+      const owned = (await listProjects({ ownerUserId: user.id })).filter(
+        (p) => p.kind === "search",
       );
       let removedCompetitors = 0;
       for (const run of owned) {
-        removedCompetitors += deleteHistoryRun(run.id).removedCompetitors;
+        removedCompetitors += (await deleteHistoryRun(run.id)).removedCompetitors;
       }
       return NextResponse.json({
         ok: true,
@@ -83,8 +83,8 @@ export async function DELETE(request: Request) {
     }
 
     // Deleting is an edit, so shared viewers are rejected.
-    resolveProjectAccess("search", runId, user, "edit");
-    const result = deleteHistoryRun(runId);
+    await resolveProjectAccess("search", runId, user, "edit");
+    const result = await deleteHistoryRun(runId);
     if (!result.ok) {
       return NextResponse.json({ error: "Run not found" }, { status: 404 });
     }

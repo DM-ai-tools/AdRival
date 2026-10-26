@@ -27,8 +27,8 @@ export async function GET(request: Request) {
     if (!jobId) return NextResponse.json({ error: "jobId is required" }, { status: 400 });
 
     // Downloads are authorized like any other read.
-    resolveProjectAccess("search", jobId, user, "view");
-    const job = getJob(jobId);
+    await resolveProjectAccess("search", jobId, user, "view");
+    const job = await getJob(jobId);
     if (!job) return NextResponse.json({ error: "Search not found" }, { status: 404 });
 
     // The same ads the offers dashboard shows: the chosen competitors, on the searched service.
@@ -36,16 +36,22 @@ export async function GET(request: Request) {
     const focus = searchedServiceFocus(keywords, job.selectedCategory?.label || null);
     const selected = job.offersCompetitorIds?.length ? new Set(job.offersCompetitorIds) : null;
     const offerAds = job.offersReport?.status === "completed"
-      ? getSearchCompetitorAdsByRun(jobId)
+      ? (await getSearchCompetitorAdsByRun(jobId))
           .filter((ad) => !selected || selected.has(ad.competitorId))
           .filter((ad) => offerFitsSearchedService(`${ad.title || ""} ${ad.body || ""} ${ad.ctaText || ""}`, focus))
           .map((ad) => ({ ...ad, competitorName: ad.pageName }))
       : [];
 
+    // Light competitor rows are enough: the "Recreated pages" sheet lists page
+    // details and links to the page in the app; it never embeds page HTML.
+    const [competitors, recreateOnly] = await Promise.all([
+      getCompetitorsByRun(jobId),
+      getRecreateOnlyPagesByRun(jobId),
+    ]);
     const buffer = await buildFullReportWorkbook({
       job,
-      competitors: getCompetitorsByRun(jobId),
-      recreateOnly: getRecreateOnlyPagesByRun(jobId),
+      competitors,
+      recreateOnly,
       offerAds,
       focus,
       origin: siteOrigin(request),

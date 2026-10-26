@@ -10,7 +10,7 @@ import {
   errorResponse,
   requireUser,
   resolveProjectAccess,
-  visibleProjectKeys,
+  visibleRunIds,
 } from "@/lib/authz";
 
 export const runtime = "nodejs";
@@ -22,22 +22,21 @@ export async function GET(request: Request) {
     const runId = searchParams.get("runId");
 
     if (runId) {
-      resolveProjectAccess("lookup", runId, user, "view");
-      const job = getLookupJob(runId);
+      await resolveProjectAccess("lookup", runId, user, "view");
+      const job = await getLookupJob(runId);
       if (!job) {
         return NextResponse.json(
           { error: "Lookup run not found" },
           { status: 404 },
         );
       }
-      return NextResponse.json({ job, ads: getLookupAds(runId) });
+      return NextResponse.json({ job, ads: await getLookupAds(runId) });
     }
 
-    const visible = visibleProjectKeys(user);
+    // Only the lookups the caller may see are read.
+    const visible = await visibleRunIds(user, "lookup");
     return NextResponse.json({
-      runs: listLookupHistory(500).filter((run) =>
-        visible.has(`lookup:${run.id}`),
-      ),
+      runs: await listLookupHistory(500, { ids: visible }),
     });
   } catch (err) {
     return errorResponse(err);
@@ -52,12 +51,12 @@ export async function DELETE(request: Request) {
     const runId = searchParams.get("runId");
 
     if (all === "1" || all === "true") {
-      const owned = listProjects({ ownerUserId: user.id }).filter(
+      const owned = (await listProjects({ ownerUserId: user.id })).filter(
         (p) => p.kind === "lookup",
       );
       let removedAds = 0;
       for (const project of owned) {
-        removedAds += deleteLookupHistoryRun(project.id).removedAds;
+        removedAds += (await deleteLookupHistoryRun(project.id)).removedAds;
       }
       return NextResponse.json({
         ok: true,
@@ -73,8 +72,8 @@ export async function DELETE(request: Request) {
       );
     }
 
-    resolveProjectAccess("lookup", runId, user, "edit");
-    const result = deleteLookupHistoryRun(runId);
+    await resolveProjectAccess("lookup", runId, user, "edit");
+    const result = await deleteLookupHistoryRun(runId);
     if (!result.ok) {
       return NextResponse.json({ error: "Run not found" }, { status: 404 });
     }

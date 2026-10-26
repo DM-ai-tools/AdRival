@@ -21,8 +21,18 @@ export type UnifiedHistoryItem = {
   clientName?: string | null;
 };
 
-export async function listUnifiedHistory(limit = 150): Promise<UnifiedHistoryItem[]> {
-  const [searchRuns, lookupRuns] = await Promise.all([listHistoryRuns(limit), listLookupHistory(limit)]);
+/**
+ * Newest searches and lookups, merged. `searchIds` / `lookupIds` limit the
+ * list to those runs (the ones a user may see); without them every run counts.
+ */
+export async function listUnifiedHistory(
+  limit = 150,
+  options: { searchIds?: Iterable<string>; lookupIds?: Iterable<string> } = {},
+): Promise<UnifiedHistoryItem[]> {
+  const [searchRuns, lookupRuns] = await Promise.all([
+    listHistoryRuns(limit, { ids: options.searchIds }),
+    listLookupHistory(limit, { ids: options.lookupIds }),
+  ]);
   const searches = searchRuns.map((run: HistoryRunSummary) => {
     const platform = (run.platform || "facebook") as string;
     return {

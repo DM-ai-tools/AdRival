@@ -37,33 +37,33 @@ export async function POST(request: Request) {
     // Only stop a run that is actually working. Stopping a finished run would
     // leave a stop flag on it that blocks re-running its offers report later.
     if (jobId) {
-      resolveProjectAccess("search", jobId, user, "edit");
-      const job = getJob(jobId);
-      if (job && isSearchWorkInFlight(job) && stopSearchJob(jobId, reason)) {
+      await resolveProjectAccess("search", jobId, user, "edit");
+      const job = await getJob(jobId);
+      if (job && (await isSearchWorkInFlight(job)) && (await stopSearchJob(jobId, reason))) {
         searchJobIds.push(jobId);
       }
       // One-competitor brand checks do not mark the run as working.
       if (stopSingleBrandReviews(jobId)) searchJobIds.push(jobId);
     }
     if (lookupId) {
-      resolveProjectAccess("lookup", lookupId, user, "edit");
-      const job = getLookupJob(lookupId);
-      if (job && isLookupWorkInFlight(job) && stopLookupJob(lookupId, reason)) {
+      await resolveProjectAccess("lookup", lookupId, user, "edit");
+      const job = await getLookupJob(lookupId);
+      if (job && (await isLookupWorkInFlight(job)) && (await stopLookupJob(lookupId, reason))) {
         lookupIds.push(lookupId);
       }
     }
 
     if (all) {
-      for (const job of listJobs(500)) {
+      for (const job of await listJobs(500)) {
         if (job.ownerUserId !== user.id) continue;
         if (stopSingleBrandReviews(job.id)) searchJobIds.push(job.id);
-        if (!isSearchWorkInFlight(job)) continue;
-        if (stopSearchJob(job.id, reason)) searchJobIds.push(job.id);
+        if (!(await isSearchWorkInFlight(job))) continue;
+        if (await stopSearchJob(job.id, reason)) searchJobIds.push(job.id);
       }
-      for (const job of listLookupJobs(500)) {
+      for (const job of await listLookupJobs(500)) {
         if (job.ownerUserId !== user.id) continue;
-        if (!isLookupWorkInFlight(job)) continue;
-        if (stopLookupJob(job.id, reason)) lookupIds.push(job.id);
+        if (!(await isLookupWorkInFlight(job))) continue;
+        if (await stopLookupJob(job.id, reason)) lookupIds.push(job.id);
       }
     }
 

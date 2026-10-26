@@ -249,7 +249,9 @@ async function jobsInVisibleSpaces(user: AppUser): Promise<VisibleProject[]> {
       .map((m) => ({ id: m.spaceId, role: m.role })),
   ];
   const bySpace = new Map(spaces.map((s) => [s.id, s.role]));
-  const projects = (await listProjects()).filter(
+  // Read only the runs in those spaces (most users have none: no query at all).
+  if (!bySpace.size) return [];
+  const projects = (await listProjects({ spaceIds: bySpace.keys() })).filter(
     (project) => project.spaceId && bySpace.has(project.spaceId) && !project.archivedAt,
   );
   const owners = await getUsersByIds(projects.map((p) => p.ownerUserId));

@@ -6,7 +6,7 @@ import {
   getJob,
   getLookupAds,
   getLookupJob,
-  getProjectSpace,
+  getProjectSpacesByIds,
   listProjects,
 } from "@/lib/db";
 import { competitorForList } from "@/lib/competitorView";
@@ -31,11 +31,16 @@ export async function GET(request: Request) {
     const kind = searchParams.get("kind");
 
     if (runId && kind === "lookup") {
-      resolveProjectAccess("lookup", runId, user, "view");
-      const job = getLookupJob(runId);
+      await resolveProjectAccess("lookup", runId, user, "view");
+      const job = await getLookupJob(runId);
       if (!job) {
         return NextResponse.json({ error: "Lookup not found" }, { status: 404 });
       }
+      const [ads, credits] = await Promise.all([
+        getLookupAds(runId),
+        // Credits the caller spent on this run — never the owner's balance.
+        reportRunCredits(user.id, runId),
+      ]);
       return NextResponse.json({
         kind: "lookup",
         job: {
@@ -54,21 +59,24 @@ export async function GET(request: Request) {
               }
             : job.progress,
         },
-        ads: getLookupAds(runId).map((ad) => ({
+        ads: ads.map((ad) => ({
           ...ad,
           pageAnalysis: maskPageAnalysis(ad.pageAnalysis),
         })),
-        // Credits the caller spent on this run — never the owner's balance.
-        credits: reportRunCredits(user.id, runId),
+        credits,
       });
     }
 
     if (runId && kind === "search") {
-      resolveProjectAccess("search", runId, user, "view");
-      const job = getJob(runId);
+      await resolveProjectAccess("search", runId, user, "view");
+      const job = await getJob(runId);
       if (!job) {
         return NextResponse.json({ error: "Search not found" }, { status: 404 });
       }
+      const [competitors, credits] = await Promise.all([
+        getCompetitorsByRun(runId),
+        reportRunCredits(user.id, runId),
+      ]);
       return NextResponse.json({
         kind: "search",
         job: {
@@ -87,20 +95,27 @@ export async function GET(request: Request) {
               }
             : job.progress,
         },
-        competitors: getCompetitorsByRun(runId).map((competitor) => ({
+        competitors: competitors.map((competitor) => ({
           ...competitorForList(competitor),
           pageAnalysis: maskPageAnalysis(competitor.pageAnalysis),
         })),
-        credits: reportRunCredits(user.id, runId),
+        credits,
       });
     }
 
     // Only projects the caller owns or that were explicitly shared with them.
     // Legacy rows with no owner are excluded until an admin assigns them.
-    const visible = new Map(
-      listVisibleProjects(user).map((p) => [`${p.kind}:${p.id}`, p]),
-    );
-    const runs = listUnifiedHistory()
+    const projects = await listVisibleProjects(user);
+    const visible = new Map(projects.map((p) => [`${p.kind}:${p.id}`, p]));
+    // Only the visible runs are read; client names come from one batch read.
+    const [history, spaces] = await Promise.all([
+      listUnifiedHistory(150, {
+        searchIds: projects.filter((p) => p.kind === "search").map((p) => p.id),
+        lookupIds: projects.filter((p) => p.kind === "lookup").map((p) => p.id),
+      }),
+      getProjectSpacesByIds(projects.map((p) => p.spaceId)),
+    ]);
+    const runs = history
       .map((run) => {
         const project = visible.get(`${run.kind}:${run.id}`);
         if (!project) return null;
@@ -111,7 +126,7 @@ export async function GET(request: Request) {
             project.accessRole === "owner" ? null : project.ownerDisplayName,
           spaceId: project.spaceId ?? null,
           clientName: project.spaceId
-            ? getProjectSpace(project.spaceId)?.clientName ?? null
+            ? spaces.get(project.spaceId)?.clientName ?? null
             : null,
         };
       })
@@ -132,15 +147,15 @@ export async function DELETE(request: Request) {
     const kind = searchParams.get("kind");
 
     if (all === "1" || all === "true") {
-      const owned = listProjects({ ownerUserId: user.id });
+      const owned = await listProjects({ ownerUserId: user.id });
       let removedSearchRuns = 0;
       let removedLookupRuns = 0;
       for (const project of owned) {
         if (project.kind === "search") {
-          deleteHistoryRun(project.id);
+          await deleteHistoryRun(project.id);
           removedSearchRuns += 1;
         } else {
-          deleteLookupHistoryRun(project.id);
+          await deleteLookupHistoryRun(project.id);
           removedLookupRuns += 1;
         }
       }
@@ -157,10 +172,10 @@ export async function DELETE(request: Request) {
       throw new HttpError(400, "kind must be 'search' or 'lookup'");
     }
 
-    resolveProjectAccess(kind, runId, user, "edit");
+    await resolveProjectAccess(kind, runId, user, "edit");
 
     if (kind === "lookup") {
-      const result = deleteLookupHistoryRun(runId);
+      const result = await deleteLookupHistoryRun(runId);
       if (!result.ok) {
         return NextResponse.json({ error: "Not found" }, { status: 404 });
       }
@@ -172,7 +187,7 @@ export async function DELETE(request: Request) {
       });
     }
 
-    const result = deleteHistoryRun(runId);
+    const result = await deleteHistoryRun(runId);
     if (!result.ok) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }

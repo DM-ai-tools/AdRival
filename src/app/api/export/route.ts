@@ -15,14 +15,14 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "jobId is required" }, { status: 400 });
   }
 
-  resolveProjectAccess("search", jobId, user, "view");
+  await resolveProjectAccess("search", jobId, user, "view");
 
-  const job = getJob(jobId);
+  const job = await getJob(jobId);
   if (!job) {
     return NextResponse.json({ error: "Job not found" }, { status: 404 });
   }
 
-  const competitors = getCompetitorsByRun(jobId);
+  const competitors = await getCompetitorsByRun(jobId);
   const buffer = await buildCompetitorsWorkbook(job, competitors);
   const safeKeyword = job.keyword.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
   const date = new Date().toISOString().slice(0, 10);

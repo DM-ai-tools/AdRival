@@ -624,16 +624,27 @@ export async function listJobs(limit = 100): Promise<SearchJob[]> {
   return rows.map((r) => r.data);
 }
 
-export async function listHistoryRuns(limit = 100): Promise<HistoryRunSummary[]> {
+/**
+ * Newest search runs with their competitor counts. `ids` limits the list to
+ * those runs (e.g. the ones a user may see), so a user's older runs are not
+ * crowded out by other users' newer ones and only their rows are read.
+ */
+export async function listHistoryRuns(
+  limit = 100,
+  options: { ids?: Iterable<string> } = {},
+): Promise<HistoryRunSummary[]> {
+  const ids = options.ids ? [...new Set(options.ids)] : null;
+  if (ids && !ids.length) return [];
   const { rows } = await getDb().query<{ data: SearchJob; found: number }>(
     `select j.data,
             (select count(*) from competitors c
               where c.run_id = j.id
                 and not ${recreateOnlySql("c.data")})::int as found
        from jobs j
+      ${ids ? "where j.id = any($2::text[])" : ""}
       order by j.created_at desc, j.id desc
       limit $1`,
-    [limit],
+    ids ? [limit, ids] : [limit],
   );
   return rows.map(({ data, found }) => ({
     ...data,
@@ -817,15 +828,22 @@ export async function listLookupJobs(limit = 200): Promise<LookupJob[]> {
   return rows.map((r) => r.data);
 }
 
-export async function listLookupHistory(limit = 100): Promise<LookupHistorySummary[]> {
+/** Newest user-facing lookups with their ad counts; `ids` limits the list as in listHistoryRuns. */
+export async function listLookupHistory(
+  limit = 100,
+  options: { ids?: Iterable<string> } = {},
+): Promise<LookupHistorySummary[]> {
+  const ids = options.ids ? [...new Set(options.ids)] : null;
+  if (ids && !ids.length) return [];
   const { rows } = await getDb().query<{ data: LookupJob; found: number }>(
     `select l.data,
             (select count(*) from lookup_ads a where a.lookup_id = l.id)::int as found
        from lookup_jobs l
       where (l.data->>'internalOnly') is distinct from 'true'
+        ${ids ? "and l.id = any($2::text[])" : ""}
       order by l.created_at desc, l.id desc
       limit $1`,
-    [limit],
+    ids ? [limit, ids] : [limit],
   );
   return rows.map(({ data, found }) => ({
     ...data,
