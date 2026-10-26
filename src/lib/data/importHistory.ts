@@ -10,6 +10,7 @@ import type {
 import { getDb, withTx, type Queryable } from "./client";
 import { upsertCompetitor } from "./competitors";
 import { upsertIcpRow } from "./icps";
+import { deleteArchivedFor } from "./archive";
 import { emptyDb, remapImportedOwners, type ImportOwnerOptions, type ImportOwnerSummary } from "./legacyStore";
 import { lastPerId, upsertLookupAds, upsertSearchCompetitorAds } from "./lookups";
 import { applyHeavy, planPage } from "./recreatedPages";
@@ -130,6 +131,8 @@ interface RunChanges {
   liveLookup: string[];
   removedSearch: string[];
   removedLookup: string[];
+  /** Competitors whose archived page object is now stale (row removed, or content rewritten). */
+  staleArchives: string[];
 }
 
 async function importHistory(
@@ -145,6 +148,8 @@ async function importHistory(
   for (const id of runs.liveLookup) unsuppressLookupRunHere(id);
   for (const id of runs.removedSearch) suppressSearchRunHere(id);
   for (const id of runs.removedLookup) suppressLookupRunHere(id);
+  // Best effort (logged, never thrown): the database no longer points at these objects.
+  await deleteArchivedFor(runs.staleArchives);
   return result;
 }
 
@@ -183,7 +188,7 @@ function importInTx(
 
     for (const job of jobs) await upsertRun(tx, "jobs", job);
     for (const job of lookupJobs) await upsertRun(tx, "lookup_jobs", job);
-    await importCompetitors(tx, competitors);
+    const staleArchives = await importCompetitors(tx, competitors);
     for (const part of chunks(lookupAds)) await upsertLookupAds(tx, part);
     for (const part of chunks(searchAds)) await upsertSearchCompetitorAds(tx, part);
     for (const icp of icps) await upsertIcpRow(tx, icp);
@@ -202,7 +207,8 @@ function importInTx(
             icps: icps.map((r) => r.id),
             seenPageIds,
           })
-        : { search: [], lookup: [] };
+        : { search: [], lookup: [], archived: [] };
+    staleArchives.push(...gone.archived);
     const removed = [...gone.search, ...gone.lookup];
 
     // Tombstones: the import's, then every run a replace removed. A run that
@@ -228,6 +234,7 @@ function importInTx(
         liveLookup: lookupJobs.map((j) => j.id),
         removedSearch: gone.search,
         removedLookup: gone.lookup,
+        staleArchives,
       },
     };
   });
@@ -235,13 +242,15 @@ function importInTx(
 
 /**
  * Replace: deletes every history row the import did not write (ids kept per
- * table). Returns the removed run ids per table, oldest first; the caller
- * suppresses them in this process once the transaction has committed.
+ * table). Returns the removed run ids per table, oldest first (the caller
+ * suppresses them in this process once the transaction has committed), and
+ * the removed competitors whose page was archived (their Storage objects are
+ * deleted after the commit).
  */
 async function deleteOthers(
   tx: Queryable,
   keep: Record<"jobs" | "lookupJobs" | "competitors" | "lookupAds" | "searchAds" | "icps" | "seenPageIds", string[]>,
-): Promise<{ search: string[]; lookup: string[] }> {
+): Promise<{ search: string[]; lookup: string[]; archived: string[] }> {
   const removedRuns = (table: "jobs" | "lookup_jobs", ids: string[]) =>
     selectIds(
       tx,
@@ -252,21 +261,37 @@ async function deleteOthers(
   const searchGone = await removedRuns("jobs", keep.jobs);
   const lookupGone = await removedRuns("lookup_jobs", keep.lookupJobs);
   // recreated_pages rows go with their competitors (on delete cascade).
+  const archived = await selectIds(
+    tx,
+    `select competitor_id as id from recreated_pages
+      where archive_path is not null and not (competitor_id = any($1::text[]))`,
+    [keep.competitors],
+  );
   await tx.query("delete from competitors where not (id = any($1::text[]))", [keep.competitors]);
   await tx.query("delete from lookup_ads where not (id = any($1::text[]))", [keep.lookupAds]);
   await tx.query("delete from search_competitor_ads where not (id = any($1::text[]))", [keep.searchAds]);
   await tx.query("delete from icps where not (id = any($1::text[]))", [keep.icps]);
   await tx.query("delete from seen_page_ids where not (id = any($1::text[]))", [keep.seenPageIds]);
-  return { search: searchGone, lookup: lookupGone };
+  return { search: searchGone, lookup: lookupGone, archived };
 }
 
 /**
  * Competitor rows with their page content split off (recreated_pages); the
  * owner is copied from the run. A stored page is the base for an incoming
  * light page, as in saveCompetitor; a full (legacy) page replaces its content.
+ * Returns the competitors whose archived content was replaced or removed (the
+ * archive object is stale once this commits).
  */
-async function importCompetitors(tx: Queryable, rows: LegacyCompetitorRecord[]): Promise<void> {
-  if (!rows.length) return;
+async function importCompetitors(tx: Queryable, rows: LegacyCompetitorRecord[]): Promise<string[]> {
+  if (!rows.length) return [];
+  const archived = new Set(
+    await selectIds(
+      tx,
+      "select competitor_id as id from recreated_pages where archive_path is not null and competitor_id = any($1::text[])",
+      [rows.map((c) => c.id)],
+    ),
+  );
+  const stale: string[] = [];
   const runIds = [...new Set(rows.map((c) => c.runId))];
   const { rows: owners } = await tx.query<{ id: string; owner: string | null }>(
     "select id, owner_user_id as owner from jobs where id = any($1::text[])",
@@ -284,7 +309,9 @@ async function importCompetitors(tx: Queryable, rows: LegacyCompetitorRecord[]):
     if (page === undefined) delete row.recreatedPage;
     await upsertCompetitor(tx, row, ownerOf.get(competitor.runId) ?? null);
     await applyHeavy(tx, competitor.id, action);
+    if (action.kind !== "keep" && archived.has(competitor.id)) stale.push(competitor.id);
   }
+  return stale;
 }
 
 /* Old stores can miss the reference columns; the tables require them. */

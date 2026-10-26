@@ -4,26 +4,51 @@ import { gunzipSync } from "node:zlib";
 import { RECREATED_PAGE_HEAVY_KEYS, type DatabaseShape } from "../types";
 import { fetchArchived } from "./archive";
 import type { Queryable } from "./client";
-import { CUTOVER_MESSAGE, prepareStore } from "./importStore";
+import {
+  CUTOVER_MESSAGE,
+  MARKER_KEYS,
+  isoTime,
+  pageTime,
+  planCounts,
+  planImport,
+  withoutMarker,
+  type ImportPlan,
+} from "./importStore";
 
 /*
- * Checks a database against the store.json it was imported from (cutover
- * verification). Expectations come from the same normalization the import
- * uses (migrateDb, one record per key, newest ICP per stage, first provider
- * call per idempotency key); a record the import had to skip shows up here as
- * a missing id. Never throws on a mismatch: each one is reported with ids.
+ * Checks a database against the store.json it was imported from (the cutover
+ * gate). Expectations come from the import's own plan (migrateDb, first copy
+ * per id, newest ICP per stage, first provider call per key, NOT NULL skips),
+ * so every difference is either explained by the plan or reported:
  *
+ * - every row's `data` against the expected record, by sha-256 of canonical
+ *   (key-sorted) JSON, in every collection (competitors: the light page with
+ *   the marker the import adds; interrupted runs: their failed form);
+ * - every column copied from the record (owner, space, org, status, run,
+ *   provider, user, period, seq, timestamps, ...) against its source field;
+ * - every recreated page's content (from the row or from Storage): byte
+ *   length, the bytes column and sha-256, plus its updated_at;
+ * - credit period counters, ledger counts and sums per user, sequences;
+ * - the file's array lengths against what was written: each record the import
+ *   left out must be one the plan left out. Collapses (a later copy of an id,
+ *   a later provider call with a used key, an older ICP of a stage, repeated
+ *   seen ids) are listed in `skipped`; a record the database could not hold
+ *   (lost data) is a mismatch.
+ *
+ * Never throws: a check that fails to run is reported as a mismatch.
  * Reads every page's content one at a time (archived pages from Storage).
  */
 
 export interface VerifyResult {
   ok: boolean;
   mismatches: string[];
+  /** Records the import left out on purpose (collapses), one line each. Not mismatches. */
+  skipped: string[];
 }
 
 type AnyRecord = Record<string, unknown>;
 
-/** How many ids one mismatch line lists. */
+/** How many ids one mismatch line lists (all are counted). */
 const LIST_IDS = 20;
 
 function listIds(ids: string[]): string {
@@ -31,9 +56,9 @@ function listIds(ids: string[]): string {
   return ids.length > LIST_IDS ? `${shown}, … (${ids.length} in all)` : shown;
 }
 
-/** JSON with object keys sorted, so equal content hashes equal whatever the key order. */
+/** JSON with object keys sorted (undefined members left out, as JSON.stringify does). */
 function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (Array.isArray(value)) return `[${value.map((v) => (v === undefined ? "null" : canonical(v))).join(",")}]`;
   if (value && typeof value === "object") {
     const entries = Object.keys(value as AnyRecord)
       .filter((key) => (value as AnyRecord)[key] !== undefined)
@@ -48,20 +73,27 @@ function sha256(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
 
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function isRecord(value: unknown): value is AnyRecord {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 /**
  * The content a page in the file carries, built the way the import splits it
  * (heavy keys in their fixed order, html defaulting to null), or null when it
  * carries none (no content row is expected).
  */
 export function expectedHeavy(page: unknown): AnyRecord | null {
-  if (!page || typeof page !== "object") return null;
-  const source = page as AnyRecord;
+  if (!isRecord(page)) return null;
   const heavy: AnyRecord = {};
   let carries = false;
   for (const key of RECREATED_PAGE_HEAVY_KEYS) {
-    if (!(key in source)) continue;
+    if (!(key in page)) continue;
     carries = true;
-    if (source[key] !== undefined) heavy[key] = source[key];
+    if (page[key] !== undefined) heavy[key] = page[key];
   }
   if (!carries) return null;
   const full: AnyRecord = { ...heavy, html: heavy.html ?? null };
@@ -72,10 +104,116 @@ export function expectedHeavy(page: unknown): AnyRecord | null {
   return hasContent ? full : null;
 }
 
-async function idsOf(db: Queryable, sql: string): Promise<Set<string>> {
-  const { rows } = await db.query<{ id: string | number }>(sql);
-  return new Set(rows.map((r) => String(r.id)));
+/** The competitor row's `data` the import writes: light page plus marker, run id fixed. */
+function expectedCompetitor(competitor: AnyRecord): AnyRecord {
+  const out: AnyRecord = { ...competitor };
+  if (!("recreatedPage" in competitor) || competitor.recreatedPage === undefined) {
+    delete out.recreatedPage;
+    return out;
+  }
+  const page = withoutMarker(competitor.recreatedPage);
+  if (!isRecord(page)) {
+    out.recreatedPage = null;
+    return out;
+  }
+  const heavy = expectedHeavy(page);
+  const light: AnyRecord = { ...page };
+  for (const key of RECREATED_PAGE_HEAVY_KEYS) delete light[key];
+  for (const key of MARKER_KEYS) delete light[key];
+  out.recreatedPage = heavy
+    ? { ...light, hasPage: true, pageBytes: Buffer.byteLength(JSON.stringify(heavy)), pageUpdatedAt: pageTime(page, competitor) }
+    : { ...light, hasPage: false, pageBytes: 0, pageUpdatedAt: null };
+  return out;
 }
+
+type Kind = "text" | "int" | "time";
+
+interface Column {
+  /** Name in messages; also the SQL alias. */
+  name: string;
+  /** SQL for the column's value (text, a number, or the time as an ISO string). */
+  sql: string;
+  kind: Kind;
+  /** The value the record says it should have; `undefined` skips the check (e.g. a time the import set to now()). */
+  want: (record: AnyRecord) => unknown;
+}
+
+interface Spec {
+  name: string;
+  table: string;
+  /** SQL for the row key (text). */
+  key: string;
+  records: Array<{ key: string; record: AnyRecord }>;
+  /** The expected `data` (default: the record itself). `row` is the stored data. */
+  expect?: (record: AnyRecord, row: AnyRecord) => unknown;
+  columns: Column[];
+  /** Tables without a data column compare keys only. */
+  noData?: boolean;
+}
+
+const TIME_SQL = (col: string) => `to_char(${col} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`;
+const text = (name: string, sql: string, want: Column["want"]): Column => ({ name, sql, kind: "text", want });
+const int = (name: string, sql: string, want: Column["want"]): Column => ({ name, sql: `${sql}::text`, kind: "int", want });
+/**
+ * A timestamptz column. `nullable` columns hold null when the record has no
+ * time; the others were filled with now() then, which is not checked.
+ */
+const time = (name: string, col: string, want: (r: AnyRecord) => unknown, nullable = false): Column => ({
+  name,
+  sql: TIME_SQL(col),
+  kind: "time",
+  want: (r) => isoTime(want(r)) ?? (nullable ? null : undefined),
+});
+
+function sameValue(kind: Kind, got: unknown, want: unknown): boolean {
+  if (want === undefined) return true;
+  if (kind === "int") return got !== null && got !== undefined && Number(got) === Number(want);
+  if (want === null) return got === null || got === undefined;
+  return String(got) === String(want);
+}
+
+async function checkTable(db: Queryable, spec: Spec, mismatches: string[]): Promise<void> {
+  const cols = spec.columns.map((c) => `${c.sql} as "${c.name}"`);
+  const select = [`${spec.key} as k`, ...(spec.noData ? [] : ["data"]), ...cols].join(", ");
+  const { rows } = await db.query<AnyRecord & { k: string; data: AnyRecord }>(`select ${select} from ${spec.table}`);
+  const stored = new Map(rows.map((r) => [String(r.k), r]));
+  const wanted = new Map(spec.records.map((r) => [r.key, r.record]));
+
+  const missing = [...wanted.keys()].filter((k) => !stored.has(k));
+  const extra = [...stored.keys()].filter((k) => !wanted.has(k));
+  if (stored.size !== wanted.size) mismatches.push(`${spec.name}: ${stored.size} row(s) in the database, ${wanted.size} expected`);
+  if (missing.length) mismatches.push(`${spec.name}: missing ${missing.length}: ${listIds(missing)}`);
+  if (extra.length) mismatches.push(`${spec.name}: not in the store ${extra.length}: ${listIds(extra)}`);
+
+  const dataDiffers: string[] = [];
+  const columnDiffers = new Map<string, string[]>();
+  for (const [key, record] of wanted) {
+    const row = stored.get(key);
+    if (!row) continue;
+    if (!spec.noData) {
+      const expected = spec.expect ? spec.expect(record, row.data) : record;
+      if (sha256(canonical(row.data)) !== sha256(canonical(expected))) dataDiffers.push(key);
+    }
+    for (const column of spec.columns) {
+      const want = column.want(record);
+      if (!sameValue(column.kind, row[column.name], want)) {
+        const ids = columnDiffers.get(column.name) ?? [];
+        ids.push(`${key} (${String(row[column.name])} ≠ ${String(want)})`);
+        columnDiffers.set(column.name, ids);
+      }
+    }
+  }
+  if (dataDiffers.length) {
+    mismatches.push(`${spec.name}: data differs from the store for ${dataDiffers.length}: ${listIds(dataDiffers)}`);
+  }
+  for (const [column, ids] of columnDiffers) {
+    mismatches.push(`${spec.name}.${column}: differs from the record for ${ids.length}: ${listIds(ids)}`);
+  }
+}
+
+const field = (name: string) => (r: AnyRecord) => r[name] ?? null;
+const keyed = <T>(rows: T[], key: (r: T) => string) =>
+  rows.map((r) => ({ key: key(r), record: r as unknown as AnyRecord }));
 
 export async function verifyImport(
   db: Queryable,
@@ -84,115 +222,323 @@ export async function verifyImport(
 ): Promise<VerifyResult> {
   const log = opts.log ?? (() => {});
   const mismatches: string[] = [];
-  const expected = prepareStore(store);
-
-  /* row ids per collection */
-  const collections: Array<{ name: string; sql: string; ids: string[] }> = [
-    { name: "organizations", sql: "select id from organizations", ids: expected.organizations.map((r) => r.id) },
-    { name: "users", sql: "select id from users", ids: expected.users.map((r) => r.id) },
-    { name: "conversionRuleSets", sql: "select version as id from conversion_rule_sets", ids: expected.conversionRuleSets.map((r) => String(r.version)) },
-    { name: "creditPeriods", sql: "select id from credit_periods", ids: expected.creditPeriods.map((r) => r.id) },
-    { name: "creditLedger", sql: "select id from credit_ledger", ids: expected.creditLedger.map((r) => r.id) },
-    { name: "creditReservations", sql: "select id from credit_reservations", ids: expected.creditReservations.map((r) => r.id) },
-    { name: "providerCalls", sql: "select id from provider_calls", ids: expected.providerCalls.map((r) => r.id) },
-    { name: "projectMemberships", sql: "select id from project_memberships", ids: expected.projectMemberships.map((r) => r.id) },
-    { name: "projectSpaces", sql: "select id from project_spaces", ids: expected.projectSpaces.map((r) => r.id) },
-    { name: "spaceMemberships", sql: "select id from space_memberships", ids: expected.spaceMemberships.map((r) => r.id) },
-    { name: "auditLogs", sql: "select id from audit_logs", ids: expected.auditLogs.map((r) => r.id) },
-    { name: "adminAlerts", sql: "select id from admin_alerts", ids: expected.adminAlerts.map((r) => r.id) },
-    { name: "loginAttempts", sql: "select id from login_attempts", ids: expected.loginAttempts.map((r) => r.key) },
-    { name: "jobs", sql: "select id from jobs", ids: expected.jobs.map((r) => r.id) },
-    { name: "lookupJobs", sql: "select id from lookup_jobs", ids: expected.lookupJobs.map((r) => r.id) },
-    { name: "competitors", sql: "select id from competitors", ids: expected.competitors.map((r) => r.id) },
-    { name: "lookupAds", sql: "select id from lookup_ads", ids: expected.lookupAds.map((r) => r.id) },
-    { name: "searchCompetitorAds", sql: "select id from search_competitor_ads", ids: expected.searchCompetitorAds.map((r) => r.id) },
-    { name: "icps", sql: "select id from icps", ids: expected.icps.map((r) => r.id) },
-    { name: "seenPageIds", sql: "select id from seen_page_ids", ids: expected.seenPageIds },
-    { name: "deletedRunIds", sql: "select id from deleted_run_ids", ids: expected.deletedRunIds },
-  ];
-  for (const { name, sql, ids } of collections) {
-    const stored = await idsOf(db, sql);
-    const wanted = new Set(ids);
-    if (stored.size !== wanted.size) {
-      mismatches.push(`${name}: ${stored.size} row(s) in the database, ${wanted.size} in the store`);
+  const skipped: string[] = [];
+  const check = async (name: string, fn: () => Promise<void> | void) => {
+    try {
+      await fn();
+    } catch (err) {
+      mismatches.push(`check "${name}" could not run: ${errorText(err)}`);
     }
-    const missing = [...wanted].filter((id) => !stored.has(id));
-    const extra = [...stored].filter((id) => !wanted.has(id));
-    if (missing.length) mismatches.push(`${name}: missing ${missing.length}: ${listIds(missing)}`);
-    if (extra.length) mismatches.push(`${name}: not in the store ${extra.length}: ${listIds(extra)}`);
-  }
-  {
-    const { rows } = await db.query<{ n: number }>("select count(*)::int as n from app_settings");
-    const want = expected.appSettings ? 1 : 0;
-    if (Number(rows[0]?.n) !== want) mismatches.push(`appSettings: ${rows[0]?.n} row(s), expected ${want}`);
-  }
-  log(`row ids checked (${mismatches.length} mismatch(es) so far)`);
+  };
 
-  /* users: credentials and roles */
-  {
-    const { rows } = await db.query<{ id: string; username: string; role: string; status: string; data: AnyRecord }>(
-      "select id, username, role, status, data from users",
-    );
-    const byId = new Map(rows.map((r) => [r.id, r]));
-    for (const user of expected.users) {
-      const row = byId.get(user.id);
-      if (!row) continue;
-      if (row.data.passwordHash !== user.passwordHash) mismatches.push(`users ${user.id}: password hash differs`);
-      if (row.role !== user.role || row.data.role !== user.role) mismatches.push(`users ${user.id}: role ${row.role}, expected ${user.role}`);
-      if (row.status !== user.status || row.data.status !== user.status) {
-        mismatches.push(`users ${user.id}: status ${row.status}, expected ${user.status}`);
+  // What the file said before migrateDb normalizes it in place.
+  const raw = store as unknown as AnyRecord;
+  const rawSchema = typeof raw?.schemaVersion === "number" ? raw.schemaVersion : 1;
+  const hadSettings = isRecord(raw?.appSettings);
+  const rawRuleVersions = new Set(
+    (Array.isArray(raw?.conversionRuleSets) ? (raw.conversionRuleSets as AnyRecord[]) : []).map((s) => s?.version),
+  );
+
+  let plan: ImportPlan;
+  try {
+    plan = planImport(store);
+    // Interrupted runs carry the import's time: plan again with it, so their
+    // failed form is compared exactly.
+    const ids = [...plan.prepared.interrupted];
+    if (ids.length) {
+      const { rows } = await db.query<{ at: string | null }>(
+        `select data->>'updatedAt' as at from jobs where id = any($1::text[])
+         union all select data->>'updatedAt' as at from lookup_jobs where id = any($1::text[])`,
+        [ids],
+      );
+      const at = rows.find((r) => r.at)?.at;
+      if (at) plan = planImport(store, at);
+    }
+  } catch (err) {
+    return { ok: false, mismatches: [`the store could not be read: ${errorText(err)}`], skipped };
+  }
+  const prepared = plan.prepared;
+
+  /* 1. every record of the file is written or left out by the plan */
+  await check("file vs plan", () => {
+    const counts = planCounts(plan);
+    const store2 = store as unknown as Record<string, unknown>;
+    for (const [collection, expected] of Object.entries(counts)) {
+      if (collection === "appSettings") continue;
+      const rawLength = Array.isArray(store2[collection]) ? (store2[collection] as unknown[]).length : 0;
+      const drops = plan.drops.filter((d) => d.collection === collection);
+      if (rawLength - drops.length !== expected) {
+        mismatches.push(
+          `${collection}: ${rawLength} in the file, ${drops.length} left out, but ${expected} to write (unexplained difference)`,
+        );
       }
-      if (row.username !== user.username) mismatches.push(`users ${user.id}: username ${row.username}, expected ${user.username}`);
-      if ((row.data.orgId ?? null) !== (user.orgId ?? null)) mismatches.push(`users ${user.id}: orgId differs`);
     }
-  }
+    for (const d of plan.drops) {
+      const line = `${d.collection} ${d.id}: ${d.reason}`;
+      if (d.lost) mismatches.push(`lost (not imported): ${line}`);
+      else skipped.push(line);
+    }
+  });
 
-  /* credit periods: counters (columns and record) per period, per user */
-  {
-    const { rows } = await db.query<{
-      id: string;
-      user_id: string;
-      status: string;
-      allowance: string;
-      consumed: string;
-      reserved: string;
-      data: AnyRecord;
-    }>("select id, user_id, status, allowance::text, consumed::text, reserved::text, data from credit_periods");
-    const byId = new Map(rows.map((r) => [r.id, r]));
-    for (const period of expected.creditPeriods) {
-      const row = byId.get(period.id);
-      if (!row) continue;
-      const checks: Array<[string, unknown, unknown, unknown]> = [
-        ["allowance", Number(row.allowance), row.data.allowanceSubunits, period.allowanceSubunits],
-        ["consumed", Number(row.consumed), row.data.consumedSubunits, period.consumedSubunits],
-        ["reserved", Number(row.reserved), row.data.reservedSubunits, period.reservedSubunits],
-        ["status", row.status, row.data.status, period.status],
-        ["user", row.user_id, row.data.userId, period.userId],
-      ];
-      for (const [field, column, record, want] of checks) {
-        if (column !== want || record !== want) {
-          mismatches.push(
-            `creditPeriods ${period.id} (user ${period.userId}): ${field} is ${String(column)} (record ${String(record)}), expected ${String(want)}`,
-          );
+  /* 2. every row's data and copied columns */
+  const orgOf = new Map(plan.users.map((u) => [u.id, u.orgId ?? null]));
+  const jobOwner = new Map(prepared.jobs.map((j) => [j.id, j.ownerUserId ?? null]));
+  const specs: Spec[] = [
+    {
+      name: "organizations",
+      table: "organizations",
+      key: "id",
+      records: keyed(prepared.organizations, (r) => r.id),
+      columns: [time("archived_at", "archived_at", (r) => r.archivedAt || null, true)],
+    },
+    {
+      name: "users",
+      table: "users",
+      key: "id",
+      records: keyed(plan.users, (r) => r.id),
+      columns: [
+        text("username", "username", field("username")),
+        text("lower_username", "lower(username)", (r) => String(r.username).toLowerCase()),
+        text("org_id", "org_id", field("orgId")),
+        text("role", "role", field("role")),
+        text("status", "status", field("status")),
+      ],
+    },
+    {
+      name: "appSettings",
+      table: "app_settings",
+      key: "id",
+      records: prepared.appSettings ? [{ key: "singleton", record: prepared.appSettings as unknown as AnyRecord }] : [],
+      // Settings migrateDb created or changed carry the time of that run.
+      expect: (r, row) => (rawSchema < 4 || !hadSettings ? { ...r, updatedAt: row.updatedAt } : r),
+      columns: [],
+    },
+    {
+      name: "conversionRuleSets",
+      table: "conversion_rule_sets",
+      key: "version::text",
+      records: keyed(prepared.conversionRuleSets, (r) => String(r.version)),
+      // A rule set migrateDb added (seed or softened) carries the time of that run.
+      expect: (r, row) => (rawRuleVersions.has(r.version) ? r : { ...r, createdAt: row.createdAt }),
+      columns: [],
+    },
+    {
+      name: "projectSpaces",
+      table: "project_spaces",
+      key: "id",
+      records: keyed(plan.projectSpaces, (r) => r.id),
+      columns: [
+        text("org_id", "org_id", (r) => orgOf.get(String(r.ownerUserId)) ?? null),
+        text("owner_user_id", "owner_user_id", field("ownerUserId")),
+        time("archived_at", "archived_at", (r) => r.archivedAt || null, true),
+      ],
+    },
+    {
+      name: "spaceMemberships",
+      table: "space_memberships",
+      key: "id",
+      records: keyed(plan.spaceMemberships, (r) => r.id),
+      columns: [text("space_id", "space_id", field("spaceId")), text("user_id", "user_id", field("userId"))],
+    },
+    {
+      name: "projectMemberships",
+      table: "project_memberships",
+      key: "id",
+      records: keyed(plan.projectMemberships, (r) => r.id),
+      columns: [
+        text("project_kind", "project_kind", field("projectKind")),
+        text("project_id", "project_id", field("projectId")),
+        text("user_id", "user_id", field("userId")),
+      ],
+    },
+    {
+      name: "creditPeriods",
+      table: "credit_periods",
+      key: "id",
+      records: keyed(plan.creditPeriods, (r) => r.id),
+      columns: [
+        text("user_id", "user_id", field("userId")),
+        text("status", "status", field("status")),
+        int("allowance", "allowance", field("allowanceSubunits")),
+        int("consumed", "consumed", field("consumedSubunits")),
+        int("reserved", "reserved", field("reservedSubunits")),
+      ],
+    },
+    {
+      name: "creditReservations",
+      table: "credit_reservations",
+      key: "id",
+      records: keyed(plan.creditReservations, (r) => r.id),
+      columns: [
+        text("user_id", "user_id", field("userId")),
+        text("period_id", "period_id", field("periodId")),
+        text("status", "status", field("status")),
+        time("expires_at", "expires_at", field("expiresAt")),
+      ],
+    },
+    {
+      name: "creditLedger",
+      table: "credit_ledger",
+      key: "id",
+      records: keyed(plan.creditLedger, (r) => r.id),
+      columns: [
+        int("seq", "seq", field("seq")),
+        text("user_id", "user_id", field("userId")),
+        text("period_id", "period_id", field("periodId")),
+        time("created_at", "created_at", field("createdAt")),
+      ],
+    },
+    {
+      name: "providerCalls",
+      table: "provider_calls",
+      key: "id",
+      records: keyed(plan.providerCalls, (r) => r.id),
+      columns: [
+        text("user_id", "user_id", field("chargedUserId")),
+        text("run_id", "run_id", field("runId")),
+        text("provider", "provider", field("provider")),
+        time("created_at", "created_at", field("startedAt")),
+      ],
+    },
+    {
+      name: "auditLogs",
+      table: "audit_logs",
+      key: "id",
+      records: keyed(prepared.auditLogs, (r) => r.id),
+      columns: [int("seq", "seq", field("seq")), time("created_at", "created_at", field("createdAt"))],
+    },
+    {
+      name: "adminAlerts",
+      table: "admin_alerts",
+      key: "id",
+      records: keyed(prepared.adminAlerts, (r) => r.id),
+      columns: [time("created_at", "created_at", field("createdAt"))],
+    },
+    {
+      name: "loginAttempts",
+      table: "login_attempts",
+      key: "id",
+      records: keyed(prepared.loginAttempts, (r) => r.key),
+      columns: [time("created_at", "created_at", field("firstAttemptAt"))],
+    },
+    ...(["jobs", "lookupJobs"] as const).map(
+      (name): Spec => ({
+        name,
+        table: name === "jobs" ? "jobs" : "lookup_jobs",
+        key: "id",
+        records: keyed<{ id: string }>(plan[name], (r) => r.id),
+        columns: [
+          text("owner_user_id", "owner_user_id", field("ownerUserId")),
+          text("space_id", "space_id", field("spaceId")),
+          text("status", "status", field("status")),
+          time("created_at", "created_at", field("createdAt")),
+        ],
+      }),
+    ),
+    {
+      name: "competitors",
+      table: "competitors",
+      key: "id",
+      records: keyed(plan.competitors, (r) => r.id),
+      expect: (r) => expectedCompetitor(r),
+      columns: [
+        text("run_id", "run_id", field("runId")),
+        text("owner_user_id", "owner_user_id", (r) => jobOwner.get(String(r.runId)) ?? null),
+        time("created_at", "created_at", field("createdAt")),
+      ],
+    },
+    {
+      name: "lookupAds",
+      table: "lookup_ads",
+      key: "id",
+      records: keyed(plan.lookupAds, (r) => r.id),
+      columns: [text("lookup_id", "lookup_id", field("lookupId"))],
+    },
+    {
+      name: "searchCompetitorAds",
+      table: "search_competitor_ads",
+      key: "id",
+      records: keyed(plan.searchCompetitorAds, (r) => r.id),
+      columns: [text("run_id", "run_id", field("runId")), text("competitor_id", "competitor_id", field("competitorId"))],
+    },
+    {
+      name: "icps",
+      table: "icps",
+      key: "id",
+      records: keyed(plan.icps, (r) => r.id),
+      columns: [
+        text("source_kind", "source_kind", (r) => (r.source as AnyRecord | undefined)?.kind ?? null),
+        text("source_id", "source_id", (r) => (r.source as AnyRecord | undefined)?.id ?? null),
+        text("stage", "stage", field("stage")),
+      ],
+    },
+    {
+      name: "seenPageIds",
+      table: "seen_page_ids",
+      key: "id",
+      records: prepared.seenPageIds.map((id) => ({ key: id, record: {} })),
+      columns: [],
+      noData: true,
+    },
+    {
+      name: "deletedRunIds",
+      table: "deleted_run_ids",
+      key: "id",
+      records: prepared.deletedRunIds.map((id) => ({ key: id, record: {} })),
+      columns: [],
+      noData: true,
+    },
+  ];
+  for (const spec of specs) {
+    await check(spec.name, () => checkTable(db, spec, mismatches));
+  }
+  log(`rows, data and columns checked (${mismatches.length} mismatch line(s) so far)`);
+
+  /* 3. credentials, roles and run states, by name (also covered by the data hash) */
+  await check("users", async () => {
+    const { rows } = await db.query<{ id: string; data: AnyRecord }>("select id, data from users");
+    const byId = new Map(rows.map((r) => [r.id, r.data]));
+    for (const user of plan.users) {
+      const data = byId.get(user.id);
+      if (!data) continue;
+      if (data.passwordHash !== user.passwordHash) mismatches.push(`users ${user.id}: password hash differs`);
+      if (data.role !== user.role) mismatches.push(`users ${user.id}: role ${String(data.role)}, expected ${user.role}`);
+    }
+  });
+  for (const [name, table] of [
+    ["jobs", "jobs"],
+    ["lookupJobs", "lookup_jobs"],
+  ] as const) {
+    await check(`${name} interrupted`, async () => {
+      const { rows } = await db.query<{ id: string; status: string; data: AnyRecord }>(
+        `select id, status, data from ${table} where id = any($1::text[])`,
+        [[...prepared.interrupted]],
+      );
+      for (const row of rows) {
+        const progress = isRecord(row.data.progress) ? row.data.progress : {};
+        if (row.status !== "failed" || progress.message !== CUTOVER_MESSAGE || progress.stage !== "failed") {
+          mismatches.push(`${name} ${row.id}: was running; expected failed with "${CUTOVER_MESSAGE}"`);
         }
       }
-    }
+    });
   }
 
-  /* ledger: count and sum per user, seq per row, sequence ahead of every seq */
-  {
-    const want = new Map<string, { n: number; sum: number }>();
-    for (const entry of expected.creditLedger) {
-      const held = want.get(entry.userId) ?? { n: 0, sum: 0 };
-      held.n += 1;
-      held.sum += Number(entry.deltaSubunits) || 0;
-      want.set(entry.userId, held);
-    }
-    const { rows } = await db.query<{ user_id: string; n: number; sum: string | null }>(
-      `select user_id, count(*)::int as n, sum(coalesce((data->>'deltaSubunits')::numeric, 0))::text as sum
-         from credit_ledger group by user_id`,
-    );
-    const got = new Map(rows.map((r) => [r.user_id, { n: Number(r.n), sum: Number(r.sum ?? 0) }]));
+  /* 4. ledger sums per user and the sequences */
+  await check("ledger sums", async () => {
+    const sum = (rows: AnyRecord[]) => {
+      const out = new Map<string, { n: number; sum: number }>();
+      for (const entry of rows) {
+        const user = String(entry.userId);
+        const held = out.get(user) ?? { n: 0, sum: 0 };
+        held.n += 1;
+        held.sum += typeof entry.deltaSubunits === "number" ? entry.deltaSubunits : 0;
+        out.set(user, held);
+      }
+      return out;
+    };
+    const want = sum(plan.creditLedger as unknown as AnyRecord[]);
+    const { rows } = await db.query<{ data: AnyRecord }>("select data from credit_ledger");
+    const got = sum(rows.map((r) => r.data));
     for (const userId of new Set([...want.keys(), ...got.keys()])) {
       const a = got.get(userId) ?? { n: 0, sum: 0 };
       const b = want.get(userId) ?? { n: 0, sum: 0 };
@@ -200,119 +546,86 @@ export async function verifyImport(
         mismatches.push(`creditLedger user ${userId}: ${a.n} entries summing ${a.sum}, expected ${b.n} summing ${b.sum}`);
       }
     }
-    const seqs = await db.query<{ id: string; seq: string; data_seq: string | null }>(
-      "select id, seq::text, data->>'seq' as data_seq from credit_ledger",
-    );
-    const seqOf = new Map(seqs.rows.map((r) => [r.id, r]));
-    const wrongSeq = expected.creditLedger
-      .filter((e) => {
-        const row = seqOf.get(e.id);
-        return row && (Number(row.seq) !== e.seq || Number(row.data_seq) !== e.seq);
-      })
-      .map((e) => e.id);
-    if (wrongSeq.length) mismatches.push(`creditLedger: seq differs for ${listIds(wrongSeq)}`);
-    for (const [sequence, table, counter] of [
-      ["ledger_seq", "credit_ledger", expected.ledgerSeq],
-      ["audit_seq", "audit_logs", expected.auditSeq],
-    ] as const) {
-      const { rows: s } = await db.query<{ last: string; max: string }>(
-        `select (select last_value from ${sequence})::text as last, (select coalesce(max(seq), 0) from ${table})::text as max`,
-      );
-      const last = Number(s[0]?.last);
-      if (last < Number(s[0]?.max) || last < counter) {
-        mismatches.push(`${sequence}: at ${last}, behind max seq ${s[0]?.max} or the stored counter ${counter}`);
-      }
-    }
-  }
-
-  /* runs: status (running ones must be failed with the cutover message) */
-  for (const [name, table, runs] of [
-    ["jobs", "jobs", expected.jobs],
-    ["lookupJobs", "lookup_jobs", expected.lookupJobs],
+  });
+  for (const [sequence, table, counter] of [
+    ["ledger_seq", "credit_ledger", prepared.ledgerSeq],
+    ["audit_seq", "audit_logs", prepared.auditSeq],
   ] as const) {
-    const { rows } = await db.query<{ id: string; status: string; data: AnyRecord }>(`select id, status, data from ${table}`);
-    const byId = new Map(rows.map((r) => [r.id, r]));
-    for (const run of runs) {
-      const row = byId.get(run.id);
-      if (!row) continue;
-      if (row.status !== run.status || row.data.status !== run.status) {
-        mismatches.push(`${name} ${run.id}: status ${row.status}, expected ${run.status}`);
-      }
-      if (expected.interrupted.has(run.id)) {
-        const progress = (row.data.progress ?? {}) as AnyRecord;
-        if (row.status !== "failed" || progress.message !== CUTOVER_MESSAGE || progress.stage !== "failed") {
-          mismatches.push(`${name} ${run.id}: was running; expected failed with "${CUTOVER_MESSAGE}"`);
-        }
-      }
-    }
-  }
-
-  /* recreated pages: every content byte, by length and hash */
-  {
-    const { rows: stored } = await db.query<{ id: string }>("select competitor_id as id from recreated_pages");
-    const withRow = new Set(stored.map((r) => r.id));
-    let checked = 0;
-    for (const competitor of expected.competitors) {
-      const heavy = expectedHeavy(competitor.recreatedPage);
-      if (!heavy) {
-        if (withRow.has(competitor.id)) mismatches.push(`recreatedPages ${competitor.id}: content stored, but the file has none`);
-        continue;
-      }
-      if (!withRow.has(competitor.id)) {
-        mismatches.push(`recreatedPages ${competitor.id}: content missing`);
-        continue;
-      }
-      const { rows } = await db.query<{ content: Buffer | Uint8Array | null; archive_path: string | null; bytes: number }>(
-        "select content, archive_path, bytes from recreated_pages where competitor_id = $1",
-        [competitor.id],
+    await check(sequence, async () => {
+      const { rows } = await db.query<{ last: string; called: boolean; max: string }>(
+        `select s.last_value::text as last, s.is_called as called, (select coalesce(max(seq), 0) from ${table})::text as max
+           from ${sequence} s`,
       );
       const row = rows[0];
-      let text: string;
-      try {
-        const gz = row.content ? Buffer.from(row.content) : await fetchArchived(row.archive_path as string);
-        text = gunzipSync(gz).toString("utf8");
-      } catch (err) {
-        mismatches.push(`recreatedPages ${competitor.id}: content unreadable (${err instanceof Error ? err.message : String(err)})`);
-        continue;
+      // The last value handed out (or about to be: not called yet means nextval returns last_value).
+      const used = Number(row.last) - (row.called ? 0 : 1);
+      if (used < Number(row.max) || used < counter) {
+        mismatches.push(`${sequence}: next value ${used + 1} is not past max seq ${row.max} and the stored counter ${counter}`);
       }
-      const wantJson = JSON.stringify(heavy);
-      const wantBytes = Buffer.byteLength(wantJson);
-      const gotBytes = Buffer.byteLength(text);
-      if (gotBytes !== wantBytes) {
-        mismatches.push(`recreatedPages ${competitor.id}: ${gotBytes} content bytes, expected ${wantBytes}`);
-      }
-      if (Number(row.bytes) !== wantBytes) {
-        mismatches.push(`recreatedPages ${competitor.id}: bytes column ${row.bytes}, expected ${wantBytes}`);
-      }
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        mismatches.push(`recreatedPages ${competitor.id}: content is not valid JSON`);
-        continue;
-      }
-      if (sha256(canonical(parsed)) !== sha256(canonical(heavy))) {
-        mismatches.push(`recreatedPages ${competitor.id}: content differs from the file (sha-256)`);
-      }
-      checked += 1;
-    }
-    // The light rows must say a page is there.
-    const { rows: markers } = await db.query<{ id: string; has: boolean | null; bytes: string | null }>(
-      `select id, (data->'recreatedPage'->>'hasPage')::boolean as has, data->'recreatedPage'->>'pageBytes' as bytes
-         from competitors where data ? 'recreatedPage'`,
-    );
-    const markerOf = new Map(markers.map((r) => [r.id, r]));
-    for (const competitor of expected.competitors) {
-      const heavy = expectedHeavy(competitor.recreatedPage);
-      const marker = markerOf.get(competitor.id);
-      if (!marker) continue;
-      if (heavy && (marker.has !== true || Number(marker.bytes) !== Buffer.byteLength(JSON.stringify(heavy)))) {
-        mismatches.push(`competitors ${competitor.id}: page marker does not match its content`);
-      }
-      if (!heavy && marker.has === true) mismatches.push(`competitors ${competitor.id}: page marker says content exists`);
-    }
-    log(`recreated pages checked: ${checked}`);
+    });
   }
 
-  return { ok: mismatches.length === 0, mismatches };
+  /* 5. recreated pages: every content byte, by length and hash */
+  await check("recreated pages", async () => {
+    const { rows: stored } = await db.query<{ id: string; at: string }>(
+      `select competitor_id as id, ${TIME_SQL("updated_at")} as at from recreated_pages`,
+    );
+    const rowAt = new Map(stored.map((r) => [r.id, r.at]));
+    let checked = 0;
+    for (const competitor of plan.competitors) {
+      await check(`page ${competitor.id}`, async () => {
+        const page = withoutMarker(competitor.recreatedPage);
+        const heavy = expectedHeavy(page);
+        if (!heavy) {
+          if (rowAt.has(competitor.id)) mismatches.push(`recreatedPages ${competitor.id}: content stored, but the file has none`);
+          return;
+        }
+        if (!rowAt.has(competitor.id)) {
+          mismatches.push(`recreatedPages ${competitor.id}: content missing`);
+          return;
+        }
+        const wantAt = pageTime(page, competitor);
+        if (rowAt.get(competitor.id) !== wantAt) {
+          mismatches.push(`recreatedPages ${competitor.id}: updated_at ${rowAt.get(competitor.id)}, expected ${wantAt}`);
+        }
+        const { rows } = await db.query<{ content: Buffer | Uint8Array | null; archive_path: string | null; bytes: number }>(
+          "select content, archive_path, bytes from recreated_pages where competitor_id = $1",
+          [competitor.id],
+        );
+        const row = rows[0];
+        let textContent: string;
+        try {
+          const gz = row.content ? Buffer.from(row.content) : await fetchArchived(String(row.archive_path));
+          textContent = gunzipSync(gz).toString("utf8");
+        } catch (err) {
+          mismatches.push(`recreatedPages ${competitor.id}: content unreadable (${errorText(err)})`);
+          return;
+        }
+        const wantBytes = Buffer.byteLength(JSON.stringify(heavy));
+        const gotBytes = Buffer.byteLength(textContent);
+        if (gotBytes !== wantBytes) mismatches.push(`recreatedPages ${competitor.id}: ${gotBytes} content bytes, expected ${wantBytes}`);
+        if (Number(row.bytes) !== wantBytes) {
+          mismatches.push(`recreatedPages ${competitor.id}: bytes column ${row.bytes}, expected ${wantBytes}`);
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(textContent);
+        } catch {
+          mismatches.push(`recreatedPages ${competitor.id}: content is not valid JSON`);
+          return;
+        }
+        if (sha256(canonical(parsed)) !== sha256(canonical(heavy))) {
+          mismatches.push(`recreatedPages ${competitor.id}: content differs from the file (sha-256)`);
+        }
+        checked += 1;
+      });
+    }
+    // Content rows of competitors the file does not have.
+    const known = new Set(plan.competitors.map((c) => c.id));
+    const orphans = [...rowAt.keys()].filter((id) => !known.has(id));
+    if (orphans.length) mismatches.push(`recreatedPages: content of unknown competitors ${orphans.length}: ${listIds(orphans)}`);
+    log(`recreated pages checked: ${checked}`);
+  });
+
+  return { ok: mismatches.length === 0, mismatches, skipped };
 }

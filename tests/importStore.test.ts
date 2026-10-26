@@ -19,6 +19,10 @@ import { listProjects, setProjectOwner } from "../src/lib/data/spaces";
 import { HttpError, listVisibleProjects, resolveProjectAccess } from "../src/lib/authz";
 import type { DatabaseShape } from "../src/lib/types";
 import { useTempStore } from "./helpers/store";
+import { createPgliteClient } from "./helpers/testDb";
+import { archiveOldPages } from "../src/lib/data/archive";
+import { mergeStore, replaceStore } from "../src/lib/data/importHistory";
+import { isTransactionPooler } from "../scripts/storeScriptArgs";
 
 /*
  * store.json → Postgres import (importStore) and its check (verifyImport).
@@ -611,6 +615,239 @@ describe("store quirks", () => {
     await importStore(getDb(), fixtureStore());
     await assert.rejects(() => assertEmptyTarget(getDb(), false), /already has 2 user/);
     await assertEmptyTarget(getDb(), true);
+  });
+});
+
+describe("verifyImport catches tampering", () => {
+  /** Applies `tamper`, expects a mismatch line containing every `needles`, then re-imports and expects ok again. */
+  async function expectCaught(tamper: () => Promise<void>, needles: string[]): Promise<void> {
+    await tamper();
+    const result = await verifyImport(getDb(), fixtureStore());
+    assert.equal(result.ok, false, `not caught: ${needles.join(" ")}`);
+    assert.ok(
+      result.mismatches.some((m) => needles.every((n) => m.includes(n))),
+      `no mismatch with ${JSON.stringify(needles)}:\n${result.mismatches.join("\n")}`,
+    );
+    await importStore(getDb(), fixtureStore());
+    assert.deepEqual((await verifyImport(getDb(), fixtureStore())).mismatches, []);
+  }
+
+  test("one byte of a password hash, a ledger delta, the settings, a provider call's user, a space's org", async () => {
+    await freshDb("import-store-tamper");
+    await importStore(getDb(), fixtureStore());
+    assert.deepEqual((await verifyImport(getDb(), fixtureStore())).mismatches, []);
+
+    await expectCaught(
+      () => getDb().query(`update users set data = jsonb_set(data, '{passwordHash}', '"scrypt$1$u-alice$hasH"') where id = 'u-alice'`).then(() => {}),
+      ["users", "u-alice"],
+    );
+    await expectCaught(
+      () => getDb().query(`update credit_ledger set data = jsonb_set(data, '{deltaSubunits}', '-999') where id = 'l-2'`).then(() => {}),
+      ["creditLedger", "l-2"],
+    );
+    await expectCaught(
+      () => getDb().query(`update app_settings set data = jsonb_set(data, '{maxConcurrentRunsPerUser}', '6')`).then(() => {}),
+      ["appSettings"],
+    );
+    await expectCaught(
+      () => getDb().query(`update provider_calls set user_id = 'u-admin' where id = 'pc-1'`).then(() => {}),
+      ["providerCalls.user_id", "pc-1"],
+    );
+    await expectCaught(
+      () => getDb().query(`update project_spaces set org_id = 'org-other' where id = 's-1'`).then(() => {}),
+      ["projectSpaces.org_id", "s-1"],
+    );
+    await expectCaught(
+      () => getDb().query(`update jobs set owner_user_id = 'u-admin' where id = 'job-1'`).then(() => {}),
+      ["jobs.owner_user_id", "job-1"],
+    );
+    await expectCaught(
+      () => getDb().query(`update competitors set data = data #- '{recreatedPage}' where id = 'c-1'`).then(() => {}),
+      ["competitors", "c-1"],
+    );
+    await expectCaught(
+      () => getDb().query(`update conversion_rule_sets set data = jsonb_set(data, '{note}', '"edited"')`).then(() => {}),
+      ["conversionRuleSets"],
+    );
+  });
+
+  test("one byte of an archived page in Storage", async () => {
+    await freshDb("import-store-tamper-archive");
+    const storage = createMemoryStorage();
+    setStorageForTests(storage);
+    try {
+      await importStore(getDb(), fixtureStore(), { archiveOlderThanDays: 1 });
+      assert.equal(storage.objects.size, 1);
+      const [key, gz] = [...storage.objects][0];
+      const text = gunzipSync(gz).toString("utf8").replace("Section 9 ", "Section Q ");
+      storage.objects.set(key, gzipSync(text));
+      const result = await verifyImport(getDb(), fixtureStore());
+      assert.equal(result.ok, false);
+      assert.ok(result.mismatches.some((m) => m.includes("recreatedPages c-1")), result.mismatches.join("\n"));
+
+      // A re-import brings the content back into the database and removes the stale object.
+      await importStore(getDb(), fixtureStore());
+      assert.equal(storage.objects.size, 0, "the stale archive object was deleted");
+      const { rows } = await getDb().query<{ archive_path: string | null }>(
+        "select archive_path from recreated_pages where competitor_id = 'c-1'",
+      );
+      assert.equal(rows[0].archive_path, null);
+      assert.deepEqual((await verifyImport(getDb(), fixtureStore())).mismatches, []);
+    } finally {
+      setStorageForTests(null);
+    }
+  });
+});
+
+describe("records the import leaves out", () => {
+  test("two ledger rows sharing a seq: the second gets a new one", async () => {
+    await freshDb("import-store-dup-seq");
+    const store = fixtureStore();
+    store.creditLedger = [
+      ledger(1, "l-1", "u-alice", 10_000, "allowance_set"),
+      ledger(1, "l-twin", "u-alice", -5),
+      ledger(2, "l-2", "u-alice", -1_000, "charge"),
+    ] as unknown as DatabaseShape["creditLedger"];
+    store.ledgerSeq = 2;
+    const report = await importStore(getDb(), store);
+    assert.ok(report.warnings.some((w) => w.includes("l-twin") && w.includes("assigned seq 3")), report.warnings.join("\n"));
+    const { rows } = await getDb().query<{ id: string; seq: string }>("select id, seq::text from credit_ledger order by seq");
+    assert.deepEqual(rows.map((r) => [r.id, r.seq]), [["l-1", "1"], ["l-2", "2"], ["l-twin", "3"]]);
+    const verify = fixtureStore();
+    verify.creditLedger = store.creditLedger;
+    verify.ledgerSeq = 2;
+    assert.deepEqual((await verifyImport(getDb(), verify)).mismatches, []);
+  });
+
+  test("a duplicate id keeps the first copy; verify lists it as skipped, not as a mismatch", async () => {
+    await freshDb("import-store-dup-id");
+    const make = () => {
+      const store = fixtureStore() as unknown as Record<string, unknown[]>;
+      const first = store.jobs[0] as Record<string, unknown>;
+      store.jobs.push({ ...first, keyword: "the later copy" });
+      store.seenPageIds = ["111", 111, "111", "", "222"];
+      return store as unknown as DatabaseShape;
+    };
+    const report = await importStore(getDb(), make());
+    assert.equal((await getJob("job-1"))?.keyword, "plumber", "the first copy is the one imported");
+    assert.ok(report.warnings.some((w) => w.includes("job-1") && w.includes("first copy")), report.warnings.join("\n"));
+    assert.ok(report.warnings.some((w) => w.includes("number 111")), "a numeric id is stringified with a warning");
+    assert.deepEqual([...(await getSeenPageIds())].sort(), ["111", "222"]);
+    const result = await verifyImport(getDb(), make());
+    assert.deepEqual(result.mismatches, []);
+    assert.equal(result.ok, true);
+    assert.ok(result.skipped.some((s) => s.startsWith("jobs job-1")), result.skipped.join("\n"));
+    assert.equal(result.skipped.filter((s) => s.startsWith("seenPageIds")).length, 3, result.skipped.join("\n"));
+  });
+
+  test("a record without an id is lost data: verify fails and names it", async () => {
+    await freshDb("import-store-no-id");
+    const make = () => {
+      const store = fixtureStore() as unknown as Record<string, unknown[]>;
+      store.creditReservations.push({ userId: "u-alice", periodId: "p-alice", status: "open", expiresAt: T2 });
+      return store as unknown as DatabaseShape;
+    };
+    const report = await importStore(getDb(), make());
+    assert.ok(report.drops.some((d) => d.collection === "creditReservations" && d.lost), JSON.stringify(report.drops));
+    const result = await verifyImport(getDb(), make());
+    assert.equal(result.ok, false);
+    assert.ok(result.mismatches.some((m) => m.startsWith("lost (not imported): creditReservations [1]")), result.mismatches.join("\n"));
+  });
+});
+
+describe("page content shapes", () => {
+  function storeWithPages(): DatabaseShape {
+    const store = fixtureStore();
+    const base = (store.competitors[0] as unknown as { recreatedPage: Record<string, unknown> }).recreatedPage;
+    const page = (extra: Record<string, unknown>) => {
+      const p: Record<string, unknown> = { ...base, ...extra };
+      for (const key of ["html", "sourceArchive", "generatedImages", "previousHtml", "canUndo"]) {
+        if (!(key in extra)) delete p[key];
+      }
+      return p;
+    };
+    store.competitors.push(...([
+      // Only an Undo copy and images: no html key at all.
+      { id: "c-partial", runId: "job-1", pageId: "501", createdAt: T0, recreatedPage: page({ previousHtml: "<p>undo</p>", generatedImages: [{ id: "i" }] }) },
+      // Empty html (kept as "", not null) next to a source archive.
+      { id: "c-empty-html", runId: "job-1", pageId: "502", createdAt: T0, recreatedPage: page({ html: "", sourceArchive: { html: "<p>src</p>" } }) },
+      // An offset timestamp is stored as UTC; an invalid one falls back to createdAt.
+      { id: "c-offset", runId: "job-1", pageId: "503", createdAt: T0, recreatedPage: page({ html: "<p>x</p>", updatedAt: "2026-01-11T05:30:00+05:30" }) },
+      { id: "c-bad-time", runId: "job-1", pageId: "504", createdAt: T0, recreatedPage: page({ html: "<p>y</p>", updatedAt: "not a date", createdAt: T2 }) },
+    ] as unknown as DatabaseShape["competitors"]));
+    return store;
+  }
+
+  test("partial heavy keys, empty html and page times round-trip, and verify is ok", async () => {
+    await freshDb("import-store-page-shapes");
+    await importStore(getDb(), storeWithPages());
+    const partial = await getRecreatedPage("c-partial");
+    assert.deepEqual(partial, { previousHtml: "<p>undo</p>", generatedImages: [{ id: "i" }], html: null });
+    const empty = await getRecreatedPage("c-empty-html");
+    assert.equal(empty?.html, "");
+    assert.deepEqual(empty?.sourceArchive, { html: "<p>src</p>" });
+    assert.equal((await getCompetitor("c-offset"))?.recreatedPage?.pageUpdatedAt, "2026-01-11T00:00:00.000Z");
+    assert.equal((await getCompetitor("c-bad-time"))?.recreatedPage?.pageUpdatedAt, T2);
+    assert.deepEqual((await verifyImport(getDb(), storeWithPages())).mismatches, []);
+  });
+});
+
+describe("history import and archived pages", () => {
+  test("replace removes the Storage objects of competitors it deletes; merge removes those it rewrites", async () => {
+    await freshDb("import-history-archive");
+    const storage = createMemoryStorage();
+    setStorageForTests(storage);
+    try {
+      const page = (html: string) => ({
+        status: "completed",
+        createdAt: T0,
+        updatedAt: T0,
+        businessUrl: "https://x.invalid",
+        keyword: "k",
+        sourceCompetitorName: "n",
+        sourceAnalyzedUrl: "https://y.invalid",
+        brandColors: {},
+        html,
+      });
+      const job = { id: "h-job", keyword: "k", keywords: ["k"], status: "completed", progress: { stage: "done", message: "Done" }, competitorIds: ["h-1", "h-2"], createdAt: T0, updatedAt: T0 };
+      const payload = (competitors: unknown[]) => ({ jobs: [job], competitors, seenPageIds: [] }) as unknown as Partial<DatabaseShape>;
+      await replaceStore(payload([
+        { id: "h-1", runId: "h-job", pageId: "1", createdAt: T0, recreatedPage: page("<p>one</p>") },
+        { id: "h-2", runId: "h-job", pageId: "2", createdAt: T0, recreatedPage: page("<p>two</p>") },
+      ]));
+      // History imports stamp content with the import time: archive everything up to now.
+      assert.equal((await archiveOldPages({ olderThanDays: 0 })).archived, 2);
+      assert.equal(storage.objects.size, 2);
+
+      // h-2 is gone from the replacing import: its archive object goes too.
+      await replaceStore(payload([{ id: "h-1", runId: "h-job", pageId: "1", createdAt: T0 }]));
+      assert.deepEqual([...storage.objects.keys()].map((k) => k.split("/").pop()), ["h-1.json.gz"]);
+
+      // A merge that brings h-1's content back into the database makes its object stale.
+      await mergeStore(payload([{ id: "h-1", runId: "h-job", pageId: "1", createdAt: T0, recreatedPage: page("<p>new</p>") }]));
+      assert.equal(storage.objects.size, 0);
+      assert.equal((await getRecreatedPage("h-1"))?.html, "<p>new</p>");
+    } finally {
+      setStorageForTests(null);
+    }
+  });
+});
+
+describe("script guards", () => {
+  test("assertEmptyTarget treats a database without the users table as empty", async () => {
+    const bare = await createPgliteClient();
+    try {
+      await assertEmptyTarget(bare, false);
+    } finally {
+      await bare.close();
+    }
+  });
+
+  test("the transaction pooler is refused; the session pooler and direct host are not", () => {
+    assert.equal(isTransactionPooler("postgresql://u:p@aws-0-us-west-1.pooler.supabase.com:6543/postgres"), true);
+    assert.equal(isTransactionPooler("postgresql://u:p@db.example.supabase.co:5432/postgres?pgbouncer=true"), true);
+    assert.equal(isTransactionPooler("postgresql://u:p@aws-0-us-west-1.pooler.supabase.com:5432/postgres"), false);
+    assert.equal(isTransactionPooler("postgresql://u:p@db.example.supabase.co:5432/postgres"), false);
   });
 });
 
