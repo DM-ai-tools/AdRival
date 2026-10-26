@@ -65,7 +65,7 @@ export async function dispatchPlatformLookup(
   let identity: LookupIdentity | null = null;
   // A match the user picked by hand is used as it is.
   if (!forcedCandidate) {
-    updateLookupJob(lookupId, {
+    await updateLookupJob(lookupId, {
       progress: {
         stage: "searching_pages",
         message: `Working out who "${queryName}" is (name, website and pages)…`,
@@ -76,7 +76,7 @@ export async function dispatchPlatformLookup(
     });
     try {
       identity = await resolveCompetitorIdentity(queryName);
-      updateLookupJob(lookupId, { resolvedIdentity: identity });
+      await updateLookupJob(lookupId, { resolvedIdentity: identity });
     } catch (err) {
       if (isCreditError(err)) throw err;
       console.warn("[lookup] could not resolve the competitor; searching the text as typed", (err as Error).message);

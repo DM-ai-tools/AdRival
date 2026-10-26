@@ -38,19 +38,20 @@ function safeNum(n: unknown): number | null {
   return null;
 }
 
-function updateLookup(job: LookupJob, patch: Partial<LookupJob>) {
+async function updateLookup(job: LookupJob, patch: Partial<LookupJob>): Promise<void> {
   Object.assign(job, patch, { updatedAt: new Date().toISOString() });
-  saveLookupJob(job);
+  await saveLookupJob(job);
 }
 
 function setProgress(job: LookupJob, progress: Partial<LookupJobProgress>) {
   job.progress = { ...job.progress, ...progress };
   job.updatedAt = new Date().toISOString();
-  saveLookupJobProgress(job);
+  // Throttled progress, written in call order; failures are logged by the data layer.
+  void saveLookupJobProgress(job);
 }
 
-function haltIfStopped(job: LookupJob): boolean {
-  if (!isLookupJobSuppressed(job.id)) return false;
+async function haltIfStopped(job: LookupJob): Promise<boolean> {
+  if (!(await isLookupJobSuppressed(job.id))) return false;
   // Leave durable stopRequested / terminal status from stopLookupJob intact.
   return true;
 }
@@ -117,13 +118,13 @@ export async function runCompetitorLookup(
     createdAt: now,
     updatedAt: now,
   };
-  saveLookupJob(job);
+  await saveLookupJob(job);
 
-  if (haltIfStopped(job)) return;
+  if (await haltIfStopped(job)) return;
 
   try {
     const companyRes = await searchCompanies(queryName);
-    if (haltIfStopped(job)) return;
+    if (await haltIfStopped(job)) return;
     const rawCompanies = extractCompanies(companyRes);
     // The competitor's own page, known from its link or website: search by its
     // handle too when the name search did not return it.
@@ -138,7 +139,7 @@ export async function runCompetitorLookup(
       } catch (err) {
         if (isCreditError(err)) throw err;
       }
-      if (haltIfStopped(job)) return;
+      if (await haltIfStopped(job)) return;
     }
     const candidates = rawCompanies
       .map((c) => toCandidate(c as Record<string, unknown>))
@@ -164,7 +165,7 @@ export async function runCompetitorLookup(
     });
 
     if (unique.length === 0 && !forcedCandidate) {
-      updateLookup(job, {
+      await updateLookup(job, {
         status: "failed",
         error: `No Facebook Ad Library pages found for "${queryName}"`,
         progress: {
@@ -176,7 +177,7 @@ export async function runCompetitorLookup(
       return;
     }
 
-    if (haltIfStopped(job)) return;
+    if (await haltIfStopped(job)) return;
 
     let selected: LookupPageCandidate | null = null;
     let pickReason = "";
@@ -213,7 +214,7 @@ export async function runCompetitorLookup(
     }
 
     if (!selected) {
-      updateLookup(job, {
+      await updateLookup(job, {
         status: "failed",
         llmReason: pickReason,
         llmConfidence: pickConfidence,
@@ -253,7 +254,7 @@ export async function runCompetitorLookup(
       let pages = 0;
 
       do {
-        if (haltIfStopped(job)) return;
+        if (await haltIfStopped(job)) return;
         setProgress(job, {
           message: `Fetching ads for ${selected.name} (${country}) — page ${pages + 1}…`,
         });
@@ -290,7 +291,7 @@ export async function runCompetitorLookup(
           }
         }
 
-        if (haltIfStopped(job)) return;
+        if (await haltIfStopped(job)) return;
 
         pages += 1;
         job.progress.pagesScanned += 1;
@@ -299,7 +300,7 @@ export async function runCompetitorLookup(
         cursor = extractCursor(response);
 
         for (const ad of ads) {
-          if (haltIfStopped(job)) return;
+          if (await haltIfStopped(job)) return;
           if (platform === "instagram" && !adRunsOnInstagram(ad)) continue;
           if (platform === "facebook" && !adRunsOnFacebook(ad)) continue;
           const adArchiveId = ad.ad_archive_id
@@ -335,7 +336,7 @@ export async function runCompetitorLookup(
           if (!job.adIds.includes(record.id)) job.adIds.push(record.id);
         }
         // One store write per page of ads instead of one per ad.
-        saveLookupAds(pageRecords);
+        await saveLookupAds(pageRecords);
 
         setProgress(job, {
           adsFetched: stored.length,
@@ -345,10 +346,10 @@ export async function runCompetitorLookup(
       } while (cursor && pages < MAX_AD_PAGES_PER_COUNTRY);
     }
 
-    if (haltIfStopped(job)) return;
+    if (await haltIfStopped(job)) return;
 
     if (stored.length > 0) {
-      updateLookup(job, {
+      await updateLookup(job, {
         status: "completed",
         progress: {
           ...job.progress,
@@ -358,7 +359,7 @@ export async function runCompetitorLookup(
         },
       });
     } else {
-      updateLookup(job, {
+      await updateLookup(job, {
         status: "partial",
         progress: {
           ...job.progress,
@@ -369,7 +370,7 @@ export async function runCompetitorLookup(
       });
     }
   } catch (err) {
-    updateLookup(job, {
+    await updateLookup(job, {
       status: "failed",
       error: (err as Error).message,
       progress: {
