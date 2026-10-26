@@ -21,8 +21,13 @@ export type TestClient = Queryable & {
  * The `statement_timeout` config option is deliberately not used: pg sends it
  * as a startup parameter, which the Supabase transaction pooler (pgbouncer
  * style) may reject or ignore, failing connections or giving false safety.
+ * Inside a transaction the server enforces it too: poolTx starts with
+ * `SET LOCAL statement_timeout`, which lasts only until COMMIT/ROLLBACK and so
+ * is safe through the transaction pooler.
  */
 const QUERY_TIMEOUT_MS = 30_000;
+/** Server-side statement ceiling inside an app transaction (SET LOCAL). */
+export const TX_STATEMENT_TIMEOUT_MS = 30_000;
 const POOL_MAX = 10;
 
 let pool: Pool | null = null;
@@ -79,13 +84,25 @@ function wrapClient(client: Pool | PoolClient): Queryable {
   };
 }
 
-/** BEGIN/COMMIT on one pooled connection, ROLLBACK when `fn` throws. */
-async function poolTx<T>(target: Pool, fn: (tx: Queryable) => Promise<T>): Promise<T> {
+/**
+ * BEGIN/COMMIT on one pooled connection, ROLLBACK when `fn` throws. The first
+ * statement bounds every statement of the transaction server-side
+ * (`statementTimeoutMs`; null leaves the session's setting).
+ */
+async function poolTx<T>(
+  target: Pool,
+  fn: (tx: Queryable) => Promise<T>,
+  statementTimeoutMs: number | null = TX_STATEMENT_TIMEOUT_MS,
+): Promise<T> {
   const client = await target.connect();
   let broken = false;
   try {
     await client.query("BEGIN");
     try {
+      if (statementTimeoutMs !== null) {
+        const ms = Math.max(0, Math.floor(statementTimeoutMs));
+        await client.query(`SET LOCAL statement_timeout = '${ms}ms'`);
+      }
       const value = await fn(wrapClient(client));
       await client.query("COMMIT");
       return value;
@@ -102,12 +119,18 @@ async function poolTx<T>(target: Pool, fn: (tx: Queryable) => Promise<T>): Promi
   }
 }
 
-/** Wraps any `pg` pool as a test client (used by the staging-schema helper). */
-export function poolTestClient(target: Pool): TestClient {
+/**
+ * Wraps any `pg` pool as a test client (the staging-schema helper, the
+ * migration connection, the store and backup scripts). Its transactions get
+ * `SET LOCAL statement_timeout` of `statementTimeoutMs` (default 30 s; the
+ * scripts pass their longer limit).
+ */
+export function poolTestClient(target: Pool, opts: { statementTimeoutMs?: number | null } = {}): TestClient {
   const base = wrapClient(target);
+  const timeout = opts.statementTimeoutMs === undefined ? TX_STATEMENT_TIMEOUT_MS : opts.statementTimeoutMs;
   return {
     query: base.query,
-    tx: (fn) => poolTx(target, fn),
+    tx: (fn) => poolTx(target, fn, timeout),
   };
 }
 

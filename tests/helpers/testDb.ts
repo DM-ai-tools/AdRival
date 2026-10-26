@@ -29,7 +29,11 @@ const PG_COMPATIBLE_PARSERS = {
     value.startsWith("\\x") ? Buffer.from(value.slice(2), "hex") : Buffer.from(value, "binary"),
 };
 
-export type PgliteTestClient = TestClient & { close(): Promise<void> };
+export type PgliteTestClient = TestClient & {
+  close(): Promise<void>;
+  /** True when called from code running inside an open transaction of this client. */
+  inTransaction(): boolean;
+};
 
 /** A tiny FIFO async mutex. */
 function createMutex() {
@@ -129,6 +133,7 @@ export async function createPgliteClient(): Promise<PgliteTestClient> {
       });
     },
     close: () => pg.close(),
+    inTransaction: insideOpenTx,
   };
 }
 

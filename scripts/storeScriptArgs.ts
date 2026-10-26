@@ -75,7 +75,7 @@ export function connectDirect(url: string): { client: TestClient; close(): Promi
     query_timeout: STATEMENT_TIMEOUT_MS + 10_000,
   });
   pool.on("error", (err) => console.error("[db] connection error:", err.message));
-  const client = poolTestClient(pool);
+  const client = poolTestClient(pool, { statementTimeoutMs: STATEMENT_TIMEOUT_MS });
   setClient(client);
   return {
     client,

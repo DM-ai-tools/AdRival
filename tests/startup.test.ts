@@ -73,6 +73,7 @@ test("health: 503 db down with no connection string in the error", async () => {
     assert.equal(typeof body.error, "string");
     assert.ok(!/postgres(ql)?:\/\//i.test(body.error), body.error);
     assert.ok(!body.error.includes("secret"), body.error);
+    assert.equal(body.error, "database unreachable", "no detail for unauthenticated callers");
   } finally {
     setClientForTests(client);
   }
@@ -123,13 +124,13 @@ test("runStartup rejects when a migration fails (the caller decides to exit)", a
   }
 });
 
-test("startSchedulers: the archive scheduler stays off without Supabase Storage settings", async () => {
+test("startSchedulers: archive and backup stay off without Supabase Storage settings; keep-alive runs", async () => {
   const { startSchedulers } = await import("../src/lib/data/startup");
   const saved = { url: process.env.SUPABASE_URL, key: process.env.SUPABASE_SERVICE_ROLE_KEY };
   delete process.env.SUPABASE_URL;
   delete process.env.SUPABASE_SERVICE_ROLE_KEY;
   try {
-    assert.deepEqual(startSchedulers(), { archive: false });
+    assert.deepEqual(startSchedulers(), { archive: false, backup: false, keepAlive: true });
   } finally {
     if (saved.url !== undefined) process.env.SUPABASE_URL = saved.url;
     if (saved.key !== undefined) process.env.SUPABASE_SERVICE_ROLE_KEY = saved.key;

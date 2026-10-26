@@ -1,15 +1,23 @@
-import { Pool } from "pg";
+import { Pool, type PoolConfig } from "pg";
 
 import { getDb, poolConfigFor, poolTestClient } from "./client";
 import { migrate } from "./migrate";
 import { markInterruptedJobs } from "./runs";
 import { sweepAbandonedReservations } from "./accountingService";
 import { startArchiveScheduler } from "./archive";
+import { startBackupScheduler, startKeepAlive } from "./backup";
 
 export interface StartupResult {
   migrated: string[];
   interrupted: number;
   swept: number;
+}
+
+/** A migration may run longer than an app query: 10 minutes, one connection. */
+export const MIGRATION_QUERY_TIMEOUT_MS = 10 * 60_000;
+
+export function migrationPoolConfig(url: string): PoolConfig {
+  return { ...poolConfigFor(url), max: 1, query_timeout: MIGRATION_QUERY_TIMEOUT_MS };
 }
 
 /**
@@ -21,7 +29,7 @@ export interface StartupResult {
 async function migrateOnce(dir: string | undefined): Promise<string[]> {
   const direct = process.env.DATABASE_DIRECT_URL;
   if (!direct) return migrate(getDb(), dir);
-  const pool = new Pool({ ...poolConfigFor(direct), max: 1 });
+  const pool = new Pool(migrationPoolConfig(direct));
   pool.on("error", (err) => console.error("[startup] migration connection error:", err.message));
   try {
     return await migrate(poolTestClient(pool), dir);
@@ -62,12 +70,18 @@ export async function runStartup(opts: { migrationsDir?: string } = {}): Promise
  * Each scheduler decides on its own whether it can run and logs when it is off.
  * Returns which ones started.
  */
-export function startSchedulers(): { archive: boolean } {
-  let archive = false;
-  try {
-    archive = startArchiveScheduler();
-  } catch (err) {
-    console.error("[startup] archive scheduler failed to start:", err instanceof Error ? err.message : err);
-  }
-  return { archive };
+export function startSchedulers(): { archive: boolean; backup: boolean; keepAlive: boolean } {
+  const start = (name: string, fn: () => boolean): boolean => {
+    try {
+      return fn();
+    } catch (err) {
+      console.error(`[startup] ${name} failed to start:`, err instanceof Error ? err.message : err);
+      return false;
+    }
+  };
+  return {
+    archive: start("archive scheduler", startArchiveScheduler),
+    backup: start("backup scheduler", startBackupScheduler),
+    keepAlive: start("keep-alive", startKeepAlive),
+  };
 }

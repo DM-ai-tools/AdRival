@@ -21,6 +21,8 @@ export interface StorageLike {
   deleteObject(bucket: string, path: string): Promise<void>;
   /** Full object paths (`prefix/name`) directly under `prefix` (one level, like the Storage API), folders left out. */
   list(bucket: string, prefix: string): Promise<string[]>;
+  /** Names (not paths) of the folders directly under `prefix`. */
+  listFolders(bucket: string, prefix: string): Promise<string[]>;
 }
 
 /** The object does not exist. */
@@ -53,6 +55,8 @@ export class StorageRequestError extends Error {
 const REQUEST_TIMEOUT_MS = 20_000;
 const MAX_RETRIES = 2;
 const LIST_PAGE = 1000;
+/** A runaway guard for list paging (a server ignoring offset would loop forever). */
+const MAX_LIST_ENTRIES = 1_000_000;
 
 export interface SupabaseStorageOptions {
   /** Defaults to SUPABASE_URL, read on each call. */
@@ -193,6 +197,37 @@ export function createSupabaseStorage(options: SupabaseStorageOptions = {}): Sto
     return new StorageRequestError(`Storage ${what} failed: HTTP ${status}${text ? ` ${text.replaceAll(key, "[key]")}` : ""}`, status);
   }
 
+  /**
+   * Every entry (objects and folders) directly under `folder`. Pages until an
+   * EMPTY page: the server may return fewer rows than the limit asked for
+   * (a server-side cap), so a short page does not mean the end.
+   */
+  async function listEntries(bucket: string, folder: string): Promise<Array<{ name: string; id: string | null }>> {
+    const out: Array<{ name: string; id: string | null }> = [];
+    for (let offset = 0; ; ) {
+      const what = `list ${bucket}/${folder}`;
+      const rows = await withRetries(async () => {
+        const res = await send(what, "POST", `/object/list/${encodeURIComponent(bucket)}`, {
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ prefix: folder, limit: LIST_PAGE, offset, sortBy: { column: "name", order: "asc" } }),
+        });
+        if (!res.ok) {
+          const text = await bodySnippet(res);
+          // A bucket nothing was ever uploaded to does not exist yet: nothing to list.
+          if (looksNotFound(res.status, text)) return [];
+          throw failureFromText(what, res.status, text);
+        }
+        return (await res.json()) as Array<{ name: string; id: string | null }>;
+      });
+      if (!Array.isArray(rows) || rows.length === 0) return out;
+      out.push(...rows);
+      offset += rows.length;
+      if (out.length > MAX_LIST_ENTRIES) {
+        throw new StorageRequestError(`Storage ${what} returned more than ${MAX_LIST_ENTRIES} entries`, null);
+      }
+    }
+  }
+
   return {
     async putObject(bucket, path, body) {
       await withRetries(() => ensureBucket(bucket));
@@ -232,22 +267,15 @@ export function createSupabaseStorage(options: SupabaseStorageOptions = {}): Sto
 
     async list(bucket, prefix) {
       const folder = prefix.replace(/^\/+|\/+$/g, "");
-      const out: string[] = [];
-      for (let offset = 0; ; offset += LIST_PAGE) {
-        const what = `list ${bucket}/${folder}`;
-        const res = await send(what, "POST", `/object/list/${encodeURIComponent(bucket)}`, {
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ prefix: folder, limit: LIST_PAGE, offset, sortBy: { column: "name", order: "asc" } }),
-        });
-        if (!res.ok) throw await failure(what, res);
-        const rows = (await res.json()) as Array<{ name: string; id: string | null }>;
-        for (const r of rows) {
-          // Folders come back with a null id.
-          if (r.id === null || r.id === undefined) continue;
-          out.push(folder ? `${folder}/${r.name}` : r.name);
-        }
-        if (rows.length < LIST_PAGE) return out;
-      }
+      const rows = await listEntries(bucket, folder);
+      return rows.filter((r) => r.id !== null && r.id !== undefined).map((r) => (folder ? `${folder}/${r.name}` : r.name));
+    },
+
+    async listFolders(bucket, prefix) {
+      const folder = prefix.replace(/^\/+|\/+$/g, "");
+      const rows = await listEntries(bucket, folder);
+      // Folders come back with a null id.
+      return rows.filter((r) => r.id === null || r.id === undefined).map((r) => r.name);
     },
   };
 }
@@ -280,6 +308,18 @@ export function createMemoryStorage(): StorageLike & { objects: Map<string, Buff
           .map((k) => k.slice(bucket.length + 1))
           .sort(),
       );
+    },
+    listFolders: (bucket, prefix) => {
+      const folder = prefix.replace(/^\/+|\/+$/g, "");
+      const start = folder ? `${bucket}/${folder}/` : `${bucket}/`;
+      const names = new Set<string>();
+      for (const k of objects.keys()) {
+        if (!k.startsWith(start)) continue;
+        const rest = k.slice(start.length);
+        const slash = rest.indexOf("/");
+        if (slash > 0) names.add(rest.slice(0, slash));
+      }
+      return Promise.resolve([...names].sort());
     },
   };
 }

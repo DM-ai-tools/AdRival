@@ -184,20 +184,39 @@ export function getRecreatedPage(competitorId: string): Promise<RecreatedPageHea
   return readRecreatedPage(getDb(), competitorId, false);
 }
 
-/** getRecreatedPage on a given handle; `forUpdate` locks the content row (inside a transaction). */
-export async function readRecreatedPage(
-  q: Queryable,
-  competitorId: string,
-  forUpdate: boolean,
-): Promise<RecreatedPageHeavy | null> {
-  const { rows } = await q.query<{ content: Buffer | Uint8Array | null; archive_path: string | null }>(
-    `select content, archive_path from recreated_pages where competitor_id = $1${forUpdate ? " for update" : ""}`,
+/**
+ * The archived copy of a page read ahead of a transaction (see
+ * prefetchArchivedPage): `stamp` names the exact archived version
+ * (archive_path + archived_at), `result` the fetched content or the error.
+ */
+export interface PrefetchedArchive {
+  stamp: string;
+  result: { ok: true; page: RecreatedPageHeavy } | { ok: false; error: unknown };
+}
+
+const ARCHIVE_STAMP_SQL = "archive_path || '|' || coalesce(archived_at::text, '')";
+
+/**
+ * When the page is archived, fetches it from Storage now, with no transaction
+ * open (the fetch can take seconds; holding a run lock and a pooled
+ * connection across it would block the run). Null when it is not archived.
+ */
+export async function prefetchArchivedPage(competitorId: string): Promise<PrefetchedArchive | null> {
+  const { rows } = await getDb().query<{ stamp: string | null }>(
+    `select ${ARCHIVE_STAMP_SQL} as stamp from recreated_pages where competitor_id = $1 and content is null`,
     [competitorId],
   );
-  const row = rows[0];
-  if (!row) return null;
-  if (row.content) return decode(row.content);
-  const path = row.archive_path as string;
+  const stamp = rows[0]?.stamp;
+  if (!stamp) return null;
+  const path = stamp.slice(0, stamp.lastIndexOf("|"));
+  try {
+    return { stamp, result: { ok: true, page: await readArchived(competitorId, path) } };
+  } catch (error) {
+    return { stamp, result: { ok: false, error } };
+  }
+}
+
+async function readArchived(competitorId: string, path: string): Promise<RecreatedPageHeavy> {
   let gz: Buffer;
   try {
     gz = await fetchArchived(path);
@@ -210,6 +229,34 @@ export async function readRecreatedPage(
   } catch (err) {
     throw new ArchivedPageUnavailableError(`archived page for ${competitorId} is corrupt`, { cause: err });
   }
+}
+
+/**
+ * getRecreatedPage on a given handle; `forUpdate` locks the content row
+ * (inside a transaction). With `prefetched` (read before the transaction),
+ * an archived row still at that same archived version uses it instead of
+ * fetching from Storage; a row archived again or brought back since is read
+ * normally.
+ */
+export async function readRecreatedPage(
+  q: Queryable,
+  competitorId: string,
+  forUpdate: boolean,
+  prefetched?: PrefetchedArchive | null,
+): Promise<RecreatedPageHeavy | null> {
+  const { rows } = await q.query<{ content: Buffer | Uint8Array | null; archive_path: string | null; stamp: string | null }>(
+    `select content, archive_path, ${ARCHIVE_STAMP_SQL} as stamp
+       from recreated_pages where competitor_id = $1${forUpdate ? " for update" : ""}`,
+    [competitorId],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  if (row.content) return decode(row.content);
+  if (prefetched && prefetched.stamp === row.stamp) {
+    if (prefetched.result.ok) return prefetched.result.page;
+    throw prefetched.result.error;
+  }
+  return readArchived(competitorId, row.archive_path as string);
 }
 
 /**

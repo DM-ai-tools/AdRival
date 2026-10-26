@@ -9,8 +9,8 @@ export interface HealthBody {
 
 const HEALTH_TIMEOUT_MS = 3000;
 
-/** A short message that cannot carry a connection string or credentials. */
-function safeMessage(err: unknown): string {
+/** A short message that cannot carry a connection string or credentials (for logs). */
+export function safeMessage(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err);
   return raw
     .replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, "[url]")
@@ -32,7 +32,9 @@ export async function checkHealth(): Promise<{ status: number; body: HealthBody 
     ]);
     return { status: 200, body: { ok: true, service: "adrival", db: "up" } };
   } catch (err) {
-    return { status: 503, body: { ok: false, service: "adrival", db: "down", error: safeMessage(err) } };
+    // The probe is unauthenticated: the detail goes to the server log only.
+    console.error(`[health] database check failed: ${safeMessage(err)}`);
+    return { status: 503, body: { ok: false, service: "adrival", db: "down", error: "database unreachable" } };
   } finally {
     if (timer) clearTimeout(timer);
   }

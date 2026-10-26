@@ -1,17 +1,12 @@
 /**
- * Next.js calls register() once when the server starts. Node runtime only, and
- * through a dynamic import so the Edge bundle never pulls in `pg`.
- * Schedulers of later tasks are started from here too.
+ * Next.js calls register() once when the server starts, for every runtime.
+ * The server start work (migrations, recovery, schedulers) lives in a
+ * Node-only module loaded behind the NEXT_RUNTIME check, so the Edge bundle
+ * never pulls in `pg` or a `process.exit` call.
  */
 export async function register(): Promise<void> {
-  if (process.env.NEXT_RUNTIME !== "nodejs") return;
-  const { runStartup, startSchedulers } = await import("./lib/data/startup");
-  try {
-    await runStartup();
-  } catch (err) {
-    // No schema means no working app: exit so the platform's restart policy retries.
-    console.error("[startup] migration failed, exiting:", err instanceof Error ? err.message : err);
-    process.exit(1);
+  if (process.env.NEXT_RUNTIME === "nodejs") {
+    const { registerNode } = await import("./instrumentation-node");
+    await registerNode();
   }
-  startSchedulers();
 }

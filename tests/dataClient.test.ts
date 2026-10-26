@@ -4,7 +4,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { getDb, poolConfigFor, withTx, type Queryable } from "../src/lib/data/client";
+import type { Pool } from "pg";
+
+import { getDb, poolConfigFor, poolTestClient, withTx, type Queryable } from "../src/lib/data/client";
+import { MIGRATION_QUERY_TIMEOUT_MS, migrationPoolConfig } from "../src/lib/data/startup";
 import { migrate } from "../src/lib/data/migrate";
 import { createPgliteClient, useTestDb } from "./helpers/testDb";
 
@@ -277,4 +280,39 @@ test("ledger and audit rows take seq from their sequences", async () => {
     ["a1", JSON.stringify({ id: "a1" })],
   );
   assert.match(audit.rows[0].seq, /^\d+$/);
+});
+
+/** A pg Pool stand-in that records the statements sent on its one connection. */
+function recordingPool(sent: string[]): Pool {
+  const conn = {
+    query: (text: string) => {
+      sent.push(text);
+      return Promise.resolve({ rows: [], rowCount: 0 });
+    },
+    release: () => {},
+  };
+  return { connect: () => Promise.resolve(conn) } as unknown as Pool;
+}
+
+test("pool transactions bound every statement server-side with SET LOCAL statement_timeout first", async () => {
+  const sent: string[] = [];
+  await poolTestClient(recordingPool(sent)).tx(async (tx) => {
+    await tx.query("select 1");
+  });
+  assert.deepEqual(sent, ["BEGIN", "SET LOCAL statement_timeout = '30000ms'", "select 1", "COMMIT"]);
+
+  const scripted: string[] = [];
+  await poolTestClient(recordingPool(scripted), { statementTimeoutMs: 120_000 }).tx(async () => {});
+  assert.deepEqual(scripted, ["BEGIN", "SET LOCAL statement_timeout = '120000ms'", "COMMIT"]);
+
+  const none: string[] = [];
+  await poolTestClient(recordingPool(none), { statementTimeoutMs: null }).tx(async () => {});
+  assert.deepEqual(none, ["BEGIN", "COMMIT"]);
+});
+
+test("the migration pool gets a 10 minute query timeout and one connection", () => {
+  const config = migrationPoolConfig("postgresql://u:p@db.example.supabase.co:5432/postgres");
+  assert.equal(config.query_timeout, MIGRATION_QUERY_TIMEOUT_MS);
+  assert.equal(MIGRATION_QUERY_TIMEOUT_MS, 600_000);
+  assert.equal(config.max, 1);
 });

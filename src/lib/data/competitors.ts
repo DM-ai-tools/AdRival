@@ -1,6 +1,6 @@
 import type { CompetitorRecord, RecreatedPageHeavy, SearchJob } from "../types";
 import { getDb, withTx, type Queryable } from "./client";
-import { applyHeavy, planPage, readRecreatedPage } from "./recreatedPages";
+import { applyHeavy, planPage, prefetchArchivedPage, readRecreatedPage } from "./recreatedPages";
 import {
   isoOrNull,
   lockRun,
@@ -14,7 +14,8 @@ import {
  * Competitors found by a search run, ported from db.ts. The row keeps the
  * record in `data` with a light recreatedPage (see recreatedPages.ts); the
  * page content is in recreated_pages and is read here only by
- * updateCompetitorWith({ withContent: true }) (inside its write transaction).
+ * updateCompetitorWith({ withContent: true }) (an archived page is fetched
+ * from Storage before its write transaction opens).
  *
  * Every write takes lockRun(runId) first (see runs.ts), so it serializes with
  * the run's own saves, deletion and the bulk clears.
@@ -176,8 +177,10 @@ export type CompetitorUpdate = Partial<CompetitorRecord> & { recreatedPageHeavy?
  * null to write nothing (the stored record is returned).
  *
  * With `withContent`, the updater also gets the page content (null when none
- * is stored; an archived page is fetched and may throw
- * ArchivedPageUnavailableError). Without it the content argument is undefined.
+ * is stored; an archived page is fetched from Storage BEFORE the transaction
+ * opens, and used when the row is still at that archived version under the
+ * lock; it may throw ArchivedPageUnavailableError). Without it the content
+ * argument is undefined.
  * `recreatedPageHeavy` in the patch replaces the whole stored content in the
  * same transaction, so pass every field to keep.
  */
@@ -186,6 +189,7 @@ export async function updateCompetitorWith(
   updater: (existing: CompetitorRecord, content: RecreatedPageHeavy | null | undefined) => CompetitorUpdate | null,
   options: { withContent?: boolean } = {},
 ): Promise<CompetitorRecord | null> {
+  const prefetched = options.withContent ? await prefetchArchivedPage(id) : null;
   return withTx(async (tx) => {
     const owner = await tx.query<{ run_id: string }>("select run_id from competitors where id = $1", [id]);
     const runId = owner.rows[0]?.run_id;
@@ -193,7 +197,7 @@ export async function updateCompetitorWith(
     await lockRun(tx, runId);
     const existing = await storedCompetitor(tx, id, true);
     if (!existing) return null;
-    const content = options.withContent ? await readRecreatedPage(tx, id, true) : undefined;
+    const content = options.withContent ? await readRecreatedPage(tx, id, true, prefetched) : undefined;
     const update = updater(existing, content);
     if (!update) return existing;
     const { recreatedPageHeavy, ...patch } = update;

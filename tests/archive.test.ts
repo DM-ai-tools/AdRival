@@ -371,6 +371,25 @@ test("a run delete still succeeds when Storage is down", async () => {
   assert.equal(await row(a.id), undefined);
 });
 
+test("deleteArchivedFor keeps at most 5 Storage deletes in flight", async () => {
+  let inFlight = 0;
+  let peak = 0;
+  let deleted = 0;
+  setStorageForTests({
+    ...storage,
+    deleteObject: async () => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setTimeout(r, 2));
+      inFlight -= 1;
+      deleted += 1;
+    },
+  });
+  await deleteArchivedFor(Array.from({ length: 40 }, (_, i) => `burst-${i}`));
+  assert.equal(deleted, 40);
+  assert.equal(peak, 5);
+});
+
 test("deleteArchivedFor ignores objects that are already gone", async () => {
   await deleteArchivedFor(["never-archived"]);
   assert.equal(storage.objects.size, 0);
@@ -547,9 +566,8 @@ test("REST: delete treats a missing object as done; list pages through and skips
       if (req.url.endsWith("/storage/v1/object/list/b1")) {
         const body = JSON.parse(String(req.body)) as { prefix: string; offset: number; limit: number };
         assert.equal(body.prefix, "backups");
-        const all = Array.from({ length: body.limit + 1 }, (_, i) => ({ name: `f${i}.gz`, id: `id${i}` }));
-        const pageRows = body.offset === 0 ? all.slice(0, body.limit) : [...all.slice(body.limit), { name: "sub", id: null }];
-        return new Response(JSON.stringify(pageRows), { status: 200 });
+        const all = [...Array.from({ length: body.limit + 1 }, (_, i) => ({ name: `f${i}.gz`, id: `id${i}` as string | null })), { name: "sub", id: null }];
+        return new Response(JSON.stringify(all.slice(body.offset, body.offset + body.limit)), { status: 200 });
       }
       return new Response("{}", { status: 200 });
     },

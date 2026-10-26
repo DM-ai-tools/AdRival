@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import { mapPool } from "../pipeline/pool";
 import { getDb, withTx } from "./client";
 import { getStorage, StorageNotConfiguredError, StorageNotFoundError, storageConfigured } from "./storageClient";
 
@@ -38,6 +39,8 @@ const TIME_BUDGET_MS = 5 * 60_000;
 const CLAIM_MINUTES = 10;
 const HOUR_MS = 60 * 60_000;
 const FIRST_RUN_DELAY_MS = 60_000;
+/** Storage deletes in flight at once (a run or a history clear can name hundreds). */
+const DELETE_CONCURRENCY = 5;
 
 /** The object path (inside the bucket) for a competitor's archived page. */
 export function archiveObjectPath(competitorId: string): string {
@@ -242,7 +245,7 @@ export async function deleteArchivedFor(competitorIds: string[]): Promise<void> 
   const ids = [...new Set(competitorIds)];
   if (!ids.length || !storageConfigured()) return;
   const storage = getStorage();
-  const results = await Promise.allSettled(ids.map((id) => storage.deleteObject(ARCHIVE_BUCKET, archiveObjectPath(id))));
+  const results = await mapPool(ids, DELETE_CONCURRENCY, (id) => storage.deleteObject(ARCHIVE_BUCKET, archiveObjectPath(id)));
   const failures = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
   if (failures.length) {
     console.warn(
