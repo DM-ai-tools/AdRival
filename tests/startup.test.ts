@@ -122,3 +122,16 @@ test("runStartup rejects when a migration fails (the caller decides to exit)", a
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("startSchedulers: the archive scheduler stays off without Supabase Storage settings", async () => {
+  const { startSchedulers } = await import("../src/lib/data/startup");
+  const saved = { url: process.env.SUPABASE_URL, key: process.env.SUPABASE_SERVICE_ROLE_KEY };
+  delete process.env.SUPABASE_URL;
+  delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+  try {
+    assert.deepEqual(startSchedulers(), { archive: false });
+  } finally {
+    if (saved.url !== undefined) process.env.SUPABASE_URL = saved.url;
+    if (saved.key !== undefined) process.env.SUPABASE_SERVICE_ROLE_KEY = saved.key;
+  }
+});

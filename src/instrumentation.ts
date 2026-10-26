@@ -5,7 +5,7 @@
  */
 export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
-  const { runStartup } = await import("./lib/data/startup");
+  const { runStartup, startSchedulers } = await import("./lib/data/startup");
   try {
     await runStartup();
   } catch (err) {
@@ -13,4 +13,5 @@ export async function register(): Promise<void> {
     console.error("[startup] migration failed, exiting:", err instanceof Error ? err.message : err);
     process.exit(1);
   }
+  startSchedulers();
 }

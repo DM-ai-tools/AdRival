@@ -4,6 +4,7 @@ import { getDb, poolConfigFor, poolTestClient } from "./client";
 import { migrate } from "./migrate";
 import { markInterruptedJobs } from "./runs";
 import { sweepAbandonedReservations } from "./accountingService";
+import { startArchiveScheduler } from "./archive";
 
 export interface StartupResult {
   migrated: string[];
@@ -54,4 +55,19 @@ export async function runStartup(opts: { migrationsDir?: string } = {}): Promise
   }
 
   return { migrated, interrupted, swept };
+}
+
+/**
+ * Starts the background jobs of this process (after runStartup succeeded).
+ * Each scheduler decides on its own whether it can run and logs when it is off.
+ * Returns which ones started.
+ */
+export function startSchedulers(): { archive: boolean } {
+  let archive = false;
+  try {
+    archive = startArchiveScheduler();
+  } catch (err) {
+    console.error("[startup] archive scheduler failed to start:", err instanceof Error ? err.message : err);
+  }
+  return { archive };
 }
