@@ -106,9 +106,16 @@ export async function POST(request: Request) {
     );
     return res;
   } catch (err) {
+    // A sign-up that raced another for the same name: user-facing, as before.
+    if (err instanceof Error && err.message === "Username already taken") {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
+    // Anything else (database or unexpected) stays server-side: this route is
+    // public, and a raw database message can name hosts, tables or SQL.
+    console.error("[auth/register] account creation failed:", err);
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Registration failed" },
-      { status: 400 },
+      { error: "Could not create the account. Please try again." },
+      { status: 500 },
     );
   }
 }
