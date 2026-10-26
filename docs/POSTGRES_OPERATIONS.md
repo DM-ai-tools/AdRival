@@ -197,9 +197,11 @@ production one):
 DATABASE_TEST_URL="<direct URL of a scratch project>" npx tsx --test --test-timeout=300000 tests/dataCreditsStaging.test.ts tests/dataRunsStaging.test.ts tests/backupStaging.test.ts
 ```
 
-They skip themselves when `DATABASE_TEST_URL` is not set. Each test stops
-after 2 minutes and each wait for a blocked session after 15 s, with a
-message saying what it saw, instead of hanging.
+They skip themselves when `DATABASE_TEST_URL` is not set. Each staging test
+is bounded to 120 s by its own option and each wait for a blocked session to
+15 s, with a message saying what it saw. `--test-timeout` is only a per-test
+default, not a whole-run limit; the run as a whole should finish within a few
+minutes. If a test hangs, press Ctrl+C and report which test.
 
 ## Load test (optional, against staging)
 

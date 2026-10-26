@@ -213,10 +213,29 @@ Expected: `pre-postgres-migration-2026-10-23` listed; current branch
 
 Rollback for the whole project: `git switch main`. `main` is untouched.
 
+**Push both branches so Railway can see them (pre-day step, your decision).**
+Railway deploys from GitHub, and neither branch is on origin yet. Before the
+rehearsal week (and in any case before C6), in Git Bash:
+```sh
+git push origin postgres-migration
+git push origin maintenance-on-main
+```
+This only uploads the branches so Railway can select them in Settings,
+Source. It does not change `main` and does not deploy anything unless Railway
+is pointed at that branch. Railway needs `maintenance-on-main` for A9 and
+`postgres-migration` for C6. Both pushes are the owner's decision: Claude must
+not push unless you ask it to. (A9 step 1 repeats the `maintenance-on-main`
+push.)
+
 ### A8. Tell people
 
 Choose the cutover window (evening or weekend). Tell users the app will be
 offline for about 30 minutes (leave room for trouble: say 1 hour).
+
+The maintenance switch has no bypass: you can only smoke-test after turning
+maintenance off at C7. So announce the window as still closed until the smoke
+test passes. If you would rather test while maintenance stays on, a bypass
+cookie option exists as a follow-up (not implemented; ask Claude).
 
 ### A9. Deploy the maintenance switch on the old app (rehearsal week, off-hours)
 
@@ -290,10 +309,12 @@ DATABASE_TEST_URL="$SCRATCH_SESSION" npx tsx --test --test-timeout=300000 tests/
 ```
 (Git Bash. Verified names: those three files exist in `tests/`.)
 
-Expect: all tests pass, none "skipped". Note the total time. Nothing can
-hang for long: each test stops after 2 minutes, every wait for a blocked
-session after 15 s (message `waitForBlocked: expected ... within ...`), and
-the whole run after 5 minutes.
+Expect: all tests pass, none "skipped". Note the total time. Each
+staging test is bounded to 120 s by its own option, and every wait for a
+blocked session to 15 s (message `waitForBlocked: expected ... within ...`).
+`--test-timeout` is only a per-test default, not a whole-run limit; the run
+as a whole should finish within a few minutes. If a test hangs, press Ctrl+C
+and report which test it was.
 If skipped: the variable did not reach the command. Retype it on the same line.
 If a test fails: stop. Send Claude the test name and the message (it holds no
 secrets). Do not go on to cutover. Rollback: nothing to undo; schemas are
@@ -550,9 +571,11 @@ the rehearsal week (A9 step 4).
    ```
 4. Keep **two copies**: copy `store.json` to a second place (another disk or
    a cloud folder) and check the copy's `Get-FileHash` too.
-5. Tag the repo (Git Bash):
+5. Tag the OLD code (Git Bash). The tag goes on `maintenance-on-main`, the
+   version that still reads `store.json`, not on the current HEAD (which is
+   the new code):
    ```sh
-   git tag pre-postgres-cutover
+   git tag pre-postgres-cutover maintenance-on-main
    git tag --list "pre-postgres*"
    ```
    (If `pre-postgres-cutover` already exists, stop and ask Claude. It
@@ -607,6 +630,13 @@ values in this terminal first; the terminal wins over `.env.local`, and the
 import refuses `--archive-days` if Storage belongs to another project than
 the database.
 
+Note: production passwords and keys typed into Git Bash may be saved in the
+shell history. Run `export HISTCONTROL=ignorespace` first, then type a
+leading space before each `export` line below (a line starting with a space
+is not saved). Or enter a value with `read -rs VAR` (nothing is echoed or
+saved), then `export VAR`. **Close this terminal when C5 is finished: it
+holds production values; never run `npm run dev` in it.**
+
 (Git Bash)
 ```sh
 export PROD_SESSION='<production session pooler string, port 5432>'
@@ -632,17 +662,20 @@ npm run backup:run -- --url "$PROD_SESSION"
 Check: it prints `{ date, path, tables, rows, bytes }`; Storage, `db-backups`
 has a folder with `manifest.json`.
 
-Keep this terminal for C7/C8, or close it: a new terminal falls back to the
-scratch values of `.env.local`.
+Close this terminal now (see the note above). If you need it for C7/C8
+commands, open a new one and re-export `PROD_SESSION` only; a new terminal
+otherwise falls back to the scratch values of `.env.local`.
 
 ### C6. Set Railway variables and deploy the new build (maintenance still on)
 
 1. Railway, Variables: add the five variables from A4 (production values).
    Keep `MAINTENANCE_MODE` = `1`. **Delete `HISTORY_IMPORT_SECRET`** if it
-   is there.
+   is there. (Changing variables on the old service may trigger an extra
+   automatic restart of the old build; that is harmless.)
 2. Deploy the branch **directly first** (safest, because `main` stays as it
    was): Railway, Settings, Source, set the deploy branch to
-   `postgres-migration`, then Deploy. (If the branch setting is not where you
+   `postgres-migration` (it must already be pushed: see the push step in A7),
+   then Deploy. (If the branch setting is not where you
    expect, ask Claude to guide you.)
    Merging to `main` comes only after the smoke test in C7.
 3. Watch the deploy logs. The old container stops first (volume), then the
@@ -716,8 +749,10 @@ When: any hard failure in C5-C7, or a serious problem later.
    the database variables, but remove them so nothing mixes.)
 2. Settings, Source: set the deploy branch back to `maintenance-on-main`
    (the old app plus the switch; `main` works too) and Deploy. If you need
-   the exact old code: the git tag `pre-postgres-cutover` (and
-   `pre-postgres-migration-2026-10-23`).
+   the exact old code: the git tag `pre-postgres-cutover` is the same code as
+   `maintenance-on-main` (the primary rollback: deploy that branch with
+   `MAINTENANCE_MODE` unset); `pre-postgres-migration-2026-10-23` is the
+   earlier snapshot.
 3. The old code reads `/app/data/store.json`, which was never changed.
    Check: log in; the history is the same as before C3.
 
