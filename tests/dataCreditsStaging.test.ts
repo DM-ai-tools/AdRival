@@ -5,7 +5,7 @@ import { getDb, withTx } from "../src/lib/data/client";
 import * as identity from "../src/lib/data/identity";
 import * as svc from "../src/lib/data/accountingService";
 import type { CreditPeriod } from "../src/lib/types";
-import { hasStagingDb, useStagingSchema } from "./helpers/testDb";
+import { hasStagingDb, STAGING_TEST_TIMEOUT_MS, useStagingSchema, waitForBlocked } from "./helpers/testDb";
 
 /*
  * Credit operations racing each other on a real Postgres with separate
@@ -26,11 +26,11 @@ let cleanup: () => Promise<void> = async () => {};
 
 before(async () => {
   if (!skip) ({ cleanup } = await useStagingSchema("credits-race"));
-});
+}, { timeout: STAGING_TEST_TIMEOUT_MS });
 
 after(async () => {
   await cleanup();
-});
+}, { timeout: STAGING_TEST_TIMEOUT_MS });
 
 let n = 0;
 
@@ -63,19 +63,6 @@ function holdPeriod(userId: string) {
   return { locked, release, done };
 }
 
-/** Waits until at least `count` sessions of this database are blocked on a lock. */
-async function waitForBlocked(count: number): Promise<void> {
-  const deadline = Date.now() + 10_000;
-  for (;;) {
-    const { rows } = await getDb().query<{ n: number }>(
-      "select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'",
-    );
-    if (rows[0].n >= count) return;
-    if (Date.now() > deadline) throw new Error(`expected ${count} blocked sessions, saw ${rows[0].n}`);
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-}
-
 async function currentPeriod(userId: string): Promise<CreditPeriod> {
   const { rows } = await getDb().query<{ data: CreditPeriod }>(
     "select data from credit_periods where user_id = $1 and status = 'current'",
@@ -88,15 +75,20 @@ async function ledgerSum(userId: string): Promise<number> {
   return (await svc.queryLedger({ userId })).reduce((sum, e) => sum + e.deltaSubunits, 0);
 }
 
-test("two simultaneous reservations of 60 against 100: exactly one succeeds", { skip }, async () => {
+test("two simultaneous reservations of 60 against 100: exactly one succeeds", { skip, timeout: STAGING_TEST_TIMEOUT_MS }, async () => {
   for (let round = 0; round < 3; round += 1) {
     const user = await makeUser(100);
     const holder = holdPeriod(user.id);
     await holder.locked;
     const a = svc.reserveCredits({ userId: user.id, amountSubunits: 60, operation: "race.a" });
     const b = svc.reserveCredits({ userId: user.id, amountSubunits: 60, operation: "race.b" });
-    await waitForBlocked(2);
-    holder.release();
+    try {
+      await waitForBlocked(2);
+    } finally {
+      // Always let go of the row: a failed wait must not leave the lock (and the
+      // schema drop in after()) hanging.
+      holder.release();
+    }
     await holder.done;
     const results = await Promise.all([a, b]);
 
@@ -111,7 +103,7 @@ test("two simultaneous reservations of 60 against 100: exactly one succeeds", { 
   }
 });
 
-test("settle and release of one reservation at once: one release, the charge kept", { skip }, async () => {
+test("settle and release of one reservation at once: one release, the charge kept", { skip, timeout: STAGING_TEST_TIMEOUT_MS }, async () => {
   for (let round = 0; round < 3; round += 1) {
     const user = await makeUser(100);
     const reserved = await svc.reserveCredits({ userId: user.id, amountSubunits: 50, operation: "race.hold" });
@@ -143,8 +135,13 @@ test("settle and release of one reservation at once: one release, the charge kep
       releaseSubunits: 50,
     });
     const releasing = svc.releaseReservation(reserved.reservation.id, "race.release");
-    await waitForBlocked(2);
-    holder.release();
+    try {
+      await waitForBlocked(2);
+    } finally {
+      // Always let go of the row: a failed wait must not leave the lock (and the
+      // schema drop in after()) hanging.
+      holder.release();
+    }
     await holder.done;
     await Promise.all([settling, releasing]);
 

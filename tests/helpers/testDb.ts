@@ -5,6 +5,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { Pool } from "pg";
 
 import {
+  getDb,
   poolConfigFor,
   poolTestClient,
   setClientForTests,
@@ -222,4 +223,46 @@ export async function useStagingSchema(label: string): Promise<{ cleanup(): Prom
       }
     },
   };
+}
+
+/** Per-test limit for the staging (real Postgres) tests: a stuck race fails instead of hanging the run. */
+export const STAGING_TEST_TIMEOUT_MS = 120_000;
+
+/** Rejects with `message` when `promise` has not settled within `ms`. */
+function within<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), Math.max(1, ms));
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Waits until at least `n` sessions of this database are blocked on a lock
+ * (pg_stat_activity). Bounded as a whole, the polling query included: after
+ * `timeoutMs` it fails with a message naming what it saw, so a race that never
+ * forms (or a hung connection) fails the test instead of hanging it.
+ */
+export async function waitForBlocked(n: number, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let seen: number | null = null;
+  for (;;) {
+    const left = deadline - Date.now();
+    if (left <= 0) {
+      throw new Error(
+        `waitForBlocked: expected ${n} session(s) blocked on a lock within ${timeoutMs} ms, ` +
+          `last saw ${seen ?? "no answer"} (the race did not form; is the row lock held, and is this a real Postgres?)`,
+      );
+    }
+    const { rows } = await within(
+      getDb().query<{ n: number }>(
+        "select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'",
+      ),
+      left,
+      `waitForBlocked: the pg_stat_activity query did not answer within ${timeoutMs} ms (connection stuck?)`,
+    );
+    seen = rows[0]?.n ?? 0;
+    if (seen >= n) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
 }

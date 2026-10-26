@@ -9,7 +9,7 @@ import { getDb, poolConfigFor, withTx } from "../src/lib/data/client";
 import { importStore } from "../src/lib/data/importStore";
 import { createMemoryStorage, type StorageLike } from "../src/lib/data/storageClient";
 import { fixtureStore } from "./helpers/storeFixture";
-import { hasStagingDb, useStagingSchema } from "./helpers/testDb";
+import { hasStagingDb, STAGING_TEST_TIMEOUT_MS, useStagingSchema } from "./helpers/testDb";
 
 /*
  * The backup snapshot on a real Postgres with separate connections (PGlite
@@ -25,11 +25,11 @@ before(async () => {
   if (skip) return;
   ({ cleanup } = await useStagingSchema("backup-snapshot"));
   await importStore(getDb(), fixtureStore());
-});
+}, { timeout: STAGING_TEST_TIMEOUT_MS });
 
 after(async () => {
   await cleanup();
-});
+}, { timeout: STAGING_TEST_TIMEOUT_MS });
 
 function rows<T>(storage: ReturnType<typeof createMemoryStorage>, date: string, table: string): T[] {
   const manifest = JSON.parse(storage.objects.get(`${BACKUP_BUCKET}/${date}/manifest.json`)!.toString("utf8")) as BackupManifest;
@@ -44,7 +44,7 @@ function rows<T>(storage: ReturnType<typeof createMemoryStorage>, date: string, 
     );
 }
 
-test("a credit change committed on another connection mid-backup is not in the snapshot", { skip }, async () => {
+test("a credit change committed on another connection mid-backup is not in the snapshot", { skip, timeout: STAGING_TEST_TIMEOUT_MS }, async () => {
   const storage = createMemoryStorage();
   let wrote = false;
   const hooked: StorageLike = {
@@ -71,7 +71,7 @@ test("a credit change committed on another connection mid-backup is not in the s
   assert.ok(!rows<{ id: string }>(storage, date, "credit_ledger").some((r) => r.id === "l-snap"), "and so does the ledger");
 });
 
-test("a second backup while one holds the backup lock reports busy", { skip }, async () => {
+test("a second backup while one holds the backup lock reports busy", { skip, timeout: STAGING_TEST_TIMEOUT_MS }, async () => {
   const other = new Pool({ ...poolConfigFor(process.env.DATABASE_TEST_URL!), max: 1 });
   const conn = await other.connect();
   try {

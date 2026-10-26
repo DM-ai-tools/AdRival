@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { getDb, withTx } from "../src/lib/data/client";
 import * as runs from "../src/lib/data/runs";
 import type { SearchJob } from "../src/lib/types";
-import { hasStagingDb, useStagingSchema } from "./helpers/testDb";
+import { hasStagingDb, STAGING_TEST_TIMEOUT_MS, useStagingSchema, waitForBlocked } from "./helpers/testDb";
 
 /*
  * Delete/clear racing a save, on a real Postgres with separate connections
@@ -25,11 +25,11 @@ let cleanup: () => Promise<void> = async () => {};
 
 before(async () => {
   if (!skip) ({ cleanup } = await useStagingSchema("runs-race"));
-});
+}, { timeout: STAGING_TEST_TIMEOUT_MS });
 
 after(async () => {
   await cleanup();
-});
+}, { timeout: STAGING_TEST_TIMEOUT_MS });
 
 let seq = 0;
 
@@ -73,35 +73,28 @@ function holdRow(table: "jobs" | "lookup_jobs", id: string) {
   return { locked, release, done };
 }
 
-/** Waits until at least `n` sessions of this database are blocked on a lock. */
-async function waitForBlocked(n: number): Promise<void> {
-  const deadline = Date.now() + 10_000;
-  for (;;) {
-    const { rows } = await getDb().query<{ n: number }>(
-      "select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'",
-    );
-    if (rows[0].n >= n) return;
-    if (Date.now() > deadline) throw new Error(`expected ${n} blocked sessions, saw ${rows[0].n}`);
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-}
-
 async function jobRows(id: string): Promise<number> {
   const { rows } = await getDb().query<{ n: number }>("select count(*)::int as n from jobs where id = $1", [id]);
   return rows[0].n;
 }
 
-test("a save that waits behind deleteHistoryRun does not bring the run back", { skip }, async () => {
+test("a save that waits behind deleteHistoryRun does not bring the run back", { skip, timeout: STAGING_TEST_TIMEOUT_MS }, async () => {
   const job = makeJob();
   assert.equal(await runs.saveJob(job), true);
 
   const holder = holdRow("jobs", job.id);
   await holder.locked;
   const deleting = runs.deleteHistoryRun(job.id);
-  await waitForBlocked(1);
-  const saving = runs.saveJob({ ...job, progress: { ...job.progress, message: "late write" } });
-  await waitForBlocked(2);
-  holder.release();
+  let saving!: ReturnType<typeof runs.saveJob>;
+  try {
+    await waitForBlocked(1);
+    saving = runs.saveJob({ ...job, progress: { ...job.progress, message: "late write" } });
+    await waitForBlocked(2);
+  } finally {
+    // Always let go of the row: a failed wait must not leave the lock (and the
+    // schema drop in after()) hanging.
+    holder.release();
+  }
   await holder.done;
 
   assert.deepEqual(await deleting, { ok: true, removedCompetitors: 0 });
@@ -109,17 +102,23 @@ test("a save that waits behind deleteHistoryRun does not bring the run back", { 
   assert.equal(await jobRows(job.id), 0);
 });
 
-test("a save that waits behind clearAllHistory does not bring the run back", { skip }, async () => {
+test("a save that waits behind clearAllHistory does not bring the run back", { skip, timeout: STAGING_TEST_TIMEOUT_MS }, async () => {
   const job = makeJob();
   assert.equal(await runs.saveJob(job), true);
 
   const holder = holdRow("jobs", job.id);
   await holder.locked;
   const clearing = runs.clearAllHistory();
-  await waitForBlocked(1);
-  const saving = runs.saveJob({ ...job, progress: { ...job.progress, message: "late write" } });
-  await waitForBlocked(2);
-  holder.release();
+  let saving!: ReturnType<typeof runs.saveJob>;
+  try {
+    await waitForBlocked(1);
+    saving = runs.saveJob({ ...job, progress: { ...job.progress, message: "late write" } });
+    await waitForBlocked(2);
+  } finally {
+    // Always let go of the row: a failed wait must not leave the lock (and the
+    // schema drop in after()) hanging.
+    holder.release();
+  }
   await holder.done;
 
   const cleared = await clearing;
