@@ -29,7 +29,7 @@ import { upsertCompetitor } from "./competitors";
 import { upsertReservation, savePeriod } from "./credits";
 import { upsertIcpRow } from "./icps";
 import { upsertOrganization, upsertUser } from "./identity";
-import { jsonText } from "./jsonText";
+import { jsonText, sanitizeJsonValueWithStats } from "./jsonText";
 import { MAX_DELETED_RUN_IDS, migrateDb } from "./legacyStore";
 import { upsertLoginAttemptRow } from "./loginAttempts";
 import { upsertLookupAds, upsertSearchCompetitorAds } from "./lookups";
@@ -69,6 +69,8 @@ export interface ImportReport {
   pageBytes: number;
   /** Jobs and lookups that were `running` and were imported as failed. */
   interruptedJobs: number;
+  /** Text jsonb cannot hold (broken emoji, NUL), stored with U+FFFD; also a line in `warnings`. */
+  sanitized: SanitizeSummary;
   /** Everything the import changed or could not take, with record ids. */
   warnings: string[];
   /** Records of the file that were not written, with why (see Drop). */
@@ -121,6 +123,8 @@ export interface PreparedStore {
   auditSeq: number;
   /** Ids of jobs and lookups that were running in the file. */
   interrupted: Set<string>;
+  /** Text jsonb cannot hold, stored with U+FFFD (see SanitizeSummary). */
+  sanitized: SanitizeSummary;
   warnings: string[];
   drops: Drop[];
 }
@@ -269,15 +273,86 @@ function idList(name: string, rows: unknown[], notes: Notes): string[] {
   return [...out];
 }
 
+/* ── text Postgres cannot hold ── */
+
+/** How many record ids the sanitize warning lists. */
+const SANITIZED_LISTED = 10;
+
+/**
+ * Strings the import changed because jsonb cannot hold them (lone UTF-16
+ * surrogates: ad copy cut in the middle of an emoji; NUL): each is stored with
+ * U+FFFD in its place (jsonText.ts). `records` are "collection:id", in file order.
+ */
+export interface SanitizeSummary {
+  /** Strings (values and object keys) changed. */
+  values: number;
+  records: string[];
+}
+
+export function sanitizeWarning(summary: SanitizeSummary): string {
+  const shown = summary.records.slice(0, SANITIZED_LISTED).join(" ");
+  const more = summary.records.length > SANITIZED_LISTED ? ` … (${summary.records.length} records in all)` : "";
+  return (
+    `${summary.values} text values contained broken emoji/NUL characters and were stored with U+FFFD replacement ` +
+    `(records: ${shown}${more})`
+  );
+}
+
+/** A record's name in messages: its id (or key / version), else its position. */
+function recordName(record: unknown, index: number): string {
+  if (isRecord(record)) {
+    for (const field of ["id", "key", "version"]) {
+      const value = record[field];
+      if (typeof value === "string" || typeof value === "number") return String(value);
+    }
+  }
+  return typeof record === "string" ? record : `[${index}]`;
+}
+
+/**
+ * The store with every string jsonb cannot hold replaced by U+FFFD (a shallow
+ * copy; collections and records that change are new, the input is not
+ * modified). Import and verify both shape this copy, so what is written and
+ * what is expected agree.
+ */
+function sanitizeStore(store: DatabaseShape): { store: DatabaseShape; summary: SanitizeSummary } {
+  const summary: SanitizeSummary = { values: 0, records: [] };
+  const source = store as unknown as AnyRecord;
+  const out: AnyRecord = { ...source };
+  for (const [name, value] of Object.entries(source)) {
+    if (Array.isArray(value)) {
+      let rows: unknown[] | null = null;
+      value.forEach((row: unknown, index) => {
+        const { value: clean, replaced } = sanitizeJsonValueWithStats(row);
+        if (!replaced) return;
+        summary.values += replaced;
+        summary.records.push(`${name}:${recordName(clean, index)}`);
+        rows ??= [...value];
+        rows[index] = clean;
+      });
+      if (rows) out[name] = rows;
+    } else {
+      const { value: clean, replaced } = sanitizeJsonValueWithStats(value);
+      if (!replaced) continue;
+      summary.values += replaced;
+      summary.records.push(name);
+      out[name] = clean;
+    }
+  }
+  return { store: out as unknown as DatabaseShape, summary };
+}
+
 /**
  * Runs migrateDb on the raw parsed store (in place) and shapes it for import.
+ * Text jsonb cannot hold is replaced with U+FFFD (sanitizeStore; reported).
  * Pure apart from the time stamped on interrupted runs. The verifier builds its
  * expectations from the same function.
  */
 export function prepareStore(raw: unknown, now: string = new Date().toISOString()): PreparedStore {
   if (!isRecord(raw)) throw new Error("the store is not a JSON object");
-  const store = migrateDb(raw as unknown as DatabaseShape);
+  const { store, summary: sanitized } = sanitizeStore(migrateDb(raw as unknown as DatabaseShape));
   const notes: Notes = { warnings: [], drops: [] };
+  if (sanitized.values) notes.warnings.push(sanitizeWarning(sanitized));
   const interrupted = new Set<string>();
 
   const runs = <T extends SearchJob | LookupJob>(name: string, rows: unknown[]): T[] =>
@@ -339,6 +414,7 @@ export function prepareStore(raw: unknown, now: string = new Date().toISOString(
     ledgerSeq,
     auditSeq,
     interrupted,
+    sanitized,
     warnings: notes.warnings,
     drops: notes.drops,
   };
@@ -404,6 +480,8 @@ export interface ImportPlan {
   icps: IcpRecord[];
   /** Jobs and lookups that were running and are written as failed. */
   interruptedJobs: number;
+  /** Text jsonb cannot hold, stored with U+FFFD (also in `warnings`). */
+  sanitized: SanitizeSummary;
   warnings: string[];
   drops: Drop[];
 }
@@ -480,6 +558,7 @@ export function planImport(store: DatabaseShape, now?: string): ImportPlan {
     searchCompetitorAds,
     icps,
     interruptedJobs: [...jobs, ...lookupJobs].filter((run) => prepared.interrupted.has(run.id)).length,
+    sanitized: prepared.sanitized,
     warnings: notes.warnings,
     drops: notes.drops,
   };
@@ -805,7 +884,14 @@ export async function importStore(
   // All ids in one statement keeps the file's order (oldest first) in created_at.
   await step("deletedRunIds", prepared.deletedRunIds, async () => {}, (t) => rememberDeletedRuns(t, prepared.deletedRunIds));
 
-  const report: ImportReport = { counts, pageBytes, interruptedJobs: plan.interruptedJobs, warnings, drops };
+  const report: ImportReport = {
+    counts,
+    pageBytes,
+    interruptedJobs: plan.interruptedJobs,
+    sanitized: plan.sanitized,
+    warnings,
+    drops,
+  };
 
   if (opts.archiveOlderThanDays !== undefined) {
     let archived = 0;

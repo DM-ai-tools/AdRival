@@ -4,6 +4,7 @@ import { gunzipSync } from "node:zlib";
 import { RECREATED_PAGE_HEAVY_KEYS, type DatabaseShape } from "../types";
 import { fetchArchived } from "./archive";
 import type { Queryable } from "./client";
+import { sanitizeJsonValue } from "./jsonText";
 import { storageConfigured } from "./storageClient";
 import {
   CUTOVER_MESSAGE,
@@ -35,6 +36,10 @@ import {
  *   a later provider call with a used key, an older ICP of a stage, repeated
  *   seen ids) are listed in `skipped`; a record the database could not hold
  *   (lost data) is a mismatch.
+ * - text jsonb cannot hold (lone surrogates of a cut emoji, NUL) is stored as
+ *   U+FFFD; the plan replaces it the same way on the expected side, so such a
+ *   record matches (listed in `sanitized`, never a mismatch) while any other
+ *   difference in it is still reported.
  *
  * Never throws: a check that fails to run is reported as a mismatch.
  * Reads every page's content one at a time (archived pages from Storage).
@@ -45,6 +50,8 @@ export interface VerifyResult {
   mismatches: string[];
   /** Records the import left out on purpose (collapses), one line each. Not mismatches. */
   skipped: string[];
+  /** Records whose broken emoji/NUL text was stored as U+FFFD (explained), one line each. Not mismatches. */
+  sanitized: string[];
 }
 
 type AnyRecord = Record<string, unknown>;
@@ -192,7 +199,9 @@ async function checkTable(db: Queryable, spec: Spec, mismatches: string[]): Prom
     const row = stored.get(key);
     if (!row) continue;
     if (!spec.noData) {
-      const expected = spec.expect ? spec.expect(record, row.data) : record;
+      // As jsonb holds it (lone surrogates / NUL as U+FFFD). The plan's records
+      // are already replaced; for them this returns the record itself.
+      const expected = sanitizeJsonValue(spec.expect ? spec.expect(record, row.data) : record);
       if (sha256(canonical(row.data)) !== sha256(canonical(expected))) dataDiffers.push(key);
     }
     for (const column of spec.columns) {
@@ -224,7 +233,8 @@ export async function verifyImport(
   const log = opts.log ?? (() => {});
   const mismatches: string[] = [];
   const skipped: string[] = [];
-  const check = async (name: string, fn: () => Promise<void> | void) => {
+  const sanitized: string[] = [];
+  const check =async (name: string, fn: () => Promise<void> | void) => {
     try {
       await fn();
     } catch (err) {
@@ -244,7 +254,7 @@ export async function verifyImport(
   try {
     plan = planImport(store);
   } catch (err) {
-    return { ok: false, mismatches: [`the store could not be read: ${errorText(err)}`], skipped };
+    return { ok: false, mismatches: [`the store could not be read: ${errorText(err)}`], skipped, sanitized };
   }
   // Interrupted runs carry the import's time: plan again with it, so their
   // failed form is compared exactly.
@@ -259,17 +269,21 @@ export async function verifyImport(
       );
       at = rows.find((r) => r.at)?.at;
     } catch (err) {
-      return { ok: false, mismatches: [`database error while reading interrupted runs: ${errorText(err)}`], skipped };
+      return { ok: false, mismatches: [`database error while reading interrupted runs: ${errorText(err)}`], skipped, sanitized };
     }
     if (at) {
       try {
         plan = planImport(store, at);
       } catch (err) {
-        return { ok: false, mismatches: [`the store could not be read: ${errorText(err)}`], skipped };
+        return { ok: false, mismatches: [`the store could not be read: ${errorText(err)}`], skipped, sanitized };
       }
     }
   }
   const prepared = plan.prepared;
+  // Explained, not mismatches: the expected records carry the same U+FFFD.
+  for (const record of plan.sanitized.records) {
+    sanitized.push(`${record}: broken emoji/NUL text stored with U+FFFD (expected side replaced the same way)`);
+  }
 
   /* 1. every record of the file is written or left out by the plan */
   await check("file vs plan", () => {
@@ -653,5 +667,5 @@ export async function verifyImport(
     log(`recreated pages checked: ${checked}`);
   });
 
-  return { ok: mismatches.length === 0, mismatches, skipped };
+  return { ok: mismatches.length === 0, mismatches, skipped, sanitized };
 }

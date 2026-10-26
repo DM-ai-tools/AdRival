@@ -45,6 +45,10 @@ async function main(): Promise<void> {
       console.log(`left out by the import on purpose (collapsed duplicates): ${result.skipped.length}`);
       for (const line of result.skipped) console.log(`  - ${line}`);
     }
+    if (result.sanitized.length) {
+      console.log(`stored with U+FFFD for broken emoji/NUL text (explained, not mismatches): ${result.sanitized.length}`);
+      for (const line of result.sanitized) console.log(`  - ${line}`);
+    }
     if (result.ok) {
       console.log(`ok: no mismatches (${elapsed(started)})`);
     } else {
