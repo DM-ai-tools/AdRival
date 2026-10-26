@@ -8,6 +8,7 @@ import {
 } from "../types";
 import { ArchivedPageUnavailableError, fetchArchived } from "./archive";
 import { getDb, withTx, type Queryable } from "./client";
+import { jsonText } from "./jsonText";
 import { lockRun } from "./runs";
 
 /*
@@ -285,7 +286,7 @@ export async function setRecreatedPage(competitorId: string, heavy: RecreatedPag
                      then (data->'recreatedPage') || $2::jsonb
                      else $2::jsonb end)
         where id = $1 and (jsonb_typeof(data->'recreatedPage') = 'object' or $3::boolean)`,
-      [competitorId, JSON.stringify(marker), marker.hasPage],
+      [competitorId, jsonText(marker), marker.hasPage],
     );
     return true;
   });

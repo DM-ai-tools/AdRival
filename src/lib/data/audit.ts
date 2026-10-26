@@ -2,6 +2,7 @@ import { seedConversionRuleSet } from "../accounting/conversion";
 import type { AuditLogEntry, ConversionRuleSet, ProjectKind, ProjectMembership } from "../types";
 import { getDb, withTx, type Queryable } from "./client";
 import { IDENTITY_LOCK_CLASS } from "./identity";
+import { jsonText } from "./jsonText";
 import { getAppSettings, lockAppSettings, saveAppSettings } from "./settings";
 
 /*
@@ -45,7 +46,7 @@ export async function insertRuleSet(tx: Queryable, set: ConversionRuleSet): Prom
   await tx.query(
     `insert into conversion_rule_sets (version, data) values ($1, $2::jsonb)
      on conflict (version) do update set data = excluded.data`,
-    [set.version, JSON.stringify(set)],
+    [set.version, jsonText(set)],
   );
 }
 
@@ -185,7 +186,7 @@ export async function upsertMembershipRow(tx: Queryable, record: ProjectMembersh
        project_id   = excluded.project_id,
        user_id      = excluded.user_id,
        data         = excluded.data`,
-    [record.id, record.projectKind, record.projectId, record.userId, JSON.stringify(record)],
+    [record.id, record.projectKind, record.projectId, record.userId, jsonText(record)],
   );
 }
 
@@ -235,7 +236,7 @@ export async function recordAudit(draft: AuditDraft, q: Queryable = getDb()): Pr
      select n.seq, $1, $2::timestamptz, $3::jsonb || jsonb_build_object('seq', n.seq)
        from (select nextval('audit_seq') as seq) n
      returning seq`,
-    [entry.id, entry.createdAt, JSON.stringify(entry)],
+    [entry.id, entry.createdAt, jsonText(entry)],
   );
   if (!rows[0]) throw new Error("recordAudit: insert returned no row");
   return { ...entry, seq: Number(rows[0].seq) };

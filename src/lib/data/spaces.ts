@@ -1,5 +1,6 @@
 import type { LookupJob, ProjectKind, ProjectSpace, SearchJob, SpaceMembership } from "../types";
 import { getDb, withTx, type Queryable } from "./client";
+import { jsonText } from "./jsonText";
 import { lockRunId, lockRunsShared, runWasDeleted } from "./runs";
 
 /*
@@ -36,7 +37,7 @@ async function selectRunForUpdate<T extends RunRow>(tx: Queryable, table: RunTab
 async function updateRunRow(tx: Queryable, table: RunTable, row: RunRow): Promise<void> {
   await tx.query(
     `update ${table} set owner_user_id = $2, space_id = $3, data = $4::jsonb where id = $1`,
-    [row.id, row.ownerUserId ?? null, row.spaceId ?? null, JSON.stringify(row)],
+    [row.id, row.ownerUserId ?? null, row.spaceId ?? null, jsonText(row)],
   );
 }
 
@@ -259,7 +260,7 @@ export async function saveSpace(tx: Queryable, space: ProjectSpace): Promise<voi
        owner_user_id = excluded.owner_user_id,
        archived_at   = excluded.archived_at,
        data          = excluded.data`,
-    [space.id, space.ownerUserId, space.archivedAt || null, JSON.stringify(space)],
+    [space.id, space.ownerUserId, space.archivedAt || null, jsonText(space)],
   );
 }
 
@@ -509,7 +510,7 @@ export async function upsertSpaceMembershipRow(tx: Queryable, record: SpaceMembe
   await tx.query(
     `insert into space_memberships (id, space_id, user_id, data) values ($1, $2, $3, $4::jsonb)
      on conflict (id) do update set space_id = excluded.space_id, user_id = excluded.user_id, data = excluded.data`,
-    [record.id, record.spaceId, record.userId, JSON.stringify(record)],
+    [record.id, record.spaceId, record.userId, jsonText(record)],
   );
 }
 

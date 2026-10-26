@@ -1,5 +1,6 @@
 import type { CompetitorRecord, RecreatedPageHeavy, SearchJob } from "../types";
 import { getDb, withTx, type Queryable } from "./client";
+import { jsonText } from "./jsonText";
 import { applyHeavy, planPage, prefetchArchivedPage, readRecreatedPage } from "./recreatedPages";
 import {
   isoOrNull,
@@ -37,7 +38,7 @@ export async function upsertCompetitor(tx: Queryable, row: CompetitorRecord, own
        owner_user_id = excluded.owner_user_id,
        created_at    = excluded.created_at,
        data          = excluded.data`,
-    [row.id, row.runId, ownerUserId, isoOrNull(row.createdAt), JSON.stringify(row)],
+    [row.id, row.runId, ownerUserId, isoOrNull(row.createdAt), jsonText(row)],
   );
 }
 
@@ -98,7 +99,7 @@ export async function saveCompetitor(input: CompetitorInput): Promise<boolean> {
     const ids = job.competitorIds ?? [];
     if (!ids.includes(competitor.id)) {
       const next: SearchJob = { ...job, competitorIds: [...ids, competitor.id], updatedAt: new Date().toISOString() };
-      await tx.query("update jobs set data = $2::jsonb where id = $1", [runId, JSON.stringify(next)]);
+      await tx.query("update jobs set data = $2::jsonb where id = $1", [runId, jsonText(next)]);
     }
     return true;
   });
@@ -159,7 +160,7 @@ export async function updateCompetitor(id: string, patch: Partial<CompetitorReco
       `update competitors
           set run_id = $2, created_at = coalesce($3::timestamptz, created_at), data = $4::jsonb
         where id = $1`,
-      [id, next.runId, isoOrNull(next.createdAt), JSON.stringify(next)],
+      [id, next.runId, isoOrNull(next.createdAt), jsonText(next)],
     );
     await applyHeavy(tx, id, action);
     return next;
@@ -218,7 +219,7 @@ export async function updateCompetitorWith(
       `update competitors
           set run_id = $2, created_at = coalesce($3::timestamptz, created_at), data = $4::jsonb
         where id = $1`,
-      [id, next.runId, isoOrNull(next.createdAt), JSON.stringify(next)],
+      [id, next.runId, isoOrNull(next.createdAt), jsonText(next)],
     );
     await applyHeavy(tx, id, action);
     return next;

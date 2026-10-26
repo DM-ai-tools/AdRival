@@ -5,6 +5,7 @@ import type {
   ProviderCallRecord,
 } from "../types";
 import type { Queryable } from "./client";
+import { jsonText } from "./jsonText";
 
 /*
  * Credit tables: building blocks for accountingService.ts. Each row keeps the
@@ -110,7 +111,7 @@ export async function savePeriod(tx: Queryable, period: CreditPeriod): Promise<v
       period.allowanceSubunits,
       period.consumedSubunits,
       period.reservedSubunits,
-      JSON.stringify(period),
+      jsonText(period),
     ],
   );
 }
@@ -135,7 +136,7 @@ export async function insertLedger(tx: Queryable, draft: LedgerDraft): Promise<C
      select n.seq, $1, $2, $3, $4::timestamptz, $5::jsonb || jsonb_build_object('seq', n.seq)
        from (select nextval('ledger_seq') as seq) n
      returning seq`,
-    [entry.id, entry.userId, entry.periodId, entry.createdAt, JSON.stringify(entry)],
+    [entry.id, entry.userId, entry.periodId, entry.createdAt, jsonText(entry)],
   );
   if (!rows[0]) throw new Error("insertLedger: insert returned no row");
   return { ...entry, seq: Number(rows[0].seq) } as CreditLedgerEntry;
@@ -192,7 +193,7 @@ export async function upsertReservation(tx: Queryable, reservation: CreditReserv
       reservation.periodId,
       reservation.status,
       reservation.expiresAt,
-      JSON.stringify(reservation),
+      jsonText(reservation),
     ],
   );
 }
@@ -307,7 +308,7 @@ export async function insertProviderCall(tx: Queryable, call: ProviderCallRecord
     `insert into provider_calls (id, user_id, run_id, provider, created_at, data)
      values ($1, $2, $3, $4, $5::timestamptz, $6::jsonb)
      on conflict ((data->>'idempotencyKey')) do nothing`,
-    [call.id, call.chargedUserId, call.runId, call.provider, call.startedAt, JSON.stringify(call)],
+    [call.id, call.chargedUserId, call.runId, call.provider, call.startedAt, jsonText(call)],
   );
   return result.rowCount > 0;
 }

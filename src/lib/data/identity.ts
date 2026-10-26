@@ -1,5 +1,6 @@
 import type { AppUser, AppUserPublic, Organization, UserRole, UserStatus } from "../types";
 import { getDb, withTx, type Queryable } from "./client";
+import { jsonText } from "./jsonText";
 
 /*
  * Users and organisations, ported from db.ts. Each row keeps the whole record
@@ -38,7 +39,7 @@ export async function upsertUser(tx: Queryable, user: AppUser): Promise<void> {
        role     = excluded.role,
        status   = excluded.status,
        data     = excluded.data`,
-    [user.id, user.username, user.orgId ?? null, user.role, user.status, JSON.stringify(user)],
+    [user.id, user.username, user.orgId ?? null, user.role, user.status, jsonText(user)],
   );
 }
 
@@ -237,7 +238,7 @@ export async function upsertOrganization(tx: Queryable, org: Organization): Prom
     `insert into organizations (id, archived_at, data)
      values ($1, $2::timestamptz, $3::jsonb)
      on conflict (id) do update set archived_at = excluded.archived_at, data = excluded.data`,
-    [org.id, org.archivedAt || null, JSON.stringify(org)],
+    [org.id, org.archivedAt || null, jsonText(org)],
   );
 }
 

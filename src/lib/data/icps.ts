@@ -1,5 +1,6 @@
 import type { IcpRecord, ProjectKind } from "../types";
 import { getDb, withTx, type Queryable } from "./client";
+import { jsonText } from "./jsonText";
 
 /* ICPs, one per source (search or lookup run) and awareness stage; ported from db.ts. */
 
@@ -35,6 +36,6 @@ export async function upsertIcpRow(tx: Queryable, icp: IcpRecord): Promise<void>
     `insert into icps (id, source_kind, source_id, stage, data)
      values ($1, $2, $3, $4, $5::jsonb)
      on conflict (source_kind, source_id, stage) do update set id = excluded.id, data = excluded.data`,
-    [icp.id, icp.source.kind, icp.source.id, icp.stage, JSON.stringify(icp)],
+    [icp.id, icp.source.kind, icp.source.id, icp.stage, jsonText(icp)],
   );
 }

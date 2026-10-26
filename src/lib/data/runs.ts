@@ -7,6 +7,7 @@ import type {
 } from "../types";
 import { deleteArchivedFor } from "./archive";
 import { getDb, withTx, type Queryable } from "./client";
+import { jsonText } from "./jsonText";
 import { MAX_DELETED_RUN_IDS } from "./legacyStore";
 
 /*
@@ -180,7 +181,7 @@ export async function upsertRun(tx: Queryable, table: RunTable, row: SearchJob |
       row.spaceId ?? null,
       row.status,
       isoOrNull(row.createdAt),
-      JSON.stringify(row),
+      jsonText(row),
     ],
   );
 }

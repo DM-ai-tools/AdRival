@@ -5,6 +5,7 @@ import { Readable } from "node:stream";
 import { constants as zlibConstants, createGunzip, createGzip, type Gzip } from "node:zlib";
 
 import { getDb, withTx, type Queryable, type TestClient, type TxOptions } from "./client";
+import { jsonText } from "./jsonText";
 import { latestBackupFailure, recordBackupFailure } from "./settings";
 import { safeMessage } from "./health";
 import {
@@ -642,7 +643,7 @@ export function splitByteaLine(line: string, byteaColumns: string[]): { json: st
     delete obj[c];
     return typeof value === "string" ? Buffer.from(value, "base64") : null;
   });
-  return { json: JSON.stringify(obj), values };
+  return { json: jsonText(obj), values };
 }
 
 async function insertByteaRow(db: Queryable, table: BackupTable, line: string): Promise<number> {

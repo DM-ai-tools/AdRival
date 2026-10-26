@@ -1,5 +1,6 @@
 import type { LookupAdRecord, LookupJob, SearchCompetitorAdRecord } from "../types";
 import { getDb, withTx, type Queryable } from "./client";
+import { jsonText } from "./jsonText";
 import {
   lockRun,
   lookupRunSuppressedHere,
@@ -41,7 +42,7 @@ export async function upsertLookupAds(tx: Queryable, ads: LookupAdRecord[]): Pro
     `insert into lookup_ads (id, lookup_id, data)
      select x->>'id', x->>'lookupId', x from jsonb_array_elements($1::jsonb) as t(x)
      on conflict (id) do update set lookup_id = excluded.lookup_id, data = excluded.data`,
-    [JSON.stringify(lastPerId(ads))],
+    [jsonText(lastPerId(ads))],
   );
 }
 
@@ -72,7 +73,7 @@ export async function saveLookupAds(ads: LookupAdRecord[]): Promise<boolean> {
     const adIds = [...(job.adIds ?? [])];
     for (const ad of ads) if (!adIds.includes(ad.id)) adIds.push(ad.id);
     const next: LookupJob = { ...job, adIds, updatedAt: new Date().toISOString() };
-    await tx.query("update lookup_jobs set data = $2::jsonb where id = $1", [lookupId, JSON.stringify(next)]);
+    await tx.query("update lookup_jobs set data = $2::jsonb where id = $1", [lookupId, jsonText(next)]);
     return true;
   });
 }
@@ -130,7 +131,7 @@ export async function updateLookupAdWith(
     await tx.query("update lookup_ads set lookup_id = $2, data = $3::jsonb where id = $1", [
       adId,
       next.lookupId,
-      JSON.stringify(next),
+      jsonText(next),
     ]);
     await tx.query("update lookup_jobs set data = jsonb_set(data, '{updatedAt}', to_jsonb($2::text)) where id = $1", [
       lookupId,
@@ -199,7 +200,7 @@ export async function upsertSearchCompetitorAds(tx: Queryable, ads: SearchCompet
        run_id        = excluded.run_id,
        competitor_id = excluded.competitor_id,
        data          = excluded.data`,
-    [JSON.stringify(lastPerId(ads))],
+    [jsonText(lastPerId(ads))],
   );
 }
 

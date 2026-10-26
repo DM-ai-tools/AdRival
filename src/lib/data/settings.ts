@@ -1,5 +1,6 @@
 import type { AdminAlert, AppSettings, BackupFailedAdminAlert, ProviderCreditAdminAlert } from "../types";
 import { getDb, withTx, type Queryable } from "./client";
+import { jsonText } from "./jsonText";
 import { defaultAppSettings } from "./legacyStore";
 import { isoOrNull } from "./runs";
 
@@ -22,7 +23,7 @@ export async function lockAppSettings(tx: Queryable): Promise<AppSettings> {
   await tx.query(
     `insert into app_settings (id, data) values ('singleton', $1::jsonb)
      on conflict (id) do nothing`,
-    [JSON.stringify(defaultAppSettings())],
+    [jsonText(defaultAppSettings())],
   );
   const { rows } = await tx.query<{ data: AppSettings }>(
     "select data from app_settings where id = 'singleton' for update",
@@ -34,7 +35,7 @@ export async function saveAppSettings(tx: Queryable, settings: AppSettings): Pro
   await tx.query(
     `insert into app_settings (id, data) values ('singleton', $1::jsonb)
      on conflict (id) do update set data = excluded.data`,
-    [JSON.stringify(settings)],
+    [jsonText(settings)],
   );
 }
 
@@ -135,7 +136,7 @@ export async function upsertAdminAlertRow(tx: Queryable, alert: AdminAlert): Pro
   await tx.query(
     `insert into admin_alerts (id, created_at, data) values ($1, coalesce($2::timestamptz, now()), $3::jsonb)
      on conflict (id) do update set created_at = excluded.created_at, data = excluded.data`,
-    [alert.id, isoOrNull(alert.createdAt), JSON.stringify(alert)],
+    [alert.id, isoOrNull(alert.createdAt), jsonText(alert)],
   );
 }
 

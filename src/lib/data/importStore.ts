@@ -29,6 +29,7 @@ import { upsertCompetitor } from "./competitors";
 import { upsertReservation, savePeriod } from "./credits";
 import { upsertIcpRow } from "./icps";
 import { upsertOrganization, upsertUser } from "./identity";
+import { jsonText } from "./jsonText";
 import { MAX_DELETED_RUN_IDS, migrateDb } from "./legacyStore";
 import { upsertLoginAttemptRow } from "./loginAttempts";
 import { upsertLookupAds, upsertSearchCompetitorAds } from "./lookups";
@@ -611,7 +612,7 @@ async function insertLedgerRows(tx: Queryable, rows: CreditLedgerEntry[]): Promi
        period_id  = excluded.period_id,
        created_at = excluded.created_at,
        data       = excluded.data`,
-    [JSON.stringify(payload)],
+    [jsonText(payload)],
   );
 }
 
@@ -625,7 +626,7 @@ async function insertAuditRows(tx: Queryable, rows: AuditLogEntry[]): Promise<vo
        seq        = excluded.seq,
        created_at = excluded.created_at,
        data       = excluded.data`,
-    [JSON.stringify(payload)],
+    [jsonText(payload)],
   );
 }
 
@@ -642,7 +643,7 @@ async function insertProviderCallRows(tx: Queryable, rows: ProviderCallRecord[])
        provider   = excluded.provider,
        created_at = excluded.created_at,
        data       = excluded.data`,
-    [JSON.stringify(payload)],
+    [jsonText(payload)],
   );
 }
 
