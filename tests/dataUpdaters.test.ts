@@ -248,6 +248,44 @@ test("an updater that throws rolls back and the error reaches the caller", async
   assert.equal((await pages.getRecreatedPage(c.id))?.html, "<p>built</p>");
 });
 
+test("updateLookupJobWith builds the patch from the stored lookup and never loses a concurrent update", async () => {
+  const lookup = makeLookup();
+  assert.equal(await runs.saveLookupJob(lookup), true);
+  await Promise.all(
+    Array.from({ length: 6 }, () =>
+      runs.updateLookupJobWith(lookup.id, (stored) => ({
+        progress: { ...stored.progress, pagesScanned: stored.progress.pagesScanned + 1 },
+      })),
+    ),
+  );
+  const stored = await runs.getLookupJob(lookup.id);
+  assert.equal(stored?.progress.pagesScanned, 6);
+  assert.notEqual(stored?.updatedAt, lookup.updatedAt);
+
+  const same = await runs.updateLookupJobWith(lookup.id, () => null);
+  assert.equal(same?.progress.pagesScanned, 6);
+  assert.equal(await runs.updateLookupJobWith("no-such-lookup", () => ({ status: "failed" })), null);
+});
+
+test("updateLookupJobWith refuses a stopped or deleted lookup without calling the updater", async () => {
+  const stopped = makeLookup();
+  await runs.saveLookupJob(stopped);
+  await runs.stopLookupJob(stopped.id);
+  let called = false;
+  const refused = await runs.updateLookupJobWith(stopped.id, () => {
+    called = true;
+    return { status: "completed" };
+  });
+  assert.equal(refused, null);
+  assert.equal(called, false);
+  assert.notEqual((await runs.getLookupJob(stopped.id))?.status, "completed");
+
+  const deleted = makeLookup();
+  await runs.saveLookupJob(deleted);
+  await runs.deleteLookupHistoryRun(deleted.id);
+  assert.equal(await runs.updateLookupJobWith(deleted.id, () => ({ status: "completed" })), null);
+});
+
 test("updateLookupAdWith applies the patch atomically and keeps updateLookupAd's pending rule", async () => {
   const lookup = makeLookup();
   await runs.saveLookupJob(lookup);

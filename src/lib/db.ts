@@ -33,6 +33,7 @@ export {
   saveLookupJob,
   getLookupJob,
   updateLookupJob,
+  updateLookupJobWith,
   listLookupHistory,
   deleteLookupHistoryRun,
   clearAllLookupHistory,

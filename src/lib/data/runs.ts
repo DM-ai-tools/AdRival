@@ -757,6 +757,30 @@ export async function getLookupJob(id: string): Promise<LookupJob | null> {
 
 export async function updateLookupJob(id: string, patch: Partial<LookupJob>): Promise<LookupJob | null> {
   settleProgress(pendingLookupProgress, id, { status: patch.status ?? "running", progress: patch.progress });
+  return applyLookupJobUpdate(id, () => patch);
+}
+
+/**
+ * Atomic read-modify-write of a lookup: updateLookupJob with the patch built
+ * by `updater` from the stored lookup inside the write transaction (row
+ * locked), so an update saved in between is never lost. Refused (null, the
+ * updater not called) like updateLookupJob: missing, stopped, deleted or
+ * suppressed. A null patch writes nothing and returns the stored lookup.
+ * The updater must be synchronous. A pending throttled progress write is
+ * dropped, as with any save.
+ */
+export async function updateLookupJobWith(
+  id: string,
+  updater: (existing: LookupJob) => Partial<LookupJob> | null,
+): Promise<LookupJob | null> {
+  settleProgress(pendingLookupProgress, id, { status: "running", progress: null });
+  return applyLookupJobUpdate(id, updater);
+}
+
+function applyLookupJobUpdate(
+  id: string,
+  updater: (existing: LookupJob) => Partial<LookupJob> | null,
+): Promise<LookupJob | null> {
   return serial(`lookup:${id}`, () =>
     withTx(async (tx) => {
       await lockRun(tx, id);
@@ -770,6 +794,8 @@ export async function updateLookupJob(id: string, patch: Partial<LookupJob>): Pr
         suppressedLookupJobIds.add(id);
         return null;
       }
+      const patch = updater(existing);
+      if (!patch) return existing;
       const next: LookupJob = { ...existing, ...patch, updatedAt: new Date().toISOString() };
       await upsertRun(tx, "lookup_jobs", next);
       return next;
