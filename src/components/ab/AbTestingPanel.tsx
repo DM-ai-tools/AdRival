@@ -31,9 +31,19 @@ const key = (s: Source) => `${s.kind}:${s.id}`;
 const STAGE_FILTERS = ["unaware", "problem_aware", "solution_aware", "product_aware", "most_aware", "unclear"];
 const AUDIENCE_FILTERS = ["newbie", "intermediate", "advanced", "unclear"];
 
-export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null }) {
+export function AbTestingPanel({
+  defaultSource,
+  spaceId = null,
+  spaceName = null,
+}: {
+  defaultSource: Source | null;
+  /** Active client space; when set, only that space's runs are offered. */
+  spaceId?: string | null;
+  spaceName?: string | null;
+}) {
   const router = useRouter();
-  const [runs, setRuns] = useState<RunItem[]>([]);
+  const [allRuns, setAllRuns] = useState<RunItem[]>([]);
+  const [runsLoaded, setRunsLoaded] = useState(false);
   const [source, setSource] = useState<Source | null>(defaultSource);
   const [data, setData] = useState<AbData | null>(null);
   const [loading, setLoading] = useState(false);
@@ -63,16 +73,32 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
         if (!live || !res.ok) return;
         const list: RunItem[] = (body.runs ?? []).slice();
         list.sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
-        setRuns(list);
-        setSource((cur) => cur ?? (list[0] ? { kind: list[0].kind, id: list[0].id } : null));
+        setAllRuns(list);
       } catch {
         /* picker stays empty */
+      } finally {
+        if (live) setRunsLoaded(true);
       }
     })();
     return () => {
       live = false;
     };
   }, []);
+
+  // Only the active client space's runs, so everything here belongs to that workspace.
+  const runs = useMemo(
+    () => (spaceId ? allRuns.filter((r) => r.spaceId === spaceId) : allRuns),
+    [allRuns, spaceId],
+  );
+
+  // Keep the selection inside the scope: default to the newest run, drop one from another space.
+  useEffect(() => {
+    if (!runsLoaded) return;
+    setSource((cur) => {
+      if (cur && runs.some((r) => r.kind === cur.kind && r.id === cur.id)) return cur;
+      return runs[0] ? { kind: runs[0].kind, id: runs[0].id } : null;
+    });
+  }, [runs, runsLoaded]);
 
   const load = useCallback(async (s: Source) => {
     const seq = ++loadSeq.current;
@@ -305,6 +331,9 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
   return (
     <section className="panel ab-panel">
       <h2>A/B testing</h2>
+      {spaceId ? (
+        <p className="muted">Showing runs from {spaceName || "this client space"} only.</p>
+      ) : null}
       <RunPicker
         runs={runs}
         value={source}
@@ -461,7 +490,11 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
       ) : null}
 
       {!source && !loading ? (
-        <p className="muted">Run a search or lookup first, then compare its pages here.</p>
+        <p className="muted">
+          {spaceId
+            ? "No runs in this client space yet. Run a search or lookup here first, then compare its pages."
+            : "Run a search or lookup first, then compare its pages here."}
+        </p>
       ) : null}
     </section>
   );

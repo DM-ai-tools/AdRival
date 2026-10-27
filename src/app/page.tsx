@@ -827,6 +827,8 @@ export default function HomePage() {
 
       {mode === "ab" && (
         <AbTestingPanel
+          spaceId={activeSpace.id || null}
+          spaceName={activeSpace.clientName || null}
           defaultSource={
             jobId
               ? { kind: "search", id: jobId }

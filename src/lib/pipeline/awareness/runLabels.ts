@@ -11,6 +11,7 @@ export type RunItem = {
   countLabel?: string;
   subtitle?: string;
   platformLabel?: string;
+  spaceId?: string | null;
 };
 
 export type RunGroup = { heading: "Keyword searches" | "Competitor lookups"; runs: RunItem[] };
