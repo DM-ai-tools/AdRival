@@ -11,6 +11,8 @@ import { pickBaseForStage } from "@/lib/pipeline/awareness/abPages";
 import { loadAbSource } from "@/lib/pipeline/awareness/abSource";
 import type { ProjectKind } from "@/lib/types";
 
+const MAX_NOTES = 1500;
+
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
@@ -20,6 +22,7 @@ export async function POST(request: Request) {
     const body = await request.json();
     const kind: ProjectKind = body.kind === "lookup" ? "lookup" : "search";
     const id = String(body.id ?? "").trim();
+    const userNotes = typeof body.notes === "string" ? body.notes.trim().slice(0, MAX_NOTES) : "";
     const stage = AWARENESS_STAGES.find((s) => s === body.stage);
     if (!id) return NextResponse.json({ error: "id is required" }, { status: 400 });
     if (!stage) return NextResponse.json({ error: "Unknown awareness stage" }, { status: 400 });
@@ -57,6 +60,7 @@ export async function POST(request: Request) {
           stage,
           keywords: source.keywords,
           competitorPages,
+          userNotes,
           basePage: base
             ? { brand: base.brand, headline: base.headline, primaryOffer: base.primaryOffer, cta: base.cta }
             : null,
@@ -68,6 +72,7 @@ export async function POST(request: Request) {
       source: { kind, id },
       stage,
       createdAt: new Date().toISOString(),
+      ...(userNotes ? { userNotes } : {}),
     });
     return NextResponse.json({ icp: maskIcp(icp) });
   } catch (err) {

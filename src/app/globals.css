@@ -5676,6 +5676,23 @@ select.search-input {
 .ab-icp-demo dd {
   margin: 0;
 }
+.ab-icp-notes-input {
+  margin-top: 16px;
+}
+.ab-icp-notes-input label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 0.85rem;
+  font-weight: 650;
+}
+.ab-icp-notes-input textarea {
+  width: 100%;
+  resize: vertical;
+}
+.ab-icp-notes-input p {
+  margin: 4px 0 0;
+  font-size: 0.8rem;
+}
 .ab-icp-notes {
   margin: 10px 0 0;
   padding-top: 8px;

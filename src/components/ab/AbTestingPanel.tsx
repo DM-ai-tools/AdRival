@@ -284,7 +284,7 @@ export function AbTestingPanel({
   }
 
   // Spends credits. Only reached from an explicit Generate / Regenerate click; Regenerate writes a new one.
-  async function generateIcp(stage: string) {
+  async function generateIcp(stage: string, notes?: string) {
     if (!source) return;
     const flightKey = inFlightKey(source, stage);
     if (!tryAddInFlight(icpInFlight, flightKey)) return;
@@ -297,7 +297,7 @@ export function AbTestingPanel({
       const res = await fetch("/api/ab-testing/icp", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind: source.kind, id: source.id, stage }),
+        body: JSON.stringify({ kind: source.kind, id: source.id, stage, notes: notes ?? "" }),
       });
       let body: { icp?: IcpRecord; error?: string } = {};
       try {
@@ -480,7 +480,7 @@ export function AbTestingPanel({
           basePage={drawerBase}
           pages={data.pages}
           recreating={recreatingId !== null && recreatingId === drawerBase?.id}
-          onRegenerate={() => void generateIcp(drawer.stage)}
+          onRegenerate={(notes) => void generateIcp(drawer.stage, notes)}
           onPickBase={(p) => setDrawer({ ...drawer, baseId: p.id })}
           onRecreate={() => {
             if (drawerBase && drawerIcp) void recreate(drawerBase, drawerIcp.id);

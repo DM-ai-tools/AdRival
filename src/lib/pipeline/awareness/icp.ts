@@ -68,6 +68,7 @@ Rules:
 - triggers: the event that made them look right now. objections: what makes them hesitate to buy this service.
 - Write for the requested stage: what this reader already knows and what they do not.
 - Avoid angles the listed competitor pages already take; suggestedAngle must be one open angle, one sentence, usable as a landing-page headline direction.
+- userNotes, when present, are facts from the business owner about their real customer. They outrank your assumptions: reflect every one of them in the relevant sections, and never contradict them.
 - Use the market country for spelling, currency and local detail. Use null for demographics you cannot support.
 - Each list has at most ${MAX_ITEMS} short items; aim for 5 to 7 strong ones, not filler to reach the maximum.
 Return only JSON: {"persona":"one sentence: who this person is","painPoints":[],"demographics":{"ageRange":null,"role":null,"budget":null,"location":null,"other":null},"psychographics":[],"saysOutLoud":[],"triggers":[],"objections":[],"interests":[],"hopesAndDesires":[],"stageNotes":"how this stage thinks and what they know","suggestedAngle":"one sentence"}`;
@@ -101,6 +102,8 @@ export async function generateIcp(input: {
     primaryOffer: string | null;
     cta: string | null;
   } | null;
+  /** The user's own corrections and details about their customer. */
+  userNotes?: string | null;
   call?: JsonCaller;
 }): Promise<IcpContent> {
   if (!icpProfileReady(input.profile)) throw new Error("Add your business website first");
@@ -125,6 +128,7 @@ export async function generateIcp(input: {
         locations: (p.locations ?? []).slice(0, 5),
       },
       searchKeywords: input.keywords.slice(0, 20),
+      userNotes: input.userNotes?.trim() || null,
       closestCompetitorPageForThisStage: input.basePage ?? null,
       competitorPagesAlreadyUsedAngles: input.competitorPages.slice(0, 20),
     },

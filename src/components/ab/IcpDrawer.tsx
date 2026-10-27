@@ -56,7 +56,7 @@ export function IcpDrawer({
   pages: AbPage[];
   recreating?: boolean;
   /** Spends credits; only ever called from an explicit click. */
-  onRegenerate: () => void;
+  onRegenerate: (notes: string) => void;
   onPickBase: (page: AbPage) => void;
   onRecreate: () => void;
   onClose: () => void;
@@ -64,6 +64,8 @@ export function IcpDrawer({
   const titleId = useId();
   const ref = useRef<HTMLDivElement | null>(null);
   const [picking, setPicking] = useState(false);
+  // The user's own details about their customer; sent with every regenerate and saved on the ICP.
+  const [notes, setNotes] = useState(icp?.userNotes ?? "");
   const [copied, setCopied] = useState<"ok" | "fail" | null>(null);
   const label = STAGE_LABELS[stage] ?? stage;
   const choices = pages.filter((p) => p.status === "completed");
@@ -198,6 +200,21 @@ export function IcpDrawer({
                 <ListCard title="Interests" items={icp.interests} />
               </div>
 
+              <div className="ab-icp-notes-input">
+                <label htmlFor={`${titleId}-notes`}>Personalise this profile</label>
+                <textarea
+                  id={`${titleId}-notes`}
+                  className="search-input"
+                  rows={3}
+                  maxLength={1500}
+                  value={notes}
+                  disabled={generating}
+                  placeholder="Tell us what is wrong or missing: who your real customers are, their typical budget, objections you hear, words they use… Then press Regenerate to apply it."
+                  onChange={(e) => setNotes(e.target.value)}
+                />
+                <p className="muted">Applied the next time you regenerate. Saved with this profile.</p>
+              </div>
+
               <div className="ab-drawer-recreate">
                 {basePage ? (
                   <p>
@@ -236,8 +253,8 @@ export function IcpDrawer({
         <footer className="ab-modal-foot">
           {icp ? (
             <>
-              <button type="button" className="ghost-btn" disabled={generating} onClick={onRegenerate}>
-                {generating ? "Regenerating…" : "Regenerate (uses credits)"}
+              <button type="button" className="ghost-btn" disabled={generating} onClick={() => onRegenerate(notes)}>
+                {generating ? "Regenerating…" : notes.trim() ? "Regenerate with my notes (uses credits)" : "Regenerate (uses credits)"}
               </button>
               <button type="button" className="ghost-btn" onClick={copy}>
                 Copy
@@ -262,7 +279,7 @@ export function IcpDrawer({
               </button>
             </>
           ) : !generating ? (
-            <button type="button" className="ghost-btn" onClick={onRegenerate}>
+            <button type="button" className="ghost-btn" onClick={() => onRegenerate(notes)}>
               Try again (uses credits)
             </button>
           ) : null}

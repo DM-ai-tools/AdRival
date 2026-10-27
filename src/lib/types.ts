@@ -952,6 +952,8 @@ export interface IcpRecord extends IcpContent {
   source: { kind: ProjectKind; id: string };
   stage: Exclude<AwarenessStage, "unclear">;
   createdAt: string;
+  /** What the user told us about their real customer; applied again on every regenerate. */
+  userNotes?: string;
 }
 
 export interface LandingPageOfferAnalysis {
