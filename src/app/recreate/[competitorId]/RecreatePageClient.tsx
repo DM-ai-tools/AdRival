@@ -86,7 +86,14 @@ export function RecreatePageClient({ competitorId }: { competitorId: string }) {
     setReturnPath(readReturnPath());
   }, []);
 
-  const syncFromPage = useCallback((nextPage: RecreatedLandingPage | null) => {
+  const syncFromPage = useCallback((incoming: RecreatedLandingPage | null) => {
+    // Arriving from an A/B test (?icp=<id>) is a request for a page that does not exist yet.
+    // A page built earlier for this competitor (plain, or for another reader) is not it, so
+    // it is not shown; a build in progress is still followed.
+    const wantedIcp = new URLSearchParams(window.location.search).get("icp");
+    const running = incoming?.status === "pending" || incoming?.status === "design_pending";
+    const nextPage =
+      wantedIcp && incoming && !running && incoming.targetIcp?.icpId !== wantedIcp ? null : incoming;
     setPage(nextPage);
     if (nextPage?.styleDirection) setStyleDirection(nextPage.styleDirection);
     if (nextPage?.status === "failed" && nextPage.error) {
