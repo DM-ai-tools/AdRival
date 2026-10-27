@@ -44,22 +44,33 @@ const icpSchema = z.object({
   hopesAndDesires: list,
   stageNotes: z.string().default("").transform((v) => v.trim()),
   suggestedAngle: z.string().default("").transform((v) => v.trim()),
+  persona: z.string().nullish().transform((v) => v?.trim() || undefined),
+  triggers: list.optional().transform((a) => (a?.length ? a : undefined)),
+  objections: list.optional().transform((a) => (a?.length ? a : undefined)),
 });
 
-const SYSTEM = `You write an ideal customer profile (ICP) for one specific service, aimed at one stage of market awareness (Eugene Schwartz).
+const SYSTEM = `You write an ideal customer profile (ICP) for ONE specific service, aimed at ONE stage of market awareness (Eugene Schwartz).
 Stages:
 - unaware: does not know they have a problem; reacts to stories, identity, curiosity.
 - problem_aware: feels the pain, does not know solutions exist.
 - solution_aware: knows solutions exist, does not know this one.
 - product_aware: knows this business, needs proof, comparison, objection handling.
 - most_aware: ready to buy, needs the offer, price, deal or urgency.
+
+The input gives you serviceFocus (the exact service being sold, taken from the user's search keywords), the business, and the closest competitor page for this stage. Treat serviceFocus as the product. Everything you write must be about the person who would buy THAT service, not about the business's industry in general.
+
 Rules:
-- Be specific to the business's offerings, positioning, target audience and market. No generic marketing filler.
-- Write for the requested stage: what this reader already knows and what they say out loud at that stage.
-- saysOutLoud: first-person phrases this person would actually say, in their own words.
-- Avoid angles the listed competitor pages already take; suggestedAngle must be a different, open angle.
-- Each list has at most ${MAX_ITEMS} short items. Use null for demographics you cannot support.
-Return only JSON: {"painPoints":[],"demographics":{"ageRange":null,"role":null,"budget":null,"location":null,"other":null},"psychographics":[],"saysOutLoud":[],"interests":[],"hopesAndDesires":[],"stageNotes":"how this stage thinks and what they know","suggestedAngle":"one sentence"}`;
+- Be concrete. Name real situations, numbers, tools, deadlines and money (for example a monthly ad spend, a cost per lead, a failed agency, a specific platform) that fit the service and market. A reader should be able to tell which service this ICP is for without seeing the title.
+- Banned filler, never write anything like: "struggling to attract new customers", "wants to grow", "values growth and success", "stay competitive", "reliable partner", "overwhelmed by options", "wasting money" with no detail. If a line could describe any business service, rewrite it until it could only describe this one.
+- Pain points are specific situations with a cost or consequence, not feelings.
+- demographics.role is a real job title or situation (owner of a 5-person trades business), not "business owner". Give an ageRange, budget and location whenever the market data supports a reasonable estimate.
+- saysOutLoud: first-person sentences in the buyer's own words, with the vocabulary this person actually uses at this stage (an unaware reader does not say the service name; a most-aware one asks about price and start date).
+- triggers: the event that made them look right now. objections: what makes them hesitate to buy this service.
+- Write for the requested stage: what this reader already knows and what they do not.
+- Avoid angles the listed competitor pages already take; suggestedAngle must be one open angle, one sentence, usable as a landing-page headline direction.
+- Use the market country for spelling, currency and local detail. Use null for demographics you cannot support.
+- Each list has at most ${MAX_ITEMS} short items; aim for 5 to 7 strong ones, not filler to reach the maximum.
+Return only JSON: {"persona":"one sentence: who this person is","painPoints":[],"demographics":{"ageRange":null,"role":null,"budget":null,"location":null,"other":null},"psychographics":[],"saysOutLoud":[],"triggers":[],"objections":[],"interests":[],"hopesAndDesires":[],"stageNotes":"how this stage thinks and what they know","suggestedAngle":"one sentence"}`;
 
 function parseJson(raw: string): unknown {
   const text = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
@@ -83,6 +94,13 @@ export async function generateIcp(input: {
     awarenessStage: AwarenessStage;
     audienceLevel: AudienceLevel;
   }>;
+  /** The completed page closest to this stage; shows how the market already speaks to it. */
+  basePage?: {
+    brand: string;
+    headline: string | null;
+    primaryOffer: string | null;
+    cta: string | null;
+  } | null;
   call?: JsonCaller;
 }): Promise<IcpContent> {
   if (!icpProfileReady(input.profile)) throw new Error("Add your business website first");
@@ -91,6 +109,7 @@ export async function generateIcp(input: {
   const user = JSON.stringify(
     {
       stage: input.stage,
+      serviceFocus: input.keywords.slice(0, 6),
       business: {
         name: p.businessName,
         industry: p.industry,
@@ -99,10 +118,14 @@ export async function generateIcp(input: {
         offerings: p.offerings,
         positioningSummary: p.positioningSummary,
         targetAudience: p.targetAudience ?? null,
+        businessModel: p.businessModel ?? null,
+        serviceDelivery: p.serviceDelivery ?? null,
+        services: (p.categories ?? []).map((c) => c.label).filter(Boolean).slice(0, 12),
         market: p.primaryMarketCountry ?? null,
         locations: (p.locations ?? []).slice(0, 5),
       },
       searchKeywords: input.keywords.slice(0, 20),
+      closestCompetitorPageForThisStage: input.basePage ?? null,
       competitorPagesAlreadyUsedAngles: input.competitorPages.slice(0, 20),
     },
     null,

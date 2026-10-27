@@ -941,6 +941,10 @@ export interface IcpContent {
   hopesAndDesires: string[];
   stageNotes: string;
   suggestedAngle: string;
+  /** One-line "who this is"; absent on ICPs saved before it existed. */
+  persona?: string;
+  triggers?: string[];
+  objections?: string[];
 }
 
 export interface IcpRecord extends IcpContent {

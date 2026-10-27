@@ -22,10 +22,13 @@ export function icpToText(icp: IcpContent, stageLabel?: string): string {
     .map(([k, v]) => `${k}: ${v!.trim()}`);
   const out: string[] = [];
   if (stageLabel) out.push(`Ideal customer profile: ${stageLabel}`, "");
+  if (icp.persona?.trim()) out.push(icp.persona.trim(), "");
   out.push(...list("Pain points", icp.painPoints));
   if (demo.length) out.push("Demographics", ...demo.map((s) => `- ${s}`), "");
   out.push(...list("Psychographics", icp.psychographics));
   out.push(...list("What they say out loud", icp.saysOutLoud));
+  out.push(...list("What made them look now", icp.triggers ?? []));
+  out.push(...list("What makes them hesitate", icp.objections ?? []));
   out.push(...list("Interests", icp.interests));
   out.push(...list("Hopes & desires", icp.hopesAndDesires));
   if (icp.stageNotes?.trim()) out.push("What this reader knows", icp.stageNotes.trim(), "");

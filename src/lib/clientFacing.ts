@@ -97,6 +97,9 @@ export function maskIcp<T extends IcpContent>(icp: T): T {
     hopesAndDesires: icp.hopesAndDesires.map(m),
     stageNotes: m(icp.stageNotes),
     suggestedAngle: m(icp.suggestedAngle),
+    persona: icp.persona === undefined ? undefined : m(icp.persona),
+    triggers: icp.triggers?.map(m),
+    objections: icp.objections?.map(m),
   };
 }
 

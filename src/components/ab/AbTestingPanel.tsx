@@ -257,7 +257,7 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
     }, 0);
   }
 
-  // Spends credits. Only reached from an explicit Generate / Regenerate click.
+  // Spends credits. Only reached from an explicit Generate / Regenerate click; Regenerate writes a new one.
   async function generateIcp(stage: string) {
     if (!source) return;
     const flightKey = inFlightKey(source, stage);
@@ -265,6 +265,8 @@ export function AbTestingPanel({ defaultSource }: { defaultSource: Source | null
     const forKey = key(source);
     bump();
     setIcpError(null);
+    // The old profile is hidden while the new one is written, so a stale one is never shown as current.
+    setData((d) => (d ? { ...d, icps: (d.icps ?? []).filter((i) => i.stage !== stage) } : d));
     try {
       const res = await fetch("/api/ab-testing/icp", {
         method: "POST",

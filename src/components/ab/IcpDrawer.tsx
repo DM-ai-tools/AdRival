@@ -10,24 +10,30 @@ export const NO_BASE_TIP = "Analyse a competitor page first";
 
 const FOCUSABLE = "button:not([disabled]), a[href], [tabindex]:not([tabindex=\"-1\"])";
 
-function Block({ title, items }: { title: string; items: string[] }) {
-  const clean = items.filter((s) => s && s.trim());
+function Card({ title, className = "", children }: { title: string; className?: string; children: React.ReactNode }) {
   return (
-    <section className="ab-icp-block">
+    <section className={`ab-icp-card ${className}`}>
       <h4>{title}</h4>
-      {clean.length ? (
-        <ul>
-          {clean.map((s, i) => (
-            <li key={i}>{s}</li>
-          ))}
-        </ul>
-      ) : (
-        <p className="muted">Nothing specific.</p>
-      )}
+      {children}
     </section>
   );
 }
 
+function ListCard({ title, items, className }: { title: string; items?: string[]; className?: string }) {
+  const clean = (items ?? []).filter((s) => s && s.trim());
+  if (!clean.length) return null;
+  return (
+    <Card title={title} className={className}>
+      <ul>
+        {clean.map((s, i) => (
+          <li key={i}>{s}</li>
+        ))}
+      </ul>
+    </Card>
+  );
+}
+
+/** Centred dialog showing one stage's ICP (kept under the old name for its callers). */
 export function IcpDrawer({
   stage,
   icp,
@@ -64,6 +70,12 @@ export function IcpDrawer({
 
   useEffect(() => {
     ref.current?.focus();
+    // Lock the page behind the dialog so it cannot scroll away and leave a blank gap.
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
   }, []);
 
   function onKeyDown(e: React.KeyboardEvent) {
@@ -109,10 +121,16 @@ export function IcpDrawer({
       ).filter(([, v]) => v && v.trim())
     : [];
 
+  const pageToggle = choices.length ? (
+    <button type="button" className="link-btn" aria-expanded={picking} onClick={() => setPicking((v) => !v)}>
+      Change page
+    </button>
+  ) : null;
+
   return (
-    <div className="ab-drawer-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+    <div className="ab-modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div
-        className="ab-drawer"
+        className="ab-modal"
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -121,60 +139,103 @@ export function IcpDrawer({
         ref={ref}
         onKeyDown={onKeyDown}
       >
-        <div className="ab-drawer-head">
-          <h3 id={titleId}>Ideal customer: {label}</h3>
-          <button type="button" className="link-btn" onClick={onClose}>
+        <header className="ab-modal-head">
+          <div>
+            <span className="ab-modal-kicker">Ideal customer profile</span>
+            <h3 id={titleId}>{label}</h3>
+            {icp?.persona ? <p className="ab-modal-persona">{icp.persona}</p> : null}
+          </div>
+          <button type="button" className="ghost-btn" onClick={onClose}>
             Close
           </button>
+        </header>
+
+        <div className="ab-modal-body">
+          {error ? (
+            <div className="notice notice-error" role="alert">
+              <p>{error}</p>
+            </div>
+          ) : null}
+
+          {generating && !icp ? (
+            <div className="ab-modal-loading" role="status">
+              <span className="ab-modal-spinner" aria-hidden="true" />
+              <p>Writing a profile for this stage from your service, market and the closest competitor page…</p>
+            </div>
+          ) : null}
+
+          {icp ? (
+            <>
+              {icp.suggestedAngle ? (
+                <div className="ab-icp-angle">
+                  <span>Suggested angle</span>
+                  <p>{icp.suggestedAngle}</p>
+                </div>
+              ) : null}
+
+              <div className="ab-icp-grid">
+                <ListCard title="Pain points" items={icp.painPoints} />
+                <Card title="Who they are">
+                  {demographics.length ? (
+                    <dl className="ab-icp-demo">
+                      {demographics.map(([k, v]) => (
+                        <div key={k}>
+                          <dt>{k}</dt>
+                          <dd>{v}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  ) : (
+                    <p className="muted">Nothing specific.</p>
+                  )}
+                  {icp.stageNotes ? <p className="ab-icp-notes">{icp.stageNotes}</p> : null}
+                </Card>
+                <ListCard title="What they say out loud" items={icp.saysOutLoud} className="ab-icp-quotes" />
+                <ListCard title="What made them look now" items={icp.triggers} />
+                <ListCard title="What makes them hesitate" items={icp.objections} />
+                <ListCard title="Mindset" items={icp.psychographics} />
+                <ListCard title="Hopes & desires" items={icp.hopesAndDesires} />
+                <ListCard title="Interests" items={icp.interests} />
+              </div>
+
+              <div className="ab-drawer-recreate">
+                {basePage ? (
+                  <p>
+                    Based on: <strong>{basePage.brand}</strong> page {choices.length > 1 ? pageToggle : null}
+                  </p>
+                ) : (
+                  <p className="muted">
+                    {NO_BASE_TIP}. {pageToggle}
+                  </p>
+                )}
+                {picking ? (
+                  <ul className="ab-drawer-pages">
+                    {choices.map((p) => (
+                      <li key={`${p.source}:${p.id}`}>
+                        <button
+                          type="button"
+                          className="link-btn"
+                          aria-current={basePage?.id === p.id ? "true" : undefined}
+                          onClick={() => {
+                            onPickBase(p);
+                            setPicking(false);
+                          }}
+                        >
+                          {p.brand}
+                          {p.headline ? ` - ${p.headline}` : ""}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            </>
+          ) : null}
         </div>
 
-        {error ? (
-          <div className="notice notice-error" role="alert">
-            <p>{error}</p>
-          </div>
-        ) : null}
-
-        {generating && !icp ? (
-          <p className="muted" role="status">
-            Writing the ICP for this stage…
-          </p>
-        ) : null}
-
-        {icp ? (
-          <>
-            <Block title="Pain points" items={icp.painPoints} />
-            <section className="ab-icp-block">
-              <h4>Demographics</h4>
-              {demographics.length ? (
-                <ul>
-                  {demographics.map(([k, v]) => (
-                    <li key={k}>
-                      {k}: {v}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="muted">Nothing specific.</p>
-              )}
-            </section>
-            <Block title="Psychographics" items={icp.psychographics} />
-            <Block title="What they say out loud" items={icp.saysOutLoud} />
-            <Block title="Interests" items={icp.interests} />
-            <Block title="Hopes & desires" items={icp.hopesAndDesires} />
-            {icp.stageNotes ? (
-              <section className="ab-icp-block">
-                <h4>What this reader knows</h4>
-                <p>{icp.stageNotes}</p>
-              </section>
-            ) : null}
-            {icp.suggestedAngle ? (
-              <section className="ab-icp-block">
-                <h4>Suggested angle</h4>
-                <p>{icp.suggestedAngle}</p>
-              </section>
-            ) : null}
-
-            <div className="ab-drawer-actions">
+        <footer className="ab-modal-foot">
+          {icp ? (
+            <>
               <button type="button" className="ghost-btn" disabled={generating} onClick={onRegenerate}>
                 {generating ? "Regenerating…" : "Regenerate (uses credits)"}
               </button>
@@ -184,61 +245,9 @@ export function IcpDrawer({
               <span className="muted" role="status">
                 {copied === "ok" ? "Copied" : copied === "fail" ? "Copy is not available in this browser" : ""}
               </span>
-            </div>
-
-            <div className="ab-drawer-recreate">
-              {basePage ? (
-                <p>
-                  Based on: <strong>{basePage.brand}</strong> page{" "}
-                  {choices.length > 1 ? (
-                    <button
-                      type="button"
-                      className="link-btn"
-                      aria-expanded={picking}
-                      onClick={() => setPicking((v) => !v)}
-                    >
-                      Change page
-                    </button>
-                  ) : null}
-                </p>
-              ) : (
-                <p className="muted">
-                  {NO_BASE_TIP}.{" "}
-                  {choices.length ? (
-                    <button
-                      type="button"
-                      className="link-btn"
-                      aria-expanded={picking}
-                      onClick={() => setPicking((v) => !v)}
-                    >
-                      Change page
-                    </button>
-                  ) : null}
-                </p>
-              )}
-              {picking ? (
-                <ul className="ab-drawer-pages">
-                  {choices.map((p) => (
-                    <li key={`${p.source}:${p.id}`}>
-                      <button
-                        type="button"
-                        className="link-btn"
-                        aria-current={basePage?.id === p.id ? "true" : undefined}
-                        onClick={() => {
-                          onPickBase(p);
-                          setPicking(false);
-                        }}
-                      >
-                        {p.brand}
-                        {p.headline ? ` - ${p.headline}` : ""}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
               <button
                 type="button"
-                className="ghost-btn ab-drawer-primary"
+                className="ghost-btn ab-drawer-primary ab-modal-cta"
                 disabled={!basePage || recreating || generating}
                 title={
                   !basePage
@@ -251,15 +260,13 @@ export function IcpDrawer({
               >
                 {recreating ? "Opening…" : "Recreate a page for this ICP"}
               </button>
-            </div>
-          </>
-        ) : !generating ? (
-          <div className="ab-drawer-actions">
+            </>
+          ) : !generating ? (
             <button type="button" className="ghost-btn" onClick={onRegenerate}>
               Try again (uses credits)
             </button>
-          </div>
-        ) : null}
+          ) : null}
+        </footer>
       </div>
     </div>
   );

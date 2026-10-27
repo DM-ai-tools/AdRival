@@ -7,6 +7,7 @@ import { upsertIcp } from "@/lib/db";
 import { maskIcp } from "@/lib/clientFacing";
 import { AWARENESS_STAGES } from "@/lib/pipeline/awareness/coverage";
 import { generateIcp, icpProfileReady } from "@/lib/pipeline/awareness/icp";
+import { pickBaseForStage } from "@/lib/pipeline/awareness/abPages";
 import { loadAbSource } from "@/lib/pipeline/awareness/abSource";
 import type { ProjectKind } from "@/lib/types";
 
@@ -41,6 +42,8 @@ export async function POST(request: Request) {
         audienceLevel: p.levels!.audienceLevel,
       }));
 
+    const base = pickBaseForStage(source.pages, stage);
+
     const content = await runBillable(
       {
         user,
@@ -49,7 +52,15 @@ export async function POST(request: Request) {
         projectId: id,
         runId: id,
       },
-      () => generateIcp({ profile, stage, keywords: source.keywords, competitorPages }),
+      () => generateIcp({
+          profile,
+          stage,
+          keywords: source.keywords,
+          competitorPages,
+          basePage: base
+            ? { brand: base.brand, headline: base.headline, primaryOffer: base.primaryOffer, cta: base.cta }
+            : null,
+        }),
     );
     const icp = await upsertIcp({
       ...content,
