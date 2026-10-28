@@ -29,13 +29,21 @@ export async function runBusinessUrl(runId: string): Promise<string | null> {
 /**
  * Saves the client's website (already normalized) on the run, and on the
  * lookup behind a lookup's recreate run. False when the run is missing.
+ * `fillProfileUrl` (default true) also gives a business profile without a
+ * website this one; the Recreate queue passes false, since the website of a
+ * job is not the search's own business (that profile's url must stay as it
+ * was made).
  */
-export async function saveRunBusinessUrl(runId: string, website: string): Promise<boolean> {
+export async function saveRunBusinessUrl(
+  runId: string,
+  website: string,
+  options: { fillProfileUrl?: boolean } = {},
+): Promise<boolean> {
   const job = await getJob(runId);
   if (!job) return false;
   await updateJob(job.id, {
     businessUrl: website,
-    ...(job.businessProfile && !job.businessProfile.url
+    ...((options.fillProfileUrl ?? true) && job.businessProfile && !job.businessProfile.url
       ? { businessProfile: { ...job.businessProfile, url: website } }
       : {}),
   });

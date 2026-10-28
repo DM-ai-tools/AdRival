@@ -155,6 +155,8 @@ async function runJob(job: RecreateJob): Promise<boolean> {
             targetIcp: job.options.targetIcp,
             // The website chosen when the job was added, whatever the run holds now.
             businessUrl: job.options.businessUrl || null,
+            // Reading another website's business takes a while: a stop in the meantime builds nothing.
+            stillWanted: async () => (await getRecreateJob(job.id))?.status === "running",
           });
         },
       );
@@ -243,7 +245,11 @@ export async function sweepRecreateQueue(ownerUserId?: string): Promise<void> {
     try {
       const page = (await getCompetitor(job.competitorId))?.recreatedPage;
       if (!page || (!page.manus?.taskId && outcomeOf(page) === null)) {
-        // It never reached the design agent: nothing was spent, so it starts again.
+        // It never reached the design agent, so it starts again. Its credit hold went
+        // with the old process (sweepAbandonedReservations). A restart while the
+        // build was reading the job's website loses that analysis: what was used is
+        // already charged, and it runs (and is charged) again unless it had been
+        // saved on the version.
         await requeueJob(job.id);
         continue;
       }

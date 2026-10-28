@@ -112,6 +112,9 @@ function VersionRow({ item }: { item: RecreateListItem }) {
         {item.error && (item.state === "failed" || item.state === "stopped") ? (
           <p className="error-text">{item.error}</p>
         ) : null}
+        {item.notice && item.state !== "failed" && item.state !== "stopped" ? (
+          <p className="muted">{item.notice}</p>
+        ) : null}
         {open ? <Preview competitorId={item.competitorId} /> : null}
       </div>
       <div className="history-actions">

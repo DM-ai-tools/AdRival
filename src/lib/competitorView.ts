@@ -9,7 +9,20 @@ import { RECREATED_PAGE_HEAVY_KEYS, type CompetitorRecord } from "./types";
  * Those views only need the recreation status and progress; the recreate page
  * loads the full page from /api/competitors/recreate-page.
  */
+/**
+ * A version's own business profile (recreateOnly.businessProfile: scraped
+ * brand assets, design and contact details) is for the server's builds only;
+ * every response that sends a competitor record drops it here.
+ */
+export function withoutVersionProfile<T extends { recreateOnly?: CompetitorRecord["recreateOnly"] }>(competitor: T): T {
+  if (!competitor.recreateOnly || !("businessProfile" in competitor.recreateOnly)) return competitor;
+  const { businessProfile: _dropped, ...recreateOnly } = competitor.recreateOnly;
+  void _dropped;
+  return { ...competitor, recreateOnly };
+}
+
 export function competitorForList<T extends CompetitorRecord>(competitor: T): T {
+  competitor = withoutVersionProfile(competitor);
   if (!competitor.recreatedPage) return competitor;
   const summary: Record<string, unknown> = { ...competitor.recreatedPage };
   delete summary.contentPack;

@@ -473,6 +473,44 @@ test("GET /api/competitors/recreate-page sends the stored HTML; light=1 does not
   assert.equal(JSON.stringify(refused.body).includes("Recreated page"), false);
 });
 
+test("GET /api/competitors/recreate-page never sends a version's own business profile", async () => {
+  const owner = await makeUser("owner");
+  const job = await saveRun(searchJob(owner));
+  const source = await competitorWithPage(job.id);
+  const version = await competitorWithPage(job.id);
+  const SECRET = "secret-contact@newco.invalid";
+  const profile = {
+    url: "https://newco.invalid",
+    businessName: "Newco Smiles",
+    industry: "dental",
+    description: "d",
+    offerings: [],
+    competitorKeywords: ["dentist"],
+    positioningSummary: "p",
+    brandAssets: { finalUrl: "https://newco.invalid", siteName: "Newco", logoUrl: null, faviconUrl: null, ogImageUrl: null, navLinks: [], footerLinks: [], socialLinks: [], images: [], emails: [SECRET], phones: [] },
+  };
+  assert.ok(
+    await competitors.updateCompetitor(version.id, {
+      recreateOnly: { sourceUrl: "https://rival.invalid", matchKey: "rival.invalid", fromCompetitorId: source.id, variantOf: source.id, businessProfile: profile },
+      // The id of a website read in progress stays on the server too.
+      recreatedPage: { ...version.recreatedPage!, readingId: "secret-read-id" },
+    } as Partial<CompetitorRecord>),
+  );
+
+  for (const query of ["", "&light=1"]) {
+    const res = await get(recreatePageRoute, owner, `/competitors/recreate-page?competitorId=${version.id}${query}`);
+    assert.equal(res.status, 200);
+    assert.equal(JSON.stringify(res.body).includes(SECRET), false, `not in the response${query}`);
+    assert.equal(JSON.stringify(res.body).includes("secret-read-id"), false, `no read id in the response${query}`);
+    const sent = (res.body.competitor as { recreateOnly?: Record<string, unknown> }).recreateOnly;
+    assert.equal(sent?.variantOf, source.id, "the rest of recreateOnly is still sent");
+    assert.equal("businessProfile" in (sent ?? {}), false);
+  }
+  const { competitorForList } = await import("../src/lib/competitorView");
+  const stored = await competitors.getCompetitor(version.id);
+  assert.equal(JSON.stringify(competitorForList(stored!)).includes(SECRET), false, "list views drop it too");
+});
+
 test("GET /api/competitors/recreate-page answers 503 with a clear message when the archived page cannot be read", async () => {
   const owner = await makeUser("owner");
   const job = await saveRun(searchJob(owner));

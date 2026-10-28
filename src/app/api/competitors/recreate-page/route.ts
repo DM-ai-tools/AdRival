@@ -11,6 +11,8 @@ import {
   cleanScreenshots,
   editManusRecreation,
   isManusRunActive,
+  isReadingWebsite,
+  expireStaleReading,
   resumeManusRecreation,
   runManusRecreation,
   stopManusRecreation,
@@ -20,6 +22,7 @@ import { cleanAssets } from "@/lib/pipeline/manus/assets";
 import { shouldReuseCachedPage } from "@/lib/pipeline/manus/reuse";
 import { icpBelongsToRun } from "@/lib/pipeline/awareness/icp";
 import { normalizeWebsite, saveRunBusinessUrl } from "@/lib/runBusinessUrl";
+import { withoutVersionProfile } from "@/lib/competitorView";
 
 export const runtime = "nodejs";
 /** A design-agent build runs well past 10 minutes; it continues after the reply. */
@@ -182,6 +185,8 @@ function pageForClient<T extends { previousHtml?: string | null } | null | undef
   const { previousHtml, ...rest } = page;
   // The design agent's task state (ids, answer context) stays on the server.
   delete (rest as { manus?: unknown }).manus;
+  // So does the id of a website read in progress.
+  delete (rest as { readingId?: unknown }).readingId;
   if (options.light) return rest as unknown as T;
   return { ...rest, canUndo: Boolean(previousHtml) } as unknown as T;
 }
@@ -189,9 +194,11 @@ function pageForClient<T extends { previousHtml?: string | null } | null | undef
 function maskCompetitor<T extends {
   recreatedPage?: unknown;
   pageAnalysis?: unknown;
+  recreateOnly?: CompetitorRecord["recreateOnly"];
 }>(competitor: T, options: { light?: boolean } = {}): T {
   return {
-    ...competitor,
+    // A version's own business profile stays on the server.
+    ...withoutVersionProfile(competitor),
     recreatedPage: pageForClient(
       maskRecreatedPage((competitor.recreatedPage ?? null) as Parameters<typeof maskRecreatedPage>[0]) as { previousHtml?: string | null } | null,
       options,
@@ -288,6 +295,14 @@ export async function POST(request: Request) {
         },
         fn,
       );
+
+    // A build that is reading the client's website (paid, minutes) is followed, never started again.
+    if ((action === "edit_page" || BUILD_ACTIONS.has(action)) && isReadingWebsite(existing.recreatedPage)) {
+      return NextResponse.json(
+        { competitor: maskCompetitor(await withContentIfReadable(existing)), cached: true, inFlight: true },
+        { status: 202 },
+      );
+    }
 
     // Targeted changes: the same agent task makes them on the page it built.
     if (action === "edit_page") {
@@ -399,7 +414,7 @@ export async function GET(request: Request) {
     // ?light=1 is the progress poll during a build: the page's status and
     // progress only, without reading its content.
     const light = searchParams.get("light") === "1";
-    const competitor = await getCompetitor(competitorId);
+    let competitor = await getCompetitor(competitorId);
     if (!competitor) {
       return NextResponse.json(
         { error: "Competitor not found" },
@@ -407,6 +422,8 @@ export async function GET(request: Request) {
       );
     }
     const access = await resolveProjectAccess("search", competitor.runId, user, "view");
+    // A website read a restart cut off would show "Reading…" for ever: it is marked failed.
+    if (await expireStaleReading(competitorId)) competitor = (await getCompetitor(competitorId)) ?? competitor;
     // A design-agent run outlives a restart on the agent's side: follow it again.
     const page = competitor.recreatedPage;
     if (page?.manus?.taskId && (page.status === "pending" || page.status === "design_pending")) {

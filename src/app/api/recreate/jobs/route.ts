@@ -215,7 +215,8 @@ export async function POST(request: Request) {
 
     // The job builds with its own website; the run keeps the latest as the next add's default.
     if (businessUrl !== savedUrl) {
-      await saveRunBusinessUrl(source.runId, businessUrl).catch((err: unknown) =>
+      // The search's own business profile keeps its website, even when it has none.
+      await saveRunBusinessUrl(source.runId, businessUrl, { fillProfileUrl: false }).catch((err: unknown) =>
         console.error("[recreate/jobs] could not save the business website on the run", err),
       );
     }

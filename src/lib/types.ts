@@ -392,6 +392,12 @@ export interface CompetitorRecord {
      * page: the source record's id. Versions never stand in for the source.
      */
     variantOf?: string | null;
+    /**
+     * The business this version's page is for, when its website is not the
+     * search's own: analysed once at build start and reused by its retries,
+     * rebuilds and changes. Its `url` is that website.
+     */
+    businessProfile?: BusinessProfile | null;
   } | null;
 }
 
@@ -1251,6 +1257,18 @@ export interface RecreatedLandingPage {
   /** Publish readiness from last design fit */
   publishReady?: boolean | null;
   publishBlockers?: string[] | null;
+  /**
+   * Set when the build's website was read but its brand colours were not: the
+   * design agent chose the colours from the site, to be checked. Shown on the
+   * finished page and in the Recreate tab.
+   */
+  brandNotice?: string | null;
+  /**
+   * The read of the client's website a build started from the recreate page
+   * is waiting for (see markReading in manus/run.ts): the build goes on only
+   * while the page still shows that read.
+   */
+  readingId?: string | null;
   /** Canonical evidence-backed content. Design builds load approvedSnapshot only. */
   contentPack?: import("./pipeline/content/model").ContentPack | null;
   /** Approved revision used by the current HTML, if a design exists. */
