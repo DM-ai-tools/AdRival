@@ -23,6 +23,7 @@ test("a detail link carries the way back, and an unsafe one is dropped", () => {
 test("the breadcrumb names the screen the user came from", () => {
   assert.equal(returnLabel("/?mode=history&item=search:1"), "History");
   assert.equal(returnLabel("/?mode=lookup&lookup=l1"), "Competitor lookup");
+  assert.equal(returnLabel("/?mode=recreate"), "Recreate");
   assert.equal(returnLabel("/?mode=search&run=r1&tab=offers"), "Keyword search");
   assert.equal(returnLabel("/"), "Keyword search");
 });

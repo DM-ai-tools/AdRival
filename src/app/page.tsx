@@ -23,6 +23,9 @@ import { BusinessProfileSummary } from "@/components/BusinessProfileSummary";
 import { RunCreditLine, type RunCredits } from "@/components/RunCreditLine";
 import { PLATFORM_META, type AdPlatform } from "@/lib/platforms";
 import { defaultDetails } from "@/lib/recreateClient";
+import { FIND_MODES, parseMode, topTabOf, type Mode } from "@/lib/navModes";
+import { RecreateHub } from "@/components/recreate/RecreateHub";
+import { useRecreateJobs } from "@/components/recreate/useRecreateJobs";
 import type { UnifiedHistoryItem } from "@/lib/historyUnified";
 import type {
   CompetitorRecord,
@@ -31,8 +34,6 @@ import type {
   LookupPageCandidate,
   SearchJob,
 } from "@/lib/types";
-
-type Mode = "search" | "lookup" | "ab" | "history";
 
 /** Stages in which a run is still working (mirrors the server's in-flight list). */
 const SEARCH_BUSY_STAGES = new Set([
@@ -73,6 +74,8 @@ function pageParams(params: URLSearchParams): URLSearchParams {
 export default function HomePage() {
   const [platform, setPlatform] = useState<AdPlatform>("facebook");
   const [mode, setMode] = useState<Mode>("search");
+  // The Find sub-tab to return to when the user comes back from Recreate or History.
+  const [lastFindMode, setLastFindMode] = useState<(typeof FIND_MODES)[number]>("search");
   const [resultsView, setResultsView] = useState<ResultsView>("preview");
   const [historyResultsView, setHistoryResultsView] =
     useState<ResultsView>("preview");
@@ -103,6 +106,8 @@ export default function HomePage() {
     clientName: "",
     role: "",
   });
+  // Called once here, so the list keeps polling and the badge stays live on every tab.
+  const recreateJobs = useRecreateJobs(activeSpace.id || null);
   const [selectedHistory, setSelectedHistory] =
     useState<UnifiedHistoryItem | null>(null);
   const [historyJob, setHistoryJob] = useState<SearchJob | null>(null);
@@ -527,6 +532,10 @@ export default function HomePage() {
   }, [lookupId, pollLookup, lookupBusy]);
 
   useEffect(() => {
+    if (mode === "search" || mode === "lookup" || mode === "ab") setLastFindMode(mode);
+  }, [mode]);
+
+  useEffect(() => {
     if (mode === "history") void loadHistory();
   }, [mode, loadHistory]);
 
@@ -544,9 +553,7 @@ export default function HomePage() {
   const applyViewParams = useCallback((params: URLSearchParams) => {
     applyingUrl.current = true;
     const nextMode = params.get("mode");
-    if (nextMode === "search" || nextMode === "lookup" || nextMode === "ab" || nextMode === "history") {
-      setMode(nextMode);
-    }
+    if (nextMode) setMode(parseMode(nextMode));
     const run = params.get("run");
     if (run && run !== liveSearchId.current) {
       liveSearchId.current = run;
@@ -719,6 +726,7 @@ export default function HomePage() {
       generatingHistoryOffers,
   );
   const meta = PLATFORM_META[platform];
+  const topTab = topTabOf(mode);
 
   const refreshAfterStop = useCallback(() => {
     if (jobId) void pollSearch(jobId);
@@ -781,38 +789,67 @@ export default function HomePage() {
         <button
           type="button"
           role="tab"
-          className={`tab-btn ${mode === "search" ? "active" : ""}`}
-          onClick={() => setMode("search")}
+          className={`tab-btn ${topTab === "find" ? "active" : ""}`}
+          onClick={() => {
+            if (topTab !== "find") setMode(lastFindMode);
+          }}
         >
-          Keyword search
+          Find
         </button>
         <button
           type="button"
           role="tab"
-          className={`tab-btn ${mode === "lookup" ? "active" : ""}`}
-          onClick={() => setMode("lookup")}
+          className={`tab-btn ${topTab === "recreate" ? "active" : ""}`}
+          onClick={() => setMode("recreate")}
         >
-          Competitor lookup
+          Recreate
+          {recreateJobs.running + recreateJobs.queued > 0 && (
+            <span className="tab-badge">
+              {recreateJobs.running} running
+              {recreateJobs.queued > 0 ? ` · ${recreateJobs.queued} queued` : ""}
+            </span>
+          )}
         </button>
         <button
           type="button"
           role="tab"
-          className={`tab-btn ${mode === "ab" ? "active" : ""}`}
-          onClick={() => setMode("ab")}
-        >
-          A/B testing
-        </button>
-        <button
-          type="button"
-          role="tab"
-          className={`tab-btn ${mode === "history" ? "active" : ""}`}
+          className={`tab-btn ${topTab === "history" ? "active" : ""}`}
           onClick={() => setMode("history")}
         >
           History
         </button>
       </div>
 
-      {mode !== "history" && mode !== "ab" && (
+      {topTab === "find" && (
+        <div className="tab-bar results-subtabs" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            className={`tab-btn ${mode === "search" ? "active" : ""}`}
+            onClick={() => setMode("search")}
+          >
+            Keyword search
+          </button>
+          <button
+            type="button"
+            role="tab"
+            className={`tab-btn ${mode === "lookup" ? "active" : ""}`}
+            onClick={() => setMode("lookup")}
+          >
+            Competitor lookup
+          </button>
+          <button
+            type="button"
+            role="tab"
+            className={`tab-btn ${mode === "ab" ? "active" : ""}`}
+            onClick={() => setMode("ab")}
+          >
+            A/B testing
+          </button>
+        </div>
+      )}
+
+      {(mode === "search" || mode === "lookup") && (
         <>
           <PlatformPicker
             value={platform}
@@ -825,6 +862,8 @@ export default function HomePage() {
           </p>
         </>
       )}
+
+      {mode === "recreate" && <RecreateHub jobs={recreateJobs} />}
 
       {mode === "ab" && (
         <AbTestingPanel

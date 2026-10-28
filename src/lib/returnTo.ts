@@ -35,6 +35,7 @@ export function returnLabel(path: string): string {
   const params = new URLSearchParams(path.split("?")[1] || "");
   const mode = params.get("mode");
   if (mode === "history") return "History";
+  if (mode === "recreate") return "Recreate";
   if (mode === "lookup") return "Competitor lookup";
   return "Keyword search";
 }

@@ -3242,6 +3242,19 @@ a.lp-recreate-link {
   color: var(--accent, #0f766e);
 }
 
+.tab-badge {
+  display: inline-block;
+  margin-left: 0.5rem;
+  padding: 0.05rem 0.5rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent, #0f766e) 14%, transparent);
+  color: var(--accent, #0f766e);
+  font-size: 0.72rem;
+  font-weight: 700;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
 .tab-live-dot {
   display: inline-block;
   width: 0.5rem;

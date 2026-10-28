@@ -32,6 +32,7 @@ export function useRecreateJobs(spaceId: string | null): {
   const [error, setError] = useState<string | null>(null);
   const [stopError, setStopError] = useState<string | null>(null);
   const requestId = useRef(0);
+  const busyRef = useRef(false);
 
   const refresh = useCallback(async () => {
     if (!spaceId) return;
@@ -41,7 +42,10 @@ export function useRecreateJobs(spaceId: string | null): {
       const data = (await res.json().catch(() => ({}))) as { items?: RecreateListItem[]; limit?: number; error?: string };
       if (mine !== requestId.current) return; // a newer refresh (or a space change) took over
       if (!res.ok) throw new Error(data.error || "Could not load your recreated pages.");
-      setItems(Array.isArray(data.items) ? data.items : []);
+      const next = Array.isArray(data.items) ? data.items : [];
+      // Set here (not during render) so the next poll interval is right straight away.
+      busyRef.current = next.some((i) => i.state === "queued" || i.state === "running");
+      setItems(next);
       if (typeof data.limit === "number" && data.limit > 0) setLimit(data.limit);
       setError(null);
     } catch (err) {
@@ -54,12 +58,11 @@ export function useRecreateJobs(spaceId: string | null): {
 
   const running = items.filter((i) => i.state === "running").length;
   const queued = items.filter((i) => i.state === "queued").length;
-  const busyRef = useRef(false);
-  busyRef.current = running + queued > 0;
 
   // A new space starts from an empty list; responses still in flight for the old one are dropped.
   useEffect(() => {
     requestId.current++;
+    busyRef.current = false;
     setItems([]);
     setError(null);
     setStopError(null);
