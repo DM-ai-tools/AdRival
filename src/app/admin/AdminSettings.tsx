@@ -28,6 +28,7 @@ export default function AdminSettings() {
   const [defaultResetCadence, setDefaultResetCadence] = useState("none");
   const [lowCreditWarning, setLowCreditWarning] = useState("0");
   const [maxConcurrentRuns, setMaxConcurrentRuns] = useState("2");
+  const [maxConcurrentRecreations, setMaxConcurrentRecreations] = useState("3");
   const [maxRunReservation, setMaxRunReservation] = useState("0");
   const [disabledProviders, setDisabledProviders] = useState<string[]>([]);
   const [disabledModels, setDisabledModels] = useState("");
@@ -45,6 +46,7 @@ export default function AdminSettings() {
       String(subunitsToCredits(s.lowCreditWarningSubunits)),
     );
     setMaxConcurrentRuns(String(s.maxConcurrentRunsPerUser));
+    setMaxConcurrentRecreations(String(s.maxConcurrentRecreationsPerUser ?? 3));
     setMaxRunReservation(
       String(subunitsToCredits(s.maxRunReservationSubunits)),
     );
@@ -102,6 +104,7 @@ export default function AdminSettings() {
           defaultResetCadence,
           lowCreditWarningCredits: lowCreditWarning,
           maxConcurrentRunsPerUser: Number(maxConcurrentRuns),
+          maxConcurrentRecreationsPerUser: Number(maxConcurrentRecreations),
           maxRunReservationCredits: maxRunReservation,
           disabledProviders,
           disabledModels: disabledModels
@@ -235,6 +238,26 @@ export default function AdminSettings() {
               </label>
               <p className="form-hint">
                 How many paid tasks one person may have running at the same time.
+              </p>
+            </div>
+
+            <div className="admin-setting-row">
+              <label className="admin-field">
+                <span className="search-label">Landing-page builds per user</span>
+                <span className="admin-input-unit">
+                  <input
+                    className="search-input"
+                    value={maxConcurrentRecreations}
+                    onChange={(e) => setMaxConcurrentRecreations(e.target.value)}
+                    inputMode="numeric"
+                    disabled={saving}
+                  />
+                  <span>builds</span>
+                </span>
+              </label>
+              <p className="form-hint">
+                How many landing pages one person may have building at the same
+                time. Counted separately from other paid tasks.
               </p>
             </div>
 

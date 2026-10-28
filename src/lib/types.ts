@@ -1714,6 +1714,8 @@ export interface AppSettings {
   defaultResetCadence: ResetCadence;
   lowCreditWarningSubunits: number;
   maxConcurrentRunsPerUser: number;
+  /** Landing-page builds one user may have running at once (separate from other tasks). */
+  maxConcurrentRecreationsPerUser: number;
   /** Hard ceiling on a single run's reservation, in subunits. */
   maxRunReservationSubunits: number;
   disabledProviders: ProviderId[];
