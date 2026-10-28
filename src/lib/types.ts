@@ -1262,6 +1262,12 @@ export interface RecreatedLandingPage {
    * page uses neutral colours. Shown on the finished page and in the Recreate tab.
    */
   brandNotice?: string | null;
+  /**
+   * The read of the client's website a build started from the recreate page
+   * is waiting for (see markReading in manus/run.ts): the build goes on only
+   * while the page still shows that read.
+   */
+  readingId?: string | null;
   /** Canonical evidence-backed content. Design builds load approvedSnapshot only. */
   contentPack?: import("./pipeline/content/model").ContentPack | null;
   /** Approved revision used by the current HTML, if a design exists. */

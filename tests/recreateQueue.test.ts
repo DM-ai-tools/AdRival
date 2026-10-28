@@ -628,7 +628,7 @@ test("saveRunBusinessUrl fills a profile without a website unless told not to", 
 });
 
 const BRAND_NOTICE =
-  "Could not read the brand colours of newco.invalid; the page uses neutral colours. Describe your colours in Apply changes.";
+  "Could not read the brand colours of newco.invalid automatically; the design agent chose colours from the site. Check them, or describe yours in Apply changes.";
 
 test("a website whose brand colours cannot be read still builds, with neutral colours, a notice and no saved profile", async () => {
   const ctx = await setup({ count: 0, profile: ORIGINAL });
@@ -709,6 +709,100 @@ test("a rebuild from the recreate page that has to read a website shows it at on
   } finally {
     analyzeWith = null;
   }
+});
+
+/** An older version of a new run's page, built for https://newco.invalid with no saved profile, and recreate-page calls on it. */
+async function olderVersionWithRoute() {
+  const ctx = await setup({ count: 0, profile: ORIGINAL });
+  const version = await createRecreationVersion(ctx.source);
+  await updateCompetitor(version.id, {
+    recreatedPage: { ...manusPage("T-old-version", "completed"), businessUrl: "https://newco.invalid" },
+  });
+  const { asUser, jsonRequest, readJson } = await import("./helpers/routeRequest");
+  const route = await import("../src/app/api/competitors/recreate-page/route");
+  const call = (action: string) =>
+    asUser(ctx.user, async () =>
+      readJson(
+        await route.POST(
+          jsonRequest("http://localhost/api/competitors/recreate-page", "POST", { competitorId: version.id, action }),
+        ),
+      ),
+    );
+  const open = () =>
+    asUser(ctx.user, async () =>
+      readJson(
+        await route.GET(
+          jsonRequest(`http://localhost/api/competitors/recreate-page?competitorId=${version.id}&light=1`, "GET"),
+        ),
+      ),
+    );
+  return { ctx, version, call, open };
+}
+
+test("Stop while a recreate-page build reads the website cancels it; a rebuild after Stop builds once", async () => {
+  const { version, call } = await olderVersionWithRoute();
+  // Each read waits until the test lets it finish.
+  const finishRead: Array<() => void> = [];
+  analyzeWith = (url) =>
+    new Promise((resolve) => finishRead.push(() => resolve(profileOf(url, "Newco Smiles", "#ABCDEF"))));
+  const createsBefore = createCount();
+  const before = analyzed.length;
+  try {
+    assert.equal((await call("regenerate_page")).status, 202);
+    assert.equal((await getCompetitor(version.id))?.recreatedPage?.progress?.message, "Reading newco.invalid…");
+
+    assert.equal((await call("stop")).status, 200);
+    finishRead[0]();
+    await settle(300);
+    assert.equal(createCount(), createsBefore, "the stopped build creates no design agent task");
+    let page = (await getCompetitor(version.id))?.recreatedPage;
+    assert.notEqual(page?.status, "pending", "the page stays stopped");
+    assert.equal(page?.error, "Recreation stopped");
+    assert.equal((await getCompetitor(version.id))?.recreateOnly?.businessProfile ?? null, null, "no profile is saved");
+
+    // A rebuild after Stop reads the website once more and builds once.
+    assert.equal((await call("regenerate_page")).status, 202);
+    assert.equal(analyzed.length - before, 2);
+    assert.equal((await call("stop")).status, 200);
+    assert.equal((await call("regenerate_page")).status, 202);
+    assert.equal(analyzed.length - before, 3);
+    finishRead[1](); // the stopped second read
+    finishRead[2]();
+    const taskId = await waitFor(async () => {
+      const id = (await getCompetitor(version.id))?.recreatedPage?.manus?.taskId;
+      return id && id !== "T-old-version" ? id : null;
+    }, "the last build's task");
+    await settle(300);
+    assert.equal(createCount() - createsBefore, 1, "exactly one task, for the last build");
+    page = (await getCompetitor(version.id))?.recreatedPage;
+    assert.equal(page?.manus?.taskId, taskId);
+    taskState.set(taskId, "error");
+    await waitFor(async () => ((await getCompetitor(version.id))?.recreatedPage?.status !== "pending" ? true : null), "the build to end");
+  } finally {
+    for (const finish of finishRead) finish();
+    analyzeWith = null;
+  }
+});
+
+test("opening a page whose website read was cut off long ago marks it failed", async () => {
+  const { version, open } = await olderVersionWithRoute();
+  const long = new Date(Date.now() - 60 * 60_000).toISOString();
+  await updateCompetitor(version.id, {
+    recreatedPage: {
+      ...manusPage("T-old-version", "pending"),
+      businessUrl: "https://newco.invalid",
+      updatedAt: long,
+      progress: { phase: "reading", message: "Reading newco.invalid…", pct: 1 },
+    },
+  });
+  const pollsBefore = calls.filter((c) => c.taskId === "T-old-version").length;
+  const res = await open();
+  assert.equal(res.status, 200);
+  const page = (await getCompetitor(version.id))?.recreatedPage;
+  assert.equal(page?.status, "failed");
+  assert.equal(page?.error, "The website read was interrupted. Try again.");
+  await settle(100);
+  assert.equal(calls.filter((c) => c.taskId === "T-old-version").length, pollsBefore, "the earlier task is not followed");
 });
 
 test("a setup problem with the analysis shows its own message, not 'could not read the website'", async () => {

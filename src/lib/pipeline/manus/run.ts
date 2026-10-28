@@ -341,15 +341,19 @@ const NEUTRAL_COLORS = {
 /**
  * Shows on the page that its build is reading the client's website (see
  * isReadingWebsite). The page's content and its other fields are kept; a
- * record without a page gets a pending one.
+ * record without a page gets a pending one. Returns the read's id: the build
+ * goes on only while the page still shows this read (claimReading), so a Stop
+ * or a newer build in the meantime wins.
  */
-async function markReading(competitor: CompetitorRecord, job: SearchJob, businessUrl: string): Promise<void> {
+async function markReading(competitor: CompetitorRecord, job: SearchJob, businessUrl: string): Promise<string> {
+  const readingId = crypto.randomUUID();
   const reading = { ...progress("send", `Reading ${hostOf(businessUrl)}…`, 1), phase: READING_PHASE };
   const now = new Date().toISOString();
   await updateCompetitorWith(competitor.id, (stored) => ({
     recreatedPage: stored.recreatedPage
-      ? { ...stored.recreatedPage, status: "pending", error: null, progress: reading, updatedAt: now }
+      ? { ...stored.recreatedPage, status: "pending", error: null, progress: reading, readingId, updatedAt: now }
       : ({
+          readingId,
           createdAt: now,
           updatedAt: now,
           status: "pending",
@@ -364,6 +368,41 @@ async function markReading(competitor: CompetitorRecord, job: SearchJob, busines
           progress: reading,
         } as RecreatedPageLight),
   }));
+  return readingId;
+}
+
+/**
+ * Ends the read `readingId` in one write when the page still shows it (true:
+ * the build may go on). False when the read was stopped, timed out, or a newer
+ * build took the page over: that build then creates nothing.
+ */
+async function claimReading(competitorId: string, readingId: string): Promise<boolean> {
+  let ours = false;
+  await updateCompetitorWith(competitorId, (stored) => {
+    const page = stored.recreatedPage;
+    ours = Boolean(page && page.status === "pending" && page.progress?.phase === READING_PHASE && page.readingId === readingId);
+    return ours && page ? { recreatedPage: { ...page, readingId: null, updatedAt: new Date().toISOString() } } : null;
+  });
+  return ours;
+}
+
+/** Shown on a page whose website read never finished (a restart cut it off). */
+const READING_INTERRUPTED = "The website read was interrupted. Try again.";
+
+/**
+ * Marks the page failed when it still shows a website read older than the
+ * reading window (the process doing it is gone). True when it did.
+ */
+export async function expireStaleReading(competitorId: string): Promise<boolean> {
+  const page = (await getCompetitor(competitorId))?.recreatedPage;
+  if (!page || page.status !== "pending" || page.progress?.phase !== READING_PHASE || isReadingWebsite(page)) return false;
+  await saveOutcome(competitorId, (_stored, hasHtml) => ({
+    status: hasHtml ? "completed" : "failed",
+    error: READING_INTERRUPTED,
+    readingId: null,
+    progress: progress("send", READING_INTERRUPTED, 0, { blocked: READING_INTERRUPTED }),
+  }));
+  return true;
 }
 
 /** Records on the page that reading the client's website failed (the earlier page, if any, stays). */
@@ -493,7 +532,7 @@ async function businessForBuild(
 
 /** Shown when the build's website was read without its brand colours. */
 function brandNoticeFor(businessUrl: string): string {
-  return `Could not read the brand colours of ${hostOf(businessUrl)}; the page uses neutral colours. Describe your colours in Apply changes.`;
+  return `Could not read the brand colours of ${hostOf(businessUrl)} automatically; the design agent chose colours from the site. Check them, or describe yours in Apply changes.`;
 }
 
 /** Progress phase of a build reading the client's website before anything else. */
@@ -773,19 +812,24 @@ export async function runManusRecreation(
   // the recreate page (no stillWanted) shows "Reading …" on the page first, so the
   // page follows it and a second request is not started, and a failure lands on
   // the page. Other records build for the run's website as they always have.
-  let announced = false;
+  let readingId: string | null = null;
   const announce = options.stillWanted
     ? undefined
     : async () => {
-        await markReading(competitor, job, businessUrl);
-        announced = true;
+        readingId = await markReading(competitor, job, businessUrl);
       };
   let found: Awaited<ReturnType<typeof businessForBuild>> = null;
   try {
     found = options.businessUrl || isVersion ? await businessForBuild(competitor, job, businessUrl, announce) : null;
   } catch (err) {
-    if (announced) await recordReadFailure(competitorId, err);
+    // Recorded only while the page still shows this read (not after a Stop or a newer build).
+    if (readingId && (await claimReading(competitorId, readingId))) await recordReadFailure(competitorId, err);
     throw err;
+  }
+  // Stopped (or taken over by a newer build) while the website was read: nothing is
+  // saved, created or written over the page.
+  if (readingId && !(await claimReading(competitorId, readingId))) {
+    return (await getCompetitor(competitorId)) || competitor;
   }
   if (found && options.stillWanted && !(await options.stillWanted())) {
     return (await getCompetitor(competitorId)) || competitor;

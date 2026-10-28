@@ -12,6 +12,7 @@ import {
   editManusRecreation,
   isManusRunActive,
   isReadingWebsite,
+  expireStaleReading,
   resumeManusRecreation,
   runManusRecreation,
   stopManusRecreation,
@@ -411,7 +412,7 @@ export async function GET(request: Request) {
     // ?light=1 is the progress poll during a build: the page's status and
     // progress only, without reading its content.
     const light = searchParams.get("light") === "1";
-    const competitor = await getCompetitor(competitorId);
+    let competitor = await getCompetitor(competitorId);
     if (!competitor) {
       return NextResponse.json(
         { error: "Competitor not found" },
@@ -419,6 +420,8 @@ export async function GET(request: Request) {
       );
     }
     const access = await resolveProjectAccess("search", competitor.runId, user, "view");
+    // A website read a restart cut off would show "Reading…" for ever: it is marked failed.
+    if (await expireStaleReading(competitorId)) competitor = (await getCompetitor(competitorId)) ?? competitor;
     // A design-agent run outlives a restart on the agent's side: follow it again.
     const page = competitor.recreatedPage;
     if (page?.manus?.taskId && (page.status === "pending" || page.status === "design_pending")) {
