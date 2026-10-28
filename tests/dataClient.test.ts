@@ -1,6 +1,6 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,17 +24,72 @@ after(async () => {
 test("migrate applies every migration once and is idempotent", async () => {
   const fresh = await createPgliteClient();
   try {
-    assert.deepEqual(await migrate(fresh), ["001_init.sql", "002_indexes.sql", "003_provider_calls_idempotency.sql", "004_recreate_jobs.sql"]);
+    assert.deepEqual(await migrate(fresh), ["001_init.sql", "002_indexes.sql", "003_provider_calls_idempotency.sql", "004_recreate_jobs.sql", "005_lookup_recreate_space.sql"]);
     assert.deepEqual(await migrate(fresh), []);
     const { rows } = await fresh.query<{ name: string }>(
       "select name from schema_migrations order by name",
     );
     assert.deepEqual(
       rows.map((r) => r.name),
-      ["001_init.sql", "002_indexes.sql", "003_provider_calls_idempotency.sql", "004_recreate_jobs.sql"],
+      ["001_init.sql", "002_indexes.sql", "003_provider_calls_idempotency.sql", "004_recreate_jobs.sql", "005_lookup_recreate_space.sql"],
     );
   } finally {
     await fresh.close();
+  }
+});
+
+test("005 gives lookup recreation bridge runs and their queued jobs the lookup's space", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "adrival-migrate-005-"));
+  const fresh = await createPgliteClient();
+  try {
+    for (const name of ["001_init.sql", "002_indexes.sql", "003_provider_calls_idempotency.sql", "004_recreate_jobs.sql"]) {
+      copyFileSync(join("db", "migrations", name), join(dir, name));
+    }
+    await migrate(fresh, dir);
+    await fresh.query(
+      `insert into lookup_jobs (id, space_id, status, data) values
+         ('lk1', 'space-a', 'completed', '{"id":"lk1","spaceId":"space-a"}'),
+         ('lk2', null, 'completed', '{"id":"lk2"}')`,
+    );
+    await fresh.query(
+      `insert into jobs (id, space_id, status, data) values
+         ('lookup-recreate-lk1', null, 'completed', '{"id":"lookup-recreate-lk1","keyword":"k"}'),
+         ('lookup-recreate-lk2', null, 'completed', '{"id":"lookup-recreate-lk2"}'),
+         ('search-1', null, 'completed', '{"id":"search-1"}')`,
+    );
+    await fresh.query(
+      `insert into recreate_jobs (id, owner_user_id, competitor_id, run_id, space_id, status, options) values
+         ('rj1', 'u', 'c1', 'lookup-recreate-lk1', null, 'queued', '{}'),
+         ('rj2', 'u', 'c2', 'search-1', null, 'queued', '{}')`,
+    );
+    copyFileSync(join("db", "migrations", "005_lookup_recreate_space.sql"), join(dir, "005_lookup_recreate_space.sql"));
+    assert.deepEqual(await migrate(fresh, dir), ["005_lookup_recreate_space.sql"]);
+
+    const jobs = await fresh.query<{ id: string; space_id: string | null; data: { spaceId?: string; keyword?: string } }>(
+      "select id, space_id, data from jobs order by id",
+    );
+    assert.deepEqual(
+      jobs.rows.map((r) => [r.id, r.space_id, r.data.spaceId ?? null]),
+      [
+        ["lookup-recreate-lk1", "space-a", "space-a"],
+        ["lookup-recreate-lk2", null, null],
+        ["search-1", null, null],
+      ],
+    );
+    assert.equal(jobs.rows[0].data.keyword, "k", "the rest of the record is kept");
+    const queued = await fresh.query<{ id: string; space_id: string | null }>(
+      "select id, space_id from recreate_jobs order by id",
+    );
+    assert.deepEqual(
+      queued.rows.map((r) => [r.id, r.space_id]),
+      [
+        ["rj1", "space-a"],
+        ["rj2", null],
+      ],
+    );
+  } finally {
+    await fresh.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -207,11 +262,11 @@ test("concurrent migrators: one applies, the other skips without error", async (
   const fresh = await createPgliteClient();
   try {
     const [a, b] = await Promise.all([migrate(fresh), migrate(fresh)]);
-    assert.deepEqual([...a, ...b].sort(), ["001_init.sql", "002_indexes.sql", "003_provider_calls_idempotency.sql", "004_recreate_jobs.sql"]);
+    assert.deepEqual([...a, ...b].sort(), ["001_init.sql", "002_indexes.sql", "003_provider_calls_idempotency.sql", "004_recreate_jobs.sql", "005_lookup_recreate_space.sql"]);
     const { rows } = await fresh.query<{ n: string }>(
       "select count(*)::text as n from schema_migrations",
     );
-    assert.equal(rows[0].n, "4");
+    assert.equal(rows[0].n, "5");
   } finally {
     await fresh.close();
   }

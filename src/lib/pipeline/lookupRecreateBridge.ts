@@ -177,8 +177,10 @@ export async function ensureLookupRecreationCompetitor(adId: string): Promise<{
       competitorIds: [],
       businessUrl: normalizedBusiness,
       businessProfile: lookup.businessProfile || null,
-      // The bridge job is a view onto the lookup, so it inherits its owner.
+      // The bridge job is a view onto the lookup, so it inherits its owner and
+      // its client space (the Recreate tab and space access go by the run's space).
       ownerUserId: lookup.ownerUserId ?? null,
+      spaceId: lookup.spaceId ?? null,
       createdAt: now,
       updatedAt: now,
     };
@@ -189,6 +191,8 @@ export async function ensureLookupRecreationCompetitor(adId: string): Promise<{
       businessUrl: normalizedBusiness,
       businessProfile: lookup.businessProfile || job.businessProfile || null,
       keyword: job.keyword || lookup.queryName,
+      // Explicit: an undefined spaceId would keep a bridge saved with none.
+      spaceId: lookup.spaceId ?? null,
     });
     job = (await getJob(runId))!;
   }

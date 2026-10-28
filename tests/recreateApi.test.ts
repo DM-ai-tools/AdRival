@@ -57,7 +57,9 @@ globalThis.fetch = fakeFetch as typeof fetch;
 
 const { makeUser } = await import("./helpers/factories");
 const { asUser, jsonRequest, readJson, routeParams } = await import("./helpers/routeRequest");
-const { getCompetitor, getJob, getRecreateOnlyPagesByRun, saveCompetitor, saveJob } = await import("@/lib/db");
+const { getCompetitor, getJob, getRecreateOnlyPagesByRun, saveCompetitor, saveJob, saveLookupAd, saveLookupJob } =
+  await import("@/lib/db");
+const { ensureLookupRecreationCompetitor, LOOKUP_RECREATE_PREFIX } = await import("@/lib/pipeline/lookupRecreateBridge");
 const { upsertMembership } = await import("@/lib/data/audit");
 const { assignRunsToSpace, createProjectSpace } = await import("@/lib/data/spaces");
 const jobsRepo = await import("@/lib/data/recreateJobs");
@@ -65,7 +67,7 @@ const { getDb } = await import("@/lib/data/client");
 const { createRecreationVersion } = await import("@/lib/pipeline/landingRecreateBridge");
 const jobsRoute = await import("../src/app/api/recreate/jobs/route");
 const jobRoute = await import("../src/app/api/recreate/jobs/[id]/route");
-import type { AppUser, CompetitorRecord, RecreatedPageLight, SearchJob } from "@/lib/types";
+import type { AppUser, CompetitorRecord, LookupAdRecord, LookupJob, RecreatedPageLight, SearchJob } from "@/lib/types";
 import type { RecreateListItem } from "@/lib/recreateList";
 
 const settle = (ms = 80) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -388,6 +390,83 @@ test("a malformed body or landing page address is a 400, a missing search a 404"
 
   // An unknown search is not found (404, so ids cannot be probed), never a server error.
   assert.equal((await post(owner, { jobId: "no-such-run", url: "https://rival.invalid/offer" })).status, 404);
+});
+
+/** A lookup with one analysed ad, in `spaceId` when given. */
+async function makeLookupWithAd(owner: AppUser, spaceId: string | null) {
+  seq += 1;
+  const at = new Date().toISOString();
+  const lookup: LookupJob = {
+    id: `ra-lookup-${seq}`,
+    queryName: "Rival Clinic",
+    platform: "facebook",
+    status: "completed",
+    progress: { stage: "done", message: "", candidatesFound: 0, adsFetched: 1, pagesScanned: 0 },
+    candidates: [],
+    adIds: [],
+    businessUrl: "https://client.invalid",
+    ownerUserId: owner.id,
+    createdAt: at,
+    updatedAt: at,
+  };
+  assert.equal(await saveLookupJob(lookup), true);
+  if (spaceId) assert.equal(await assignRunsToSpace(spaceId, [{ kind: "lookup", id: lookup.id }]), 1);
+  const ad: LookupAdRecord = {
+    id: `ra-lad-${seq}`,
+    lookupId: lookup.id,
+    adArchiveId: `ra-arch-${seq}`,
+    pageId: "rival",
+    pageName: "Rival Clinic",
+    country: "AU",
+    isActive: true,
+    title: "t",
+    body: "b",
+    adLibraryUrl: "https://x.invalid",
+    landingPageUrl: "https://rival.invalid/lookup-offer",
+    raw: {},
+    pageAnalysis: { status: "completed", analyzedUrl: "https://rival.invalid/lookup-offer", analyzedAt: at },
+    createdAt: at,
+  };
+  assert.equal(await saveLookupAd(ad), true);
+  return { lookup, ad };
+}
+
+test("the lookup bridge's run takes the lookup's space, on create and on update", async () => {
+  const owner = await makeUser({ credits: 1000 });
+  const space = await createProjectSpace({ clientName: "Bridge Co", ownerUserId: owner.id });
+  const { lookup, ad } = await makeLookupWithAd(owner, space.id);
+
+  const bridged = await ensureLookupRecreationCompetitor(ad.id);
+  const runId = `${LOOKUP_RECREATE_PREFIX}${lookup.id}`;
+  assert.equal(bridged.competitor.runId, runId);
+  assert.equal((await getJob(runId))?.spaceId, space.id, "a new bridge run is in the lookup's space");
+
+  // A bridge run saved before the fix (no space) is put right on the next add.
+  const stale = (await getJob(runId))!;
+  assert.equal(await saveJob({ ...stale, spaceId: null }), true);
+  assert.equal((await getJob(runId))?.spaceId ?? null, null);
+  await ensureLookupRecreationCompetitor(ad.id);
+  assert.equal((await getJob(runId))?.spaceId, space.id, "an existing bridge run is moved to the lookup's space");
+});
+
+test("a recreation added from a lookup in a space shows in that space's Recreate list", async () => {
+  const owner = await makeUser({ credits: 1000 });
+  const space = await createProjectSpace({ clientName: "Lookup Co", ownerUserId: owner.id });
+  const { ad } = await makeLookupWithAd(owner, space.id);
+  const bridged = await ensureLookupRecreationCompetitor(ad.id);
+
+  const added = await post(owner, { competitorId: bridged.competitorId, userFeedback: "lookup add" });
+  assert.equal(added.status, 202);
+  const job = added.body.job as { id: string; spaceId: string | null };
+  assert.equal(job.spaceId, space.id);
+
+  const spaced = (await list(owner, `?spaceId=${space.id}`)).body.items as RecreateListItem[];
+  assert.ok(
+    spaced.some((i) => i.jobId === job.id),
+    "the lookup's recreation is listed in the lookup's space",
+  );
+  const unspaced = (await list(owner)).body.items as RecreateListItem[];
+  assert.equal(unspaced.some((i) => i.jobId === job.id), false, "and not among runs with no space");
 });
 
 test("an editor's recreation on the owner's run shows for the owner from its page, with nothing to stop", async () => {
