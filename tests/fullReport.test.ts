@@ -150,3 +150,46 @@ test("the landing page analysis sheet shows audience level and awareness stage, 
   assert.equal(cell(4, aud), "");
   assert.equal(cell(4, stage), "");
 });
+
+test("recreation versions are listed as recreated pages, not again as analysed pages", async () => {
+  const dashboardPage = {
+    ...competitor,
+    id: "dash-1",
+    pageName: "Dashboard Page",
+    recreatedPage: null,
+    recreateOnly: { source: "offers_dashboard" },
+  } as unknown as CompetitorRecord;
+  const version = {
+    ...competitor,
+    id: "c1-v2",
+    pageName: "Rival SEO",
+    recreateOnly: { source: "version", variantOf: "c1" },
+  } as unknown as CompetitorRecord;
+  const buf = await buildFullReportWorkbook({
+    job,
+    competitors: [competitor],
+    recreateOnly: [dashboardPage, version],
+    offerAds: [],
+    focus: null,
+    origin: "https://app.example",
+  });
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(buf as unknown as ArrayBuffer);
+  const names = (sheet: string) =>
+    wb
+      .getWorksheet(sheet)!
+      .getColumn(1)
+      .values.slice(2)
+      .map((v) => String(v ?? ""));
+  assert.deepEqual(
+    names("Landing page analysis"),
+    ["Rival SEO", "Dashboard Page (from offers dashboard)"],
+    "a version is the same analysed page, so it is not a second analysis row",
+  );
+  const links = wb
+    .getWorksheet("Recreated pages")!
+    .getColumn(11)
+    .values.slice(2)
+    .map((v) => (v as { hyperlink: string }).hyperlink);
+  assert.deepEqual(links, ["https://app.example/recreate/c1", "https://app.example/recreate/c1-v2"], "versions stay listed");
+});

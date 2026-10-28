@@ -349,7 +349,9 @@ export async function buildFullReportWorkbook(input: FullReportInput): Promise<B
   websiteSheet(wb, job);
   searchSheet(wb, job);
   competitorsSheet(wb, input.competitors);
-  const analysed = pageAnalysisSheet(wb, [...input.competitors, ...input.recreateOnly]);
+  // A recreation version copies its source's analysis: it is a recreated page, not another analysed one.
+  const analysedOnly = input.recreateOnly.filter((c) => !c.recreateOnly?.variantOf);
+  const analysed = pageAnalysisSheet(wb, [...input.competitors, ...analysedOnly]);
   const report = job.offersReport?.status === "completed" ? job.offersReport : null;
   const offerCounts = report ? addOffersSheets(wb, { report, ads: input.offerAds, focus: input.focus }) : [];
   const recreated = recreatedSheet(wb, [...input.competitors, ...input.recreateOnly], input.origin);
