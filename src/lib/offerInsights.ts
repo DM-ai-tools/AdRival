@@ -60,9 +60,11 @@ function origin(url?: string | null): string | null {
 }
 
 /** Days an ad has run: the stored count, else from its start date. */
-export function adDays(
-  ad: Pick<SearchCompetitorAdRecord, "daysRunning" | "startDateString" | "endDateString" | "isActive">,
-): number | null {
+export type AdSignalFields = Partial<
+  Pick<SearchCompetitorAdRecord, "daysRunning" | "startDateString" | "endDateString" | "isActive">
+>;
+
+export function adDays(ad: AdSignalFields): number | null {
   if (typeof ad.daysRunning === "number" && ad.daysRunning >= 0) return ad.daysRunning;
   const start = Date.parse(ad.startDateString || "");
   if (!Number.isFinite(start)) return null;
@@ -72,7 +74,7 @@ export function adDays(
 }
 
 /** An ad counts as active unless it is explicitly marked stopped. */
-export function isActiveAd(ad: Pick<SearchCompetitorAdRecord, "isActive">): boolean {
+export function isActiveAd(ad: AdSignalFields): boolean {
   return ad.isActive !== false;
 }
 

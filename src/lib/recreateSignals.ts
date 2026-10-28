@@ -1,9 +1,6 @@
-import type { SearchCompetitorAdRecord } from "./types";
-import { adDays, isActiveAd } from "./offerInsights";
+import { adDays, isActiveAd, type AdSignalFields } from "./offerInsights";
 
-type SignalAd = Partial<
-  Pick<SearchCompetitorAdRecord, "daysRunning" | "startDateString" | "endDateString" | "isActive">
->;
+type SignalAd = AdSignalFields;
 
 /**
  * Decision signals for a landing page: the longest any of its ads has run and
@@ -12,10 +9,10 @@ type SignalAd = Partial<
  */
 export function pageSignals(ads: SignalAd[]): { daysRunning: number | null; activeAds: number | null } {
   if (!ads.length) return { daysRunning: null, activeAds: null };
-  const days = ads.map((ad) => adDays(ad as SearchCompetitorAdRecord)).filter((d): d is number => d !== null);
+  const days = ads.map((ad) => adDays(ad)).filter((d): d is number => d !== null);
   return {
     daysRunning: days.length ? Math.max(...days) : null,
-    activeAds: ads.filter((ad) => isActiveAd(ad as SearchCompetitorAdRecord)).length,
+    activeAds: ads.filter((ad) => isActiveAd(ad)).length,
   };
 }
 

@@ -826,13 +826,17 @@ export function SearchOffersDashboard({
     return all.find((p) => p.matchKey === selectedPageKey) || all[0];
   }, [selectedPageKey, pageListOffer, pageListOther]);
 
-  const selectedPageRawAds = useMemo(() => {
-    if (!selectedPage) return [] as SearchCompetitorAdRecord[];
-    const fromIndex = adIndexes.byLp.get(lpKey(selectedPage.url)) || [];
-    if (fromIndex.length) return fromIndex;
-    // Also try matchKey directly
-    return adIndexes.byLp.get(selectedPage.matchKey) || [];
-  }, [selectedPage, adIndexes.byLp]);
+  /** Raw ads behind a landing page: by its URL key, else by its match key. */
+  const rawAdsForPage = (page: Pick<LookupUniqueLandingPage, "url" | "matchKey">) => {
+    const fromIndex = adIndexes.byLp.get(lpKey(page.url)) || [];
+    return fromIndex.length ? fromIndex : adIndexes.byLp.get(page.matchKey) || [];
+  };
+
+  const selectedPageRawAds = useMemo(
+    () => (selectedPage ? rawAdsForPage(selectedPage) : ([] as SearchCompetitorAdRecord[])),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedPage, adIndexes.byLp],
+  );
 
   const funnelDistribution = useMemo(() => {
     const counts: Partial<Record<FunnelStage, number>> = {};
@@ -1042,7 +1046,7 @@ export function SearchOffersDashboard({
                         <span className="muted">
                           {p.adCount} ad{p.adCount === 1 ? "" : "s"}
                         </span>
-                        <PageSignals ads={adIndexes.byLp.get(lpKey(p.url)) || adIndexes.byLp.get(p.matchKey)} />
+                        <PageSignals ads={rawAdsForPage(p)} />
                       </span>
                     </button>
                   </li>
@@ -1075,6 +1079,7 @@ export function SearchOffersDashboard({
                         <span className={`status-pill status-${p.status}`}>
                           {statusLabel(p.status)}
                         </span>
+                        <PageSignals ads={rawAdsForPage(p)} />
                       </span>
                     </button>
                   </li>
