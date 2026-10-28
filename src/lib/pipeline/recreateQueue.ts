@@ -153,6 +153,8 @@ async function runJob(job: RecreateJob): Promise<boolean> {
             styleDirection: job.options.styleDirection,
             userFeedback: job.options.userFeedback,
             targetIcp: job.options.targetIcp,
+            // The website chosen when the job was added, whatever the run holds now.
+            businessUrl: job.options.businessUrl || null,
           });
         },
       );

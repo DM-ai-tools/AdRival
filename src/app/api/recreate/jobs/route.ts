@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getAppSettings, getCompetitor, getIcp, getJob } from "@/lib/db";
-import { listRecreationsForUser } from "@/lib/data/competitors";
+import { deleteCompetitor, listRecreationsForUser } from "@/lib/data/competitors";
 import {
   countQueuedAhead,
   getRecreateJob,
@@ -14,6 +14,7 @@ import { isCreditError } from "@/lib/accounting/errors";
 import { maskClientFacingText } from "@/lib/clientFacing";
 import { analyzeCompetitorLandingPage } from "@/lib/pipeline/landingPageAnalysis";
 import { createRecreationVersion, ensureLandingPageRecord } from "@/lib/pipeline/landingRecreateBridge";
+import { landingPageMatchKey } from "@/lib/pipeline/sameLandingPageAds";
 import { icpBelongsToRun } from "@/lib/pipeline/awareness/icp";
 import { isStyleDirection } from "@/lib/pipeline/skills/playbook";
 import { dispatchRecreateQueue, sweepRecreateQueue } from "@/lib/pipeline/recreateQueue";
@@ -38,6 +39,16 @@ function addingNow(): Set<string> {
 
 function json(body: unknown, status: number) {
   return NextResponse.json(body, { status });
+}
+
+/** The request's JSON object, or null when the body is not one. */
+async function readBody(request: Request): Promise<Record<string, unknown> | null> {
+  try {
+    const body: unknown = await request.json();
+    return body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -97,7 +108,8 @@ async function hasActiveDuplicate(
 export async function POST(request: Request) {
   try {
     const user = await requireUser();
-    const body = (await request.json()) as Record<string, unknown>;
+    const body = await readBody(request);
+    if (!body) return json({ error: "The request must be a JSON object." }, 400);
     const competitorId = String(body.competitorId ?? "").trim();
     const runId = String(body.jobId ?? "").trim();
     const url = String(body.url ?? "").trim();
@@ -115,6 +127,9 @@ export async function POST(request: Request) {
       source = await rootOf(found);
     } else {
       access = await resolveProjectAccess("search", runId, user, "run");
+      if (!landingPageMatchKey(url)) {
+        return json({ error: "This landing page address could not be read." }, 400);
+      }
       source = (await ensureLandingPageRecord(runId, url)).competitor;
     }
 
@@ -182,13 +197,27 @@ export async function POST(request: Request) {
         }
       }
 
-      if (businessUrl !== savedUrl) await saveRunBusinessUrl(source.runId, businessUrl);
       const version = await createRecreationVersion(source);
-      jobId = (
-        await insertJob({ ownerUserId: user.id, competitorId: version.id, runId: source.runId, spaceId, options })
-      ).id;
+      try {
+        jobId = (
+          await insertJob({ ownerUserId: user.id, competitorId: version.id, runId: source.runId, spaceId, options })
+        ).id;
+      } catch (err) {
+        // No job: the version made for it would be an orphan.
+        await deleteCompetitor(version.id).catch((cleanupErr: unknown) =>
+          console.error(`[recreate/jobs] could not remove the unused version ${version.id}`, cleanupErr),
+        );
+        throw err;
+      }
     } finally {
       adding.delete(addingKey);
+    }
+
+    // The job builds with its own website; the run keeps the latest as the next add's default.
+    if (businessUrl !== savedUrl) {
+      await saveRunBusinessUrl(source.runId, businessUrl).catch((err: unknown) =>
+        console.error("[recreate/jobs] could not save the business website on the run", err),
+      );
     }
 
     // Starts it now when a slot is free; otherwise it waits its turn.

@@ -113,6 +113,7 @@ test('legacy source records with a recreatedPage appear as legacy items with "â€
   // A competitor recreated before versions existed: the page lives on the source record itself.
   const legacy = record("c-legacy", {
     activeAdsCount: 0,
+    pageAnalysis: null,
     sampleAd: { adArchiveId: "a", title: "t", body: "b", daysRunning: -1, adLibraryUrl: "https://x.invalid" },
     recreatedPage: page({
       createdAt: daysAgo(3),
@@ -208,4 +209,50 @@ test("jobs merge with their versions, newest first, with the source page's signa
   assert.equal(run.styleDirection, "minimal");
   assert.deepEqual(run.progress, { pct: 42, message: "Building with design agent" }, "progress text is masked");
   assert.equal(run.finishedAt, null);
+});
+
+test("a version whose job is not in the list follows its page, with nothing to stop", () => {
+  // An editor queued these on the user's run: the versions are the run owner's, the jobs the editor's.
+  const building = version("rv-theirs-running", {
+    recreatedPage: page({
+      status: "pending",
+      createdAt: daysAgo(0.1),
+      hasPage: false,
+      progress: { phase: "build", message: "Building", pct: 30 },
+    }),
+  });
+  const done = version("rv-theirs-done", { recreatedPage: page({ createdAt: daysAgo(2), updatedAt: daysAgo(1) }) });
+  const broke = version("rv-theirs-failed", {
+    recreatedPage: page({ status: "failed", createdAt: daysAgo(3), updatedAt: daysAgo(3), error: "agent broke" }),
+  });
+  const items = buildRecreateList({ jobs: [], records: [building, done, broke], now: NOW });
+  const byId = new Map(items.map((i) => [i.id, i]));
+  assert.deepEqual(
+    items.map((i) => [i.id, i.state, i.jobId]),
+    [
+      ["rv-theirs-running", "running", null],
+      ["rv-theirs-done", "finished", null],
+      ["rv-theirs-failed", "failed", null],
+    ],
+    "never shown as legacy pages",
+  );
+  assert.deepEqual(byId.get("rv-theirs-running")?.progress, { pct: 30, message: "Building" });
+  assert.equal(byId.get("rv-theirs-running")?.finishedAt, null);
+  assert.equal(byId.get("rv-theirs-done")?.finishedAt, daysAgo(1));
+  assert.equal(byId.get("rv-theirs-failed")?.error, "agent broke");
+});
+
+test("a real count of 0 active ads stays 0; it is unknown only on a page never analysed", () => {
+  const items = buildRecreateList({
+    jobs: [job("j-zero", "rv-zero"), job("j-unknown", "rv-unknown", { createdAt: daysAgo(2) })],
+    records: [version("rv-zero", { activeAdsCount: 0 }), version("rv-unknown", { activeAdsCount: 0, pageAnalysis: null })],
+    now: NOW,
+  });
+  assert.deepEqual(
+    items.map((i) => [i.id, i.activeAds]),
+    [
+      ["j-zero", 0],
+      ["j-unknown", null],
+    ],
+  );
 });

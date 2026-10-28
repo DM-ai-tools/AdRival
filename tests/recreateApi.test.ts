@@ -61,6 +61,7 @@ const { getCompetitor, getJob, getRecreateOnlyPagesByRun, saveCompetitor, saveJo
 const { upsertMembership } = await import("@/lib/data/audit");
 const { assignRunsToSpace, createProjectSpace } = await import("@/lib/data/spaces");
 const jobsRepo = await import("@/lib/data/recreateJobs");
+const { getDb } = await import("@/lib/data/client");
 const { createRecreationVersion } = await import("@/lib/pipeline/landingRecreateBridge");
 const jobsRoute = await import("../src/app/api/recreate/jobs/route");
 const jobRoute = await import("../src/app/api/recreate/jobs/[id]/route");
@@ -340,4 +341,81 @@ test("DELETE removes a queued job and its empty version; another user gets 404",
   assert.equal(await jobsRepo.getRecreateJob(job.id), null);
   assert.equal(await getCompetitor(version.id), null, "no version left behind");
   assert.equal((await remove(owner, job.id)).status, 404);
+});
+
+test("a failed job insert leaves no version behind and the run's website unchanged", async () => {
+  const owner = await makeUser({ credits: 1000 });
+  const run = await makeRun(owner);
+  const source = await makeSource(run.id);
+  // The queue table refuses this user's rows.
+  await getDb().query(`
+    create or replace function refuse_recreate_job() returns trigger language plpgsql as $$
+    begin raise exception 'recreate_jobs unavailable'; end $$`);
+  await getDb().query(
+    `create trigger refuse_recreate_job before insert on recreate_jobs
+       for each row when (new.owner_user_id = '${owner.id}') execute function refuse_recreate_job()`,
+  );
+  try {
+    const res = await post(owner, { competitorId: source.id, businessUrl: "changed-client.invalid" });
+    assert.equal(res.status, 500);
+    assert.deepEqual(await versionsOf(run.id), [], "the version made for it is removed");
+    assert.equal((await getJob(run.id))?.businessUrl, "https://client.invalid", "the run keeps its website");
+  } finally {
+    await getDb().query("drop trigger refuse_recreate_job on recreate_jobs");
+  }
+  // Once the table takes it again, the same request goes through.
+  assert.equal((await post(owner, { competitorId: source.id, businessUrl: "changed-client.invalid" })).status, 202);
+  assert.equal((await getJob(run.id))?.businessUrl, "https://changed-client.invalid");
+});
+
+test("a malformed body or landing page address is a 400, a missing search a 404", async () => {
+  const owner = await makeUser({ credits: 1000 });
+  const run = await makeRun(owner);
+  const malformed = await asUser(owner, async () =>
+    readJson(
+      await jobsRoute.POST(
+        new Request(BASE, { method: "POST", headers: { "content-type": "application/json" }, body: "{not json" }),
+      ),
+    ),
+  );
+  assert.equal(malformed.status, 400);
+  assert.equal((await post(owner, ["not", "an", "object"])).status, 400);
+
+  const badUrl = await post(owner, { jobId: run.id, url: "not a web address" });
+  assert.equal(badUrl.status, 400);
+  assert.match(String(badUrl.body.error), /address/i);
+  assert.deepEqual(await getRecreateOnlyPagesByRun(run.id), [], "nothing held for it");
+
+  // An unknown search is not found (404, so ids cannot be probed), never a server error.
+  assert.equal((await post(owner, { jobId: "no-such-run", url: "https://rival.invalid/offer" })).status, 404);
+});
+
+test("an editor's recreation on the owner's run shows for the owner from its page, with nothing to stop", async () => {
+  const owner = await makeUser({ credits: 1000 });
+  const editor = await makeUser({ credits: 1000 });
+  const run = await makeRun(owner);
+  const source = await makeSource(run.id);
+  await upsertMembership({
+    projectKind: "search",
+    projectId: run.id,
+    userId: editor.id,
+    role: "editor",
+    grantedByUserId: owner.id,
+  });
+  const added = await post(editor, { competitorId: source.id });
+  assert.equal(added.status, 202);
+  const job = added.body.job as { id: string; competitorId: string };
+  // The build has started: the version (the run owner's record) holds a page now.
+  const until = Date.now() + 5_000;
+  while (!(await getCompetitor(job.competitorId))?.recreatedPage && Date.now() < until) await settle(20);
+
+  const mine = (await list(editor)).body.items as RecreateListItem[];
+  assert.deepEqual(mine.map((i) => [i.jobId, i.state]), [[job.id, "running"]], "the editor can stop it");
+
+  const owners = (await list(owner)).body.items as RecreateListItem[];
+  assert.deepEqual(
+    owners.map((i) => [i.competitorId, i.jobId, i.state]),
+    [[job.competitorId, null, "running"]],
+    "not a legacy page; no job of the owner's to stop",
+  );
 });

@@ -27,6 +27,8 @@ let taskSeq = 0;
 /** While set, creating a task waits for it (a build held just before it reaches the agent). */
 let holdCreate: Promise<void> | null = null;
 const calls: Array<{ method: string; taskId: string }> = [];
+/** The payload of every task created, in order. */
+const created: Array<{ taskId: string; body: Record<string, unknown> }> = [];
 const realFetch = globalThis.fetch;
 
 const PAGE_HTML = "<!doctype html><html><body><h1>Bright Smiles dentist</h1><p>Book today</p></body></html>";
@@ -49,6 +51,7 @@ function fakeFetch(input: string | URL | Request, init?: RequestInit): Promise<R
     taskSeq += 1;
     const id = `T-${taskSeq}`;
     taskState.set(id, "running");
+    created.push({ taskId: id, body: body ?? {} });
     return json({ ok: true, task_id: id, task_url: null });
   }
   if (method === "task.listMessages") {
@@ -288,6 +291,48 @@ test("stopping a running job starts the next queued one", async () => {
   const stopped = await jobById(user.id, first.id);
   assert.equal(stopped?.status, "stopped");
   assert.equal((await getCompetitor(first.competitorId))?.recreatedPage?.status, "failed");
+  await drain(user.id);
+});
+
+/** What a created task was sent: the request and its brief.md attachment, decoded. */
+function sentWith(taskId: string): string {
+  const body = created.find((c) => c.taskId === taskId)?.body ?? {};
+  const parts = (body.message as { content?: Array<{ filename?: string; file_data?: string }> } | undefined)?.content ?? [];
+  const data = String(parts.find((p) => p.filename === "brief.md")?.file_data ?? "");
+  const brief = Buffer.from(data.split(",")[1] ?? "", "base64").toString("utf8");
+  assert.ok(brief.length > 0, "the brief went with the task");
+  return `${JSON.stringify(body)}\n${brief}`;
+}
+
+test("each job builds for its own business website, not the one the run holds now", async () => {
+  const { user, run, source } = await setup({ count: 0 });
+  const add = async (businessUrl: string) => {
+    const version = await createRecreationVersion(source);
+    return jobsRepo.insertJob({
+      ownerUserId: user.id,
+      competitorId: version.id,
+      runId: run.id,
+      spaceId: null,
+      options: { businessUrl, styleDirection: null, userFeedback: null, targetIcp: null },
+    });
+  };
+  const first = await add("https://first-client.invalid");
+  const second = await add("https://second-client.invalid");
+  // A job without its own website (added before the field was used) builds for the run's, as before.
+  const plain = await add("");
+  await dispatchRecreateQueue(user.id);
+
+  const expected: Array<[RecreateJob, string, RegExp[]]> = [
+    [first, "https://first-client.invalid", [/second-client\.invalid/, /\/\/client\.invalid/]],
+    [second, "https://second-client.invalid", [/first-client\.invalid/, /\/\/client\.invalid/]],
+    [plain, "https://client.invalid", [/first-client\.invalid/, /second-client\.invalid/]],
+  ];
+  for (const [job, url, others] of expected) {
+    const sent = sentWith(await taskOf(job.competitorId));
+    assert.ok(sent.includes(url), `the task for ${url} names it`);
+    for (const other of others) assert.doesNotMatch(sent, other);
+    assert.equal((await getCompetitor(job.competitorId))?.recreatedPage?.businessUrl, url);
+  }
   await drain(user.id);
 });
 

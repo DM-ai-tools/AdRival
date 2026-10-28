@@ -5,7 +5,8 @@ import type { CompetitorRecord, RecreatedPageLight } from "./types";
 /*
  * The Recreate tab's list: the user's queue jobs merged with their recreated
  * pages. A job's page is its version record (made when the job was added);
- * a page with no job is "legacy" (recreated before the queue existed). Only
+ * a page with no job is "legacy" (recreated before the queue existed), or a
+ * version whose job is another user's (it follows its page). Only
  * fields chosen here reach the browser: never the design agent's task state,
  * the Undo copy or other stored internals.
  */
@@ -91,10 +92,11 @@ function daysRunningOf(record: CompetitorRecord | undefined): number | null {
   return typeof days === "number" && Number.isFinite(days) && days >= 0 ? days : null;
 }
 
-/** Active ads behind the source page; null when unknown. */
+/** Active ads behind the source page; null when unknown (no count, or 0 on a page never analysed). */
 function activeAdsOf(record: CompetitorRecord | undefined): number | null {
   const count = record?.activeAdsCount;
-  return typeof count === "number" && Number.isFinite(count) && count > 0 ? count : null;
+  if (typeof count !== "number" || !Number.isFinite(count) || count < 0) return null;
+  return count === 0 && !record?.pageAnalysis ? null : count;
 }
 
 function sourceUrlOf(record: CompetitorRecord | undefined): string {
@@ -152,17 +154,28 @@ function jobItem(job: RecreateJob, record: CompetitorRecord | undefined, run: Re
 }
 
 /**
- * A page recreated outside the queue. It counts as finished when it settled
- * (completed or failed), from its last update.
+ * How a page with no job in the user's list stands: a version (made for a
+ * job, e.g. another member's on this user's run) follows its page like a job
+ * would; any other record is a page recreated before the queue existed.
  */
-function legacyItem(record: CompetitorRecord, page: RecreatedPageLight, now: Date): RecreateListItem {
+function pageState(record: CompetitorRecord, page: RecreatedPageLight): RecreateListState {
+  if (!record.recreateOnly?.variantOf) return "legacy";
+  if (isBuilding(page)) return "running";
+  return page.status === "completed" && !page.error ? "finished" : "failed";
+}
+
+/**
+ * A page with no job in the user's list (see pageState). It counts as finished
+ * when it settled (completed or failed), from its last update.
+ */
+function pageItem(record: CompetitorRecord, page: RecreatedPageLight, now: Date): RecreateListItem {
   const settled = page.status === "completed" || page.status === "failed";
   const finishedAt = settled ? page.updatedAt || page.createdAt || null : null;
   return {
     id: record.id,
     competitorId: record.id,
     jobId: null,
-    state: "legacy",
+    state: pageState(record, page),
     sourceUrl: sourceUrlOf(record),
     sourceName: page.sourceCompetitorName || record.pageName || "",
     businessName: textOrNull(page.businessName),
@@ -177,15 +190,15 @@ function legacyItem(record: CompetitorRecord, page: RecreatedPageLight, now: Dat
     archived: isArchived(finishedAt, now),
     hasPage: Boolean(page.hasPage),
     openPath: openPath(record.id),
-    error: page.status === "failed" ? maskClientFacingText(page.error) : null,
+    error: maskClientFacingText(page.error),
   };
 }
 
 /**
  * Merges the user's jobs with the records holding their pages, most recent
  * first. `records` holds every job's version (with or without a page yet) and
- * the records with a recreated page; a record with a page and no job becomes
- * a legacy item. `runs` gives a queued job's business and keyword.
+ * the records with a recreated page; a record with a page and no job is
+ * listed from its page (jobId null: nothing to stop). `runs` gives a queued job's business and keyword.
  */
 export function buildRecreateList(input: {
   jobs: RecreateJob[];
@@ -198,7 +211,7 @@ export function buildRecreateList(input: {
   const items = input.jobs.map((job) => jobItem(job, byId.get(job.competitorId), input.runs?.get(job.runId), input.now));
   for (const record of byId.values()) {
     if (withJob.has(record.id) || !record.recreatedPage) continue;
-    items.push(legacyItem(record, record.recreatedPage, input.now));
+    items.push(pageItem(record, record.recreatedPage, input.now));
   }
   const time = (iso: string) => Date.parse(iso) || 0;
   return items.sort((a, b) => time(b.createdAt) - time(a.createdAt) || b.id.localeCompare(a.id));

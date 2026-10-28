@@ -369,7 +369,7 @@ const STAGE_RANGE: Record<StageId, [number, number]> = {
 
 // ── Inputs ──────────────────────────────────────────────────────────────
 
-function resolveBusinessUrl(job: SearchJob): string | null {
+function resolveBusinessUrl(job: Pick<SearchJob, "businessUrl" | "businessProfile">): string | null {
   const url = (job.businessUrl || "").trim() || (job.businessProfile?.url || "").trim();
   if (!url) return null;
   return /^https?:\/\//i.test(url) ? url : `https://${url}`;
@@ -581,6 +581,8 @@ export async function runManusRecreation(
     assets?: UserAsset[];
     /** A new reader to write for; omitted keeps the one already on the page. */
     targetIcp?: { icpId: string; stage: AwarenessStage } | null;
+    /** The client's website for this build (a queued job's own); omitted uses the run's. */
+    businessUrl?: string | null;
   } = {},
 ): Promise<CompetitorRecord> {
   if (!hasManusKey()) throw new Error("The design agent is not set up yet: add MANUS_API_KEY to the environment.");
@@ -591,7 +593,7 @@ export async function runManusRecreation(
   }
   const job = await getJob(competitor.runId);
   if (!job) throw new Error("Search job not found for this competitor");
-  const businessUrl = resolveBusinessUrl(job);
+  const businessUrl = resolveBusinessUrl({ businessUrl: options.businessUrl || job.businessUrl, businessProfile: job.businessProfile });
   if (!businessUrl) {
     throw new Error("This search has no business website URL. Re-run search with a business URL so recreation can use your brand.");
   }
