@@ -23,9 +23,22 @@ import {
   searchedServiceFocus,
 } from "@/lib/pipeline/offerServiceFocus";
 import { externalUrl } from "@/lib/externalUrl";
+import { formatSignal, pageSignals } from "@/lib/recreateSignals";
 
 function shortUrl(url: string): string {
   return url.replace(/^https?:\/\//i, "").replace(/\/$/, "");
+}
+
+/** Decision signals for a landing page: how long it has run, how many ads are live. */
+function PageSignals({ ads }: { ads?: SearchCompetitorAdRecord[] }) {
+  const sig = pageSignals(ads || []);
+  return (
+    <span className="muted" title="Longest-running ad on this page, and ads still active">
+      Longest running: {formatSignal(sig.daysRunning)}
+      {sig.daysRunning === null ? "" : ` day${sig.daysRunning === 1 ? "" : "s"}`} ·{" "}
+      {formatSignal(sig.activeAds)} active ad{sig.activeAds === 1 ? "" : "s"}
+    </span>
+  );
 }
 
 function lpKey(url?: string | null): string {
@@ -1029,6 +1042,7 @@ export function SearchOffersDashboard({
                         <span className="muted">
                           {p.adCount} ad{p.adCount === 1 ? "" : "s"}
                         </span>
+                        <PageSignals ads={adIndexes.byLp.get(lpKey(p.url)) || adIndexes.byLp.get(p.matchKey)} />
                       </span>
                     </button>
                   </li>

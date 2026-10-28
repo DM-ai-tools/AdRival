@@ -60,13 +60,20 @@ function origin(url?: string | null): string | null {
 }
 
 /** Days an ad has run: the stored count, else from its start date. */
-export function adDays(ad: SearchCompetitorAdRecord): number | null {
+export function adDays(
+  ad: Pick<SearchCompetitorAdRecord, "daysRunning" | "startDateString" | "endDateString" | "isActive">,
+): number | null {
   if (typeof ad.daysRunning === "number" && ad.daysRunning >= 0) return ad.daysRunning;
   const start = Date.parse(ad.startDateString || "");
   if (!Number.isFinite(start)) return null;
   const endParsed = Date.parse(ad.endDateString || "");
   const end = Number.isFinite(endParsed) && ad.isActive === false ? endParsed : Date.now();
   return Math.max(0, Math.round((end - start) / 86_400_000));
+}
+
+/** An ad counts as active unless it is explicitly marked stopped. */
+export function isActiveAd(ad: Pick<SearchCompetitorAdRecord, "isActive">): boolean {
+  return ad.isActive !== false;
 }
 
 /** Each competitor's own website: the site most of its ads send people to. */
@@ -122,7 +129,7 @@ export function rankOffers(
       competitors,
       ads: matched,
       adCount: Math.max(matched.length, ladder.adCount || 0),
-      activeAds: matched.filter((ad) => ad.isActive !== false).length,
+      activeAds: matched.filter(isActiveAd).length,
       longestDays: days.length ? Math.max(...days) : null,
       medianDays: median(days),
       score: 0,
