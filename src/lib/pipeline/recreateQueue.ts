@@ -155,6 +155,8 @@ async function runJob(job: RecreateJob): Promise<boolean> {
             targetIcp: job.options.targetIcp,
             // The website chosen when the job was added, whatever the run holds now.
             businessUrl: job.options.businessUrl || null,
+            // Reading another website's business takes a while: a stop in the meantime builds nothing.
+            stillWanted: async () => (await getRecreateJob(job.id))?.status === "running",
           });
         },
       );

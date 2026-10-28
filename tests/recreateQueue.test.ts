@@ -26,6 +26,8 @@ let failAll = false;
 let taskSeq = 0;
 /** While set, creating a task waits for it (a build held just before it reaches the agent). */
 let holdCreate: Promise<void> | null = null;
+/** While set, continuing a task fails (it can no longer be continued). */
+let failSend = false;
 const calls: Array<{ method: string; taskId: string }> = [];
 /** The payload of every task created, in order. */
 const created: Array<{ taskId: string; body: Record<string, unknown> }> = [];
@@ -88,6 +90,9 @@ function fakeFetch(input: string | URL | Request, init?: RequestInit): Promise<R
       messages: [{ id: `s${at}`, type: "status_update", timestamp: at, status_update: { agent_status: "running" } }],
     });
   }
+  if (method === "task.sendMessage" && failSend) {
+    return Promise.resolve(new Response(JSON.stringify({ ok: false, error: { message: "task gone" } }), { status: 400 }));
+  }
   if (method === "task.detail") {
     return json({ ok: true, task: { id: taskId, status: "running", credit_usage: 0, has_running_background_jobs: false } });
   }
@@ -107,9 +112,55 @@ const { RECREATE_BUILD_OPERATION } = await import("@/lib/accounting/scope");
 const { LOW_CREDIT_MESSAGE } = await import("@/lib/accounting/errors");
 const { RECREATE_QUEUE_STATE_KEY, dispatchRecreateQueue, resumedBuildStaleMs, stopRecreateJob, sweepRecreateQueue } =
   await import("@/lib/pipeline/recreateQueue");
-const { resumeManusRecreation } = await import("@/lib/pipeline/manus/run");
-import type { CompetitorRecord, RecreatedLandingPage, RecreatedPageLight, SearchJob } from "@/lib/types";
+const { resumeManusRecreation, editManusRecreation } = await import("@/lib/pipeline/manus/run");
+const { getJob } = await import("@/lib/db");
+const { sameWebsite, setBusinessProfileAnalyzerForTests } = await import("@/lib/pipeline/businessProfile");
+const { InsufficientCreditsError } = await import("@/lib/accounting/errors");
+import type { BusinessProfile, CompetitorRecord, RecreatedLandingPage, RecreatedPageLight, SearchJob } from "@/lib/types";
 import type { RecreateJob } from "@/lib/data/recreateJobs";
+
+/*
+ * The website analysis a build runs for a website other than its search's own
+ * (analyzeBusinessProfile) is faked: every call is recorded, and a test can
+ * set what it returns or throws.
+ */
+const analyzed: string[] = [];
+let analyzeWith: ((url: string) => Promise<BusinessProfile>) | null = null;
+
+function profileOf(url: string, name: string, primary: string): BusinessProfile {
+  return {
+    url,
+    businessName: name,
+    industry: "dental",
+    description: `${name} dental clinic`,
+    offerings: [`${name} check-ups`],
+    competitorKeywords: ["dentist"],
+    positioningSummary: `${name} positioning`,
+    brandColors: { primary, secondary: "#203040", accent: "#405060", background: "#FFFFFF", text: "#0A0A0A" },
+    brandAssets: {
+      finalUrl: url,
+      siteName: name,
+      logoUrl: `${url}/logo.png`,
+      faviconUrl: null,
+      ogImageUrl: null,
+      navLinks: [],
+      footerLinks: [],
+      socialLinks: [],
+      images: [],
+      emails: [],
+      phones: [],
+    },
+  };
+}
+
+setBusinessProfileAnalyzerForTests(async (url) => {
+  analyzed.push(url);
+  if (analyzeWith) return analyzeWith(url);
+  return profileOf(url, `Biz ${new URL(url).hostname.split(".")[0]}`, "#5A5A5A");
+});
+
+/** The search's own business: its brief names it and uses its colours. */
+const ORIGINAL = profileOf("https://client.invalid", "Original Dental", "#111111");
 
 after(async () => {
   failAll = true;
@@ -119,6 +170,7 @@ after(async () => {
   );
   await settle(100);
   globalThis.fetch = realFetch;
+  setBusinessProfileAnalyzerForTests(null);
   await store.cleanup();
 });
 
@@ -137,7 +189,7 @@ async function waitFor<T>(fn: () => Promise<T | null | undefined | false>, label
 let seq = 0;
 
 /** A user with `credits`, a search run with a business website, an analysed page and `count` queued versions. */
-async function setup(options: { credits?: number; count?: number } = {}) {
+async function setup(options: { credits?: number; count?: number; profile?: BusinessProfile } = {}) {
   seq += 1;
   const user = await makeUser({ credits: options.credits ?? 1000 });
   const at = new Date().toISOString();
@@ -152,6 +204,7 @@ async function setup(options: { credits?: number; count?: number } = {}) {
     progress: { stage: "done", scannedAds: 0, scannedPages: 0, accepted: 1, target: 10, rejected: 0, message: "" },
     competitorIds: [],
     businessUrl: "https://client.invalid",
+    ...(options.profile ? { businessProfile: structuredClone(options.profile) } : {}),
     ownerUserId: user.id,
     createdAt: at,
     updatedAt: at,
@@ -334,6 +387,232 @@ test("each job builds for its own business website, not the one the run holds no
     assert.equal((await getCompetitor(job.competitorId))?.recreatedPage?.businessUrl, url);
   }
   await drain(user.id);
+});
+
+/** The brief.md a created task was sent, decoded. */
+function briefOf(taskId: string): string {
+  const body = created.find((c) => c.taskId === taskId)?.body ?? {};
+  const parts = (body.message as { content?: Array<{ filename?: string; file_data?: string }> } | undefined)?.content ?? [];
+  const data = String(parts.find((p) => p.filename === "brief.md")?.file_data ?? "");
+  return Buffer.from(data.split(",")[1] ?? "", "base64").toString("utf8");
+}
+
+function createCount(): number {
+  return calls.filter((c) => c.method === "task.create").length;
+}
+
+/** A queued job for `businessUrl`: on a new version of `source`, or on the version `competitorId`. */
+async function addJob(
+  ctx: { user: { id: string }; run: SearchJob; source: CompetitorRecord },
+  businessUrl: string,
+  competitorId?: string,
+): Promise<RecreateJob> {
+  const id = competitorId ?? (await createRecreationVersion(ctx.source)).id;
+  return jobsRepo.insertJob({
+    ownerUserId: ctx.user.id,
+    competitorId: id,
+    runId: ctx.run.id,
+    spaceId: null,
+    options: { businessUrl, styleDirection: null, userFeedback: null, targetIcp: null },
+  });
+}
+
+function jobEnded(userId: string, jobId: string, status: RecreateJob["status"]) {
+  return waitFor(async () => {
+    const j = await jobById(userId, jobId);
+    return j?.status === status ? j : null;
+  }, `job ${jobId} to be ${status}`);
+}
+
+test("sameWebsite ignores scheme, www., a trailing slash, query and fragment, but not the host or path", () => {
+  assert.ok(sameWebsite("https://client.invalid", "http://www.CLIENT.invalid/"));
+  assert.ok(sameWebsite("client.invalid/about/", "https://www.client.invalid/about?x=1#top"));
+  assert.ok(!sameWebsite("https://client.invalid", "https://first-client.invalid"));
+  assert.ok(!sameWebsite("https://client.invalid/a", "https://client.invalid/b"));
+  assert.ok(!sameWebsite("", ""));
+});
+
+test("a job for another website builds with that website's own business, analysed once and reused", async () => {
+  const ctx = await setup({ count: 0, profile: ORIGINAL });
+  const before = analyzed.length;
+  analyzeWith = async (url) => profileOf(url, "Newco Smiles", "#ABCDEF");
+  try {
+    const job = await addJob(ctx, "https://newco.invalid");
+    await dispatchRecreateQueue(ctx.user.id);
+    const first = await taskOf(job.competitorId);
+    assert.deepEqual(analyzed.slice(before), ["https://newco.invalid"], "the website is analysed once");
+
+    const sent = sentWith(first);
+    assert.match(sent, /Newco Smiles/, "the brief names the new business");
+    assert.match(sent, /#ABCDEF/, "with its colours");
+    assert.match(sent, /Newco Smiles check-ups/, "and its services");
+    assert.match(sent, /newco\.invalid\/logo\.png/, "and its logo");
+    assert.doesNotMatch(sent, /Original Dental/);
+    assert.doesNotMatch(sent, /#111111/);
+
+    const version = await getCompetitor(job.competitorId);
+    assert.equal(version?.recreateOnly?.businessProfile?.businessName, "Newco Smiles", "the profile is saved on the version");
+    assert.equal(version?.recreatedPage?.businessName, "Newco Smiles");
+    assert.equal(version?.recreatedPage?.brandColors.primary, "#ABCDEF");
+    const search = await getJob(ctx.run.id);
+    assert.equal(search?.businessProfile?.businessName, "Original Dental", "the search's business is untouched");
+    assert.equal(search?.businessProfile?.brandColors?.primary, "#111111");
+
+    taskState.set(first, "done");
+    await jobEnded(ctx.user.id, job.id, "finished");
+
+    // A second build of the same version (a retry) uses the saved profile and pays for no new analysis.
+    const retry = await addJob(ctx, "http://www.newco.invalid/", job.competitorId);
+    await dispatchRecreateQueue(ctx.user.id);
+    const second = await waitFor(async () => {
+      const id = (await getCompetitor(job.competitorId))?.recreatedPage?.manus?.taskId;
+      return id && id !== first ? id : null;
+    }, "the rebuild's task");
+    assert.equal(analyzed.length - before, 1, "no second analysis");
+    assert.match(briefOf(second), /Newco Smiles/);
+    assert.doesNotMatch(briefOf(second), /Original Dental/);
+    taskState.set(second, "done");
+    await jobEnded(ctx.user.id, retry.id, "finished");
+  } finally {
+    analyzeWith = null;
+  }
+  await drain(ctx.user.id);
+});
+
+test("a job for the search's own website (any spelling) builds as before, with no website analysis", async () => {
+  const ctx = await setup({ count: 0, profile: ORIGINAL });
+  const before = analyzed.length;
+  // "" is a job without its own website: it builds for the run's, exactly as before.
+  const plain = await addJob(ctx, "");
+  const same = await addJob(ctx, "https://client.invalid");
+  const variant = await addJob(ctx, "http://www.Client.invalid/?utm_source=x#top");
+  await dispatchRecreateQueue(ctx.user.id);
+  const [plainTask, sameTask, variantTask] = [
+    await taskOf(plain.competitorId),
+    await taskOf(same.competitorId),
+    await taskOf(variant.competitorId),
+  ];
+  assert.equal(analyzed.length, before, "nothing is analysed");
+  assert.equal(briefOf(sameTask), briefOf(plainTask), "the brief is the one built today");
+  for (const taskId of [plainTask, sameTask, variantTask]) {
+    const brief = briefOf(taskId);
+    assert.match(brief, /Original Dental/);
+    assert.match(brief, /#111111/);
+  }
+  for (const job of [plain, same, variant]) {
+    assert.equal((await getCompetitor(job.competitorId))?.recreateOnly?.businessProfile ?? null, null, "no profile is saved");
+  }
+  await drain(ctx.user.id);
+});
+
+test("a website that cannot be read fails the job with a clear message and builds nothing", async () => {
+  const ctx = await setup({ count: 0, profile: ORIGINAL });
+  const createsBefore = createCount();
+  analyzeWith = async () => {
+    throw new Error("Perplexity request failed: upstream exploded");
+  };
+  try {
+    const job = await addJob(ctx, "https://www.broken.invalid/");
+    await dispatchRecreateQueue(ctx.user.id);
+    const failed = await jobEnded(ctx.user.id, job.id, "failed");
+    assert.equal(failed.error, "Could not read the website broken.invalid. Check the address and try again.");
+    assert.equal(createCount(), createsBefore, "no design agent task");
+    const version = await getCompetitor(job.competitorId);
+    assert.equal(version?.recreatedPage ?? null, null, "no page is written");
+    assert.equal(version?.recreateOnly?.businessProfile ?? null, null);
+    const search = await getJob(ctx.run.id);
+    assert.equal(search?.businessProfile?.businessName, "Original Dental", "the search's business is untouched");
+    assert.equal(search?.businessProfile?.url, "https://client.invalid");
+  } finally {
+    analyzeWith = null;
+  }
+  await drain(ctx.user.id);
+});
+
+test("running out of credits while reading the website fails the job as a credit error", async () => {
+  const ctx = await setup({ count: 0, profile: ORIGINAL });
+  const createsBefore = createCount();
+  analyzeWith = async () => {
+    throw new InsufficientCreditsError(100, 0);
+  };
+  try {
+    const job = await addJob(ctx, "https://newco.invalid");
+    await dispatchRecreateQueue(ctx.user.id);
+    const failed = await jobEnded(ctx.user.id, job.id, "failed");
+    assert.equal(failed.error, LOW_CREDIT_MESSAGE);
+    assert.equal(createCount(), createsBefore);
+    assert.equal((await getCompetitor(job.competitorId))?.recreatedPage ?? null, null);
+  } finally {
+    analyzeWith = null;
+  }
+  await drain(ctx.user.id);
+});
+
+test("a job stopped while its website is being read builds nothing", async () => {
+  const ctx = await setup({ count: 0, profile: ORIGINAL });
+  const createsBefore = createCount();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  analyzeWith = async (url) => {
+    await gate;
+    return profileOf(url, "Newco Smiles", "#ABCDEF");
+  };
+  try {
+    const job = await addJob(ctx, "https://newco.invalid");
+    const before = analyzed.length;
+    await dispatchRecreateQueue(ctx.user.id);
+    await waitFor(async () => analyzed.length > before, "the website analysis to start");
+    await stopRecreateJob(job.id, ctx.user.id);
+    release();
+    await settle(300);
+    assert.equal((await jobById(ctx.user.id, job.id))?.status, "stopped");
+    assert.equal(createCount(), createsBefore, "no design agent task after the stop");
+    assert.equal((await getCompetitor(job.competitorId))?.recreatedPage ?? null, null);
+  } finally {
+    release();
+    analyzeWith = null;
+  }
+  await drain(ctx.user.id);
+});
+
+test("changes to a version built for another website keep its website and business", async () => {
+  const ctx = await setup({ count: 0, profile: ORIGINAL });
+  analyzeWith = async (url) => profileOf(url, "Newco Smiles", "#ABCDEF");
+  try {
+    const job = await addJob(ctx, "https://newco.invalid");
+    await dispatchRecreateQueue(ctx.user.id);
+    const first = await taskOf(job.competitorId);
+    // What the agent's questions are answered from, also after a restart (resume), names the version's business.
+    const state = (await getCompetitor(job.competitorId))?.recreatedPage?.manus;
+    assert.match(state?.answerContext || "", /Newco Smiles/);
+    assert.match(state?.answerContext || "", /newco\.invalid/);
+    assert.doesNotMatch(state?.answerContext || "", /Original Dental/);
+    taskState.set(first, "done");
+    await jobEnded(ctx.user.id, job.id, "finished");
+
+    // The task can no longer be continued, so the change is made by a new build.
+    const before = analyzed.length;
+    failSend = true;
+    const editing = editManusRecreation(job.competitorId, "Make the headline bigger");
+    const second = await waitFor(async () => {
+      const id = (await getCompetitor(job.competitorId))?.recreatedPage?.manus?.taskId;
+      return id && id !== first ? id : null;
+    }, "the change's build");
+    failSend = false;
+    assert.equal(analyzed.length, before, "the saved profile is used");
+    const brief = briefOf(second);
+    assert.match(brief, /Newco Smiles/);
+    assert.match(brief, /https:\/\/newco\.invalid/);
+    assert.doesNotMatch(brief, /Original Dental/);
+    assert.doesNotMatch(brief, /\/\/client\.invalid/);
+    assert.equal((await getCompetitor(job.competitorId))?.recreatedPage?.businessUrl, "https://newco.invalid");
+    taskState.set(second, "done");
+    await editing;
+  } finally {
+    failSend = false;
+    analyzeWith = null;
+  }
+  await drain(ctx.user.id);
 });
 
 test("removing a queued job deletes its empty version", async () => {

@@ -392,6 +392,12 @@ export interface CompetitorRecord {
      * page: the source record's id. Versions never stand in for the source.
      */
     variantOf?: string | null;
+    /**
+     * The business this version's page is for, when its website is not the
+     * search's own: analysed once at build start and reused by its retries,
+     * rebuilds and changes. Its `url` is that website.
+     */
+    businessProfile?: BusinessProfile | null;
   } | null;
 }
 

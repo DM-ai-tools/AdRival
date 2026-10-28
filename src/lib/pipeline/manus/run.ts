@@ -1,5 +1,6 @@
 import type {
   AwarenessStage,
+  BusinessProfile,
   CompetitorRecord,
   ManusRecreationState,
   RecreatedLandingPage,
@@ -24,6 +25,8 @@ import type { IcpRecord } from "../../types";
 import { LOOKUP_RECREATE_PREFIX } from "../lookupRecreateBridge";
 import { getBillingContext } from "../../accounting/context";
 import { touchReservation } from "../../accounting/service";
+import { isCreditError } from "../../accounting/errors";
+import { businessProfileAnalyzer, sameWebsite } from "../businessProfile";
 import { sanitizeClientFacingText } from "../../clientFacing";
 import { resolveBrandDisplayName } from "../brandDisplayName";
 import { embedRemoteImagesInHtml } from "../design/packageHtml";
@@ -375,6 +378,48 @@ function resolveBusinessUrl(job: Pick<SearchJob, "businessUrl" | "businessProfil
   return /^https?:\/\//i.test(url) ? url : `https://${url}`;
 }
 
+/** The business profile saved on a version for `businessUrl`, when it has one for that website. */
+function versionProfile(competitor: CompetitorRecord, businessUrl: string): BusinessProfile | null {
+  const saved = competitor.recreateOnly?.businessProfile;
+  return saved && sameWebsite(saved.url, businessUrl) ? saved : null;
+}
+
+/**
+ * The business a build for `businessUrl` writes the page for, when it is not
+ * the search's own: the version's saved profile for that website, else that
+ * website analysed now (inside the build's credit reservation) and saved on
+ * the version, so retries, rebuilds and changes reuse it. Null when the
+ * website is the search's own (the search's profile applies, as before).
+ * Throws a client-facing error when the website cannot be read; credit
+ * errors pass through as they are.
+ */
+async function businessForBuild(
+  competitor: CompetitorRecord,
+  job: SearchJob,
+  businessUrl: string,
+): Promise<BusinessProfile | null> {
+  const saved = versionProfile(competitor, businessUrl);
+  if (saved) return saved;
+  const own = (job.businessProfile?.url || "").trim() || (job.businessUrl || "").trim();
+  if (sameWebsite(own, businessUrl)) return null;
+  let profile: BusinessProfile;
+  try {
+    profile = await businessProfileAnalyzer()(businessUrl);
+  } catch (err) {
+    if (isCreditError(err)) throw err;
+    console.warn(`[manus] could not analyse ${businessUrl} for competitor ${competitor.id}`, err);
+    throw new Error(`Could not read the website ${hostOf(businessUrl)}. Check the address and try again.`);
+  }
+  // Saved under the website it was asked for, so the next build finds it.
+  profile = { ...profile, url: businessUrl };
+  if (competitor.recreateOnly) {
+    await updateCompetitorWith(competitor.id, (stored) =>
+      stored.recreateOnly ? { recreateOnly: { ...stored.recreateOnly, businessProfile: profile } } : null,
+    );
+  }
+  return profile;
+}
+
 function briefInput(
   competitor: CompetitorRecord,
   job: SearchJob,
@@ -382,8 +427,12 @@ function briefInput(
   styleDirection: StyleDirection,
   userFeedback: string | null,
   icp: ManusBriefInput["icp"] = null,
+  /** The business read for this build's website (businessForBuild); null uses the version's saved one for it. */
+  business: BusinessProfile | null = null,
 ): ManusBriefInput {
-  const profile = job.businessProfile || null;
+  // A version built for another website writes for that website's business:
+  // its name, colours, logo and services all come from that profile.
+  const profile = business || versionProfile(competitor, businessUrl) || job.businessProfile || null;
   return {
     competitorName: competitor.pageName,
     competitorUrl: competitor.pageAnalysis!.analyzedUrl,
@@ -581,8 +630,17 @@ export async function runManusRecreation(
     assets?: UserAsset[];
     /** A new reader to write for; omitted keeps the one already on the page. */
     targetIcp?: { icpId: string; stage: AwarenessStage } | null;
-    /** The client's website for this build (a queued job's own); omitted uses the run's. */
+    /**
+     * The client's website for this build (a queued job's own); omitted uses
+     * the website of the version's own business profile, else the run's.
+     */
     businessUrl?: string | null;
+    /**
+     * Asked after the client's website is analysed (which can take a while):
+     * false means the build is no longer wanted (its job was stopped), so
+     * nothing goes to the design agent.
+     */
+    stillWanted?: () => Promise<boolean>;
   } = {},
 ): Promise<CompetitorRecord> {
   if (!hasManusKey()) throw new Error("The design agent is not set up yet: add MANUS_API_KEY to the environment.");
@@ -593,7 +651,11 @@ export async function runManusRecreation(
   }
   const job = await getJob(competitor.runId);
   if (!job) throw new Error("Search job not found for this competitor");
-  const businessUrl = resolveBusinessUrl({ businessUrl: options.businessUrl || job.businessUrl, businessProfile: job.businessProfile });
+  // A version built for another website keeps that website (and its business) on rebuilds and changes.
+  const businessUrl = resolveBusinessUrl({
+    businessUrl: options.businessUrl || competitor.recreateOnly?.businessProfile?.url || job.businessUrl,
+    businessProfile: job.businessProfile,
+  });
   if (!businessUrl) {
     throw new Error("This search has no business website URL. Re-run search with a business URL so recreation can use your brand.");
   }
@@ -609,6 +671,13 @@ export async function runManusRecreation(
   );
   const targetIcp = resolved?.target ?? null;
   const icp = resolved ? { stage: resolved.record.stage, content: resolved.record } : null;
+
+  // A job's own website that is not the search's: its business is read now,
+  // before anything is stopped, written or sent (a failure builds nothing).
+  const business = options.businessUrl ? await businessForBuild(competitor, job, businessUrl) : null;
+  if (business && options.stillWanted && !(await options.stillWanted())) {
+    return (await getCompetitor(competitorId)) || competitor;
+  }
 
   // The content as it was when this build was asked for (the light page above is from then too).
   // Read before a running build is stopped: a failed read leaves that build alone.
@@ -626,7 +695,7 @@ export async function runManusRecreation(
 
   const signal = beginRun(competitorId);
   const input = {
-    ...briefInput(competitor, job, businessUrl, styleDirection, feedback, icp),
+    ...briefInput(competitor, job, businessUrl, styleDirection, feedback, icp, business),
     userAssets: assets.map((a) => ({ name: a.name, caption: a.caption })),
   };
   const existing = competitor.recreatedPage;
