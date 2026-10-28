@@ -77,3 +77,89 @@ test("splitItems keeps legacy items in recent when not archived", () => {
   assert.deepEqual(ids(out.recent), ["l"]);
   assert.deepEqual(ids(out.archived), ["m"]);
 });
+
+import { createPollScheduler, stopFailureMessage, STATE_PILL_CLASS } from "../src/lib/recreateHubState";
+
+function fakeTimers() {
+  const pending = new Map<number, () => void>();
+  let next = 1;
+  return {
+    pending,
+    setTimer: (fn: () => void) => {
+      pending.set(next, fn);
+      return next++;
+    },
+    clearTimer: (h: unknown) => {
+      pending.delete(h as number);
+    },
+    fireAll: async () => {
+      const fns = [...pending.values()];
+      pending.clear();
+      fns.forEach((f) => f());
+      await new Promise((r) => setImmediate(r));
+    },
+  };
+}
+
+test("scheduling twice leaves exactly one pending timer", () => {
+  const t = fakeTimers();
+  const s = createPollScheduler({ intervalFor: () => 1, run: async () => {}, ...t });
+  s.schedule();
+  s.schedule();
+  assert.equal(t.pending.size, 1);
+});
+
+test("a stopped scheduler never runs after stop()", async () => {
+  const t = fakeTimers();
+  let runs = 0;
+  const s = createPollScheduler({ intervalFor: () => 1, run: async () => void runs++, ...t });
+  s.schedule();
+  s.stop();
+  s.schedule();
+  await s.trigger();
+  await t.fireAll();
+  assert.equal(runs, 0);
+  assert.equal(t.pending.size, 0);
+});
+
+test("an event-triggered refresh while one is in flight does not create a second chain", async () => {
+  const t = fakeTimers();
+  const releases: Array<() => void> = [];
+  let runs = 0;
+  const s = createPollScheduler({
+    intervalFor: () => 1,
+    run: () => new Promise<void>((r) => (runs++, releases.push(r))),
+    ...t,
+  });
+  s.schedule();
+  const timerFn = [...t.pending.values()][0];
+  timerFn(); // timer-driven run now in flight (its handle is already cleared)
+  t.pending.clear();
+  const triggered = s.trigger(); // event while in flight
+  releases.forEach((r) => r());
+  await triggered;
+  await new Promise((r) => setImmediate(r));
+  assert.equal(runs, 2);
+  assert.equal(t.pending.size, 1);
+});
+
+test("a due run is skipped while paused", async () => {
+  const t = fakeTimers();
+  let runs = 0;
+  const s = createPollScheduler({ intervalFor: () => 1, run: async () => void runs++, paused: () => true, ...t });
+  s.schedule();
+  await t.fireAll();
+  assert.equal(runs, 0);
+  assert.equal(t.pending.size, 0);
+});
+
+test("stopFailureMessage uses the server reason, else a generic one", () => {
+  assert.equal(stopFailureMessage(409, " Already finished "), "Already finished");
+  assert.match(stopFailureMessage(500, ""), /Could not stop/);
+  assert.match(stopFailureMessage(null), /reach the server/);
+});
+
+test("every state has a pill class", () => {
+  assert.equal(STATE_PILL_CLASS.finished, "status-completed");
+  assert.equal(STATE_PILL_CLASS.stopped, "status-partial");
+});

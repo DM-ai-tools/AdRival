@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { splitItems } from "@/lib/recreateHubState";
+import { STATE_PILL_CLASS, splitItems } from "@/lib/recreateHubState";
 import type { RecreateListItem } from "@/lib/recreateList";
 import { stageNameText } from "@/lib/export/levelLabels";
 import { SlotCard } from "./SlotCard";
@@ -85,7 +85,7 @@ function VersionRow({ item }: { item: RecreateListItem }) {
       <div className="history-item-main">
         <div className="history-item-top">
           <strong className="history-keyword">{item.businessName || item.sourceName || "Recreated page"}</strong>
-          <span className={`status-pill status-${item.state === "legacy" ? "finished" : item.state}`}>
+          <span className={`status-pill ${STATE_PILL_CLASS[item.state]}`}>
             {STATE_LABEL[item.state]}
           </span>
         </div>
@@ -132,6 +132,11 @@ export function RecreateHub({ jobs }: { jobs: ReturnType<typeof useRecreateJobs>
   return (
     <div className="history-list-wrap">
       {jobs.error ? <p className="error-text">{jobs.error}</p> : null}
+      {jobs.stopError ? (
+        <p className="error-text" role="alert">
+          {jobs.stopError}
+        </p>
+      ) : null}
 
       <h3>Building now</h3>
       <ul className="history-list">
@@ -160,7 +165,7 @@ export function RecreateHub({ jobs }: { jobs: ReturnType<typeof useRecreateJobs>
                       <strong className="history-keyword">
                         {n + 1}. {item.businessName || item.sourceName || item.sourceUrl || "Queued page"}
                       </strong>
-                      <span className="status-pill status-queued">Queued</span>
+                      <span className={`status-pill ${STATE_PILL_CLASS.queued}`}>Queued</span>
                     </div>
                     {item.sourceUrl ? (
                       <div className="history-item-meta">

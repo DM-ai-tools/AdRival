@@ -3,10 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { RecreateListItem } from "@/lib/recreateList";
 import { RECREATE_CHANGED_EVENT } from "@/lib/recreateClient";
+import { createPollScheduler, stopFailureMessage } from "@/lib/recreateHubState";
 
 const BUSY_POLL_MS = 3000;
 const IDLE_POLL_MS = 15000;
 const DEFAULT_LIMIT = 3;
+const STOP_ERROR_MS = 6000;
 
 /**
  * The Recreate tab's list, kept live: polls every 3 s while a page is queued
@@ -20,6 +22,7 @@ export function useRecreateJobs(spaceId: string | null): {
   queued: number;
   loading: boolean;
   error: string | null;
+  stopError: string | null;
   refresh(): Promise<void>;
   stop(jobId: string): Promise<void>;
 } {
@@ -27,6 +30,7 @@ export function useRecreateJobs(spaceId: string | null): {
   const [limit, setLimit] = useState(DEFAULT_LIMIT);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [stopError, setStopError] = useState<string | null>(null);
   const requestId = useRef(0);
 
   const refresh = useCallback(async () => {
@@ -50,61 +54,61 @@ export function useRecreateJobs(spaceId: string | null): {
 
   const running = items.filter((i) => i.state === "running").length;
   const queued = items.filter((i) => i.state === "queued").length;
-  const busy = running + queued > 0;
+  const busyRef = useRef(false);
+  busyRef.current = running + queued > 0;
 
-  // A new space starts from an empty list.
+  // A new space starts from an empty list; responses still in flight for the old one are dropped.
   useEffect(() => {
+    requestId.current++;
     setItems([]);
     setError(null);
+    setStopError(null);
     setLoading(Boolean(spaceId));
   }, [spaceId]);
 
   useEffect(() => {
     if (!spaceId) return;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let cancelled = false;
-    const schedule = () => {
-      if (cancelled || document.hidden) return;
-      timer = setTimeout(async () => {
-        await refresh();
-        schedule();
-      }, busy ? BUSY_POLL_MS : IDLE_POLL_MS);
-    };
-    const clear = () => {
-      if (timer) clearTimeout(timer);
-      timer = null;
-    };
+    const scheduler = createPollScheduler({
+      intervalFor: () => (busyRef.current ? BUSY_POLL_MS : IDLE_POLL_MS),
+      run: refresh,
+      paused: () => document.hidden,
+    });
     const onVisibility = () => {
-      clear();
-      if (document.hidden) return;
-      void refresh().then(schedule);
+      if (!document.hidden) void scheduler.trigger();
     };
-    const onChanged = () => {
-      clear();
-      void refresh().then(schedule);
-    };
-    void refresh().then(schedule);
+    const onChanged = () => void scheduler.trigger();
+    void scheduler.trigger();
     document.addEventListener("visibilitychange", onVisibility);
     window.addEventListener(RECREATE_CHANGED_EVENT, onChanged);
     return () => {
-      cancelled = true;
-      clear();
+      scheduler.stop();
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener(RECREATE_CHANGED_EVENT, onChanged);
     };
-  }, [spaceId, busy, refresh]);
+  }, [spaceId, refresh]);
+
+  useEffect(() => {
+    if (!stopError) return;
+    const timer = setTimeout(() => setStopError(null), STOP_ERROR_MS);
+    return () => clearTimeout(timer);
+  }, [stopError]);
 
   const stop = useCallback(
     async (jobId: string) => {
-      const res = await fetch(`/api/recreate/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setError(data.error || "Could not stop this page.");
+      setStopError(null);
+      try {
+        const res = await fetch(`/api/recreate/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" });
+        if (!res.ok) {
+          const data = (await res.json().catch(() => ({}))) as { error?: string };
+          setStopError(stopFailureMessage(res.status, data.error));
+        }
+      } catch {
+        setStopError(stopFailureMessage(null));
       }
       await refresh();
     },
     [refresh],
   );
 
-  return { items, limit, running, queued, loading, error, refresh, stop };
+  return { items, limit, running, queued, loading, error, stopError, refresh, stop };
 }
