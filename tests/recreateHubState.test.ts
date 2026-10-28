@@ -3,15 +3,23 @@ import { test } from "node:test";
 import type { RecreateListItem } from "../src/lib/recreateList";
 import { splitItems } from "../src/lib/recreateHubState";
 
-function item(id: string, state: RecreateListItem["state"], createdAt: string, archived = false): RecreateListItem {
+function item(
+  id: string,
+  state: RecreateListItem["state"],
+  createdAt: string,
+  archived = false,
+  extra: Partial<RecreateListItem> = {},
+): RecreateListItem {
   return {
     id,
     competitorId: id,
-    jobId: state === "legacy" ? null : id,
+    jobId: id,
+    sourceId: id,
     state,
     sourceUrl: "https://example.com",
     sourceName: "",
     businessName: null,
+    businessUrl: null,
     keyword: null,
     styleDirection: null,
     targetIcp: null,
@@ -24,6 +32,7 @@ function item(id: string, state: RecreateListItem["state"], createdAt: string, a
     hasPage: false,
     openPath: `/recreate/${id}`,
     error: null,
+    ...extra,
   };
 }
 
@@ -72,8 +81,11 @@ test("splitItems moves archived items to archived", () => {
   assert.deepEqual(ids(out.recent), ["b"]);
 });
 
-test("splitItems keeps legacy items in recent when not archived", () => {
-  const out = splitItems([item("l", "legacy", "2026-10-20T00:00:00Z"), item("m", "legacy", "2026-08-01T00:00:00Z", true)]);
+test("splitItems keeps old pages (no job) in recent when not archived", () => {
+  const out = splitItems([
+    item("l", "finished", "2026-10-20T00:00:00Z", false, { jobId: null }),
+    item("m", "failed", "2026-08-01T00:00:00Z", true, { jobId: null }),
+  ]);
   assert.deepEqual(ids(out.recent), ["l"]);
   assert.deepEqual(ids(out.archived), ["m"]);
 });
@@ -162,4 +174,41 @@ test("stopFailureMessage uses the server reason, else a generic one", () => {
 test("every state has a pill class", () => {
   assert.equal(STATE_PILL_CLASS.finished, "status-completed");
   assert.equal(STATE_PILL_CLASS.stopped, "status-partial");
+});
+
+import { filterBySource, sourceFilterName } from "../src/lib/recreateHubState";
+
+test("filterBySource keeps the versions of one page (and the page itself), or everything with no filter", () => {
+  const items = [
+    item("j1", "finished", "2026-10-01T00:00:00Z", false, { competitorId: "rv-1", sourceId: "src-a" }),
+    item("j2", "failed", "2026-10-02T00:00:00Z", false, { competitorId: "rv-2", sourceId: "src-b" }),
+    item("src-a", "finished", "2026-09-01T00:00:00Z", false, { jobId: null, competitorId: "src-a", sourceId: "src-a" }),
+    item("j3", "stopped", "2026-10-03T00:00:00Z", false, { competitorId: "rv-3", sourceId: "src-a" }),
+  ];
+  assert.deepEqual(ids(filterBySource(items, "src-a")), ["j1", "src-a", "j3"]);
+  assert.deepEqual(ids(filterBySource(items, "rv-2")), ["j2"], "a link to one version finds it");
+  assert.deepEqual(ids(filterBySource(items, null)), ["j1", "j2", "src-a", "j3"]);
+  assert.deepEqual(ids(filterBySource(items, "  ")), ["j1", "j2", "src-a", "j3"]);
+  assert.deepEqual(filterBySource(items, "nothing-matches"), []);
+});
+
+test("sourceFilterName names the page from its versions, else a generic name", () => {
+  const items = [
+    item("j1", "finished", "2026-10-01T00:00:00Z", false, { sourceId: "src-a", sourceName: "", sourceUrl: "https://rival.invalid/a" }),
+    item("j2", "finished", "2026-10-02T00:00:00Z", false, { sourceId: "src-a", sourceName: "Rival Clinic" }),
+  ];
+  assert.equal(sourceFilterName(items, "src-a"), "Rival Clinic");
+  assert.equal(sourceFilterName([items[0]], "src-a"), "https://rival.invalid/a");
+  assert.equal(sourceFilterName(items, "missing"), "this page");
+});
+
+import { hubOpenHref } from "../src/lib/recreateHubState";
+import { returnLabel } from "../src/lib/returnTo";
+
+test("a page opened from the Recreate tab links back to it", () => {
+  const href = hubOpenHref("/recreate/rv-1");
+  assert.equal(href, "/recreate/rv-1?back=%2F%3Fmode%3Drecreate");
+  const back = new URLSearchParams(href.split("?")[1]).get("back");
+  assert.equal(back, "/?mode=recreate");
+  assert.equal(returnLabel(back!), "Recreate");
 });

@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { STATE_PILL_CLASS, splitItems } from "@/lib/recreateHubState";
+import { STATE_PILL_CLASS, filterBySource, hubOpenHref, sourceFilterName, splitItems } from "@/lib/recreateHubState";
 import type { RecreateListItem } from "@/lib/recreateList";
 import { stageNameText } from "@/lib/export/levelLabels";
+import { styleLabel } from "@/lib/recreateClient";
 import { SlotCard } from "./SlotCard";
 import type { useRecreateJobs } from "./useRecreateJobs";
 
@@ -22,12 +23,21 @@ const STATE_LABEL: Record<RecreateListItem["state"], string> = {
   finished: "Finished",
   failed: "Failed",
   stopped: "Stopped",
-  legacy: "Finished",
 };
+
+/** A website as a short label: host and path, no scheme or trailing slash. */
+function shortUrl(url: string): string {
+  return url.replace(/^https?:\/\//i, "").replace(/^www\./i, "").replace(/\/$/, "");
+}
 
 type PreviewState = { kind: "loading" } | { kind: "error"; message: string } | { kind: "ready"; html: string };
 
-/** The page's HTML, fetched when the row is expanded. Scripts and navigation stay blocked (empty sandbox). */
+/**
+ * The page's HTML, fetched when the row is expanded. Its scripts run (pages
+ * built with JavaScript would show blank otherwise) in an opaque origin: no
+ * allow-same-origin, so they cannot reach this app's cookies or storage, and
+ * no popups, forms or top navigation.
+ */
 function Preview({ competitorId }: { competitorId: string }) {
   const [state, setState] = useState<PreviewState>({ kind: "loading" });
 
@@ -71,7 +81,7 @@ function Preview({ competitorId }: { competitorId: string }) {
     <iframe
       title="Recreated page preview"
       srcDoc={state.html}
-      sandbox=""
+      sandbox="allow-scripts"
       style={{ width: "100%", height: 480, border: "1px solid var(--line)", borderRadius: 8, background: "#fff" }}
     />
   );
@@ -79,7 +89,7 @@ function Preview({ competitorId }: { competitorId: string }) {
 
 function VersionRow({ item }: { item: RecreateListItem }) {
   const [open, setOpen] = useState(false);
-  const stage = item.targetIcp ? stageNameText(item.targetIcp.stage) : "";
+  const stage = item.targetIcp ? stageNameText(item.targetIcp.stage) || item.targetIcp.stage : "";
   return (
     <li className="history-item">
       <div className="history-item-main">
@@ -90,10 +100,13 @@ function VersionRow({ item }: { item: RecreateListItem }) {
           </span>
         </div>
         <div className="history-item-meta">
+          {item.businessUrl ? <span title={item.businessUrl}>For {shortUrl(item.businessUrl)}</span> : null}
           {item.sourceUrl ? <span>{item.sourceUrl}</span> : null}
-          {item.keyword ? <span>{item.keyword}</span> : null}
-          {item.styleDirection ? <span>{item.styleDirection}</span> : null}
-          {stage ? <span>{stage}</span> : null}
+        </div>
+        <div className="history-item-meta">
+          <span>Keyword: {item.keyword || "—"}</span>
+          <span>Look: {styleLabel(item.styleDirection) || "—"}</span>
+          <span>Audience stage: {stage || "—"}</span>
           <span>{formatDate(item.createdAt)}</span>
         </div>
         {item.error && (item.state === "failed" || item.state === "stopped") ? (
@@ -107,7 +120,7 @@ function VersionRow({ item }: { item: RecreateListItem }) {
             {open ? "Hide preview" : "Preview"}
           </button>
         ) : null}
-        <Link href={item.openPath} className="chip-btn">
+        <Link href={hubOpenHref(item.openPath)} className="chip-btn">
           Open
         </Link>
       </div>
@@ -115,8 +128,19 @@ function VersionRow({ item }: { item: RecreateListItem }) {
   );
 }
 
-/** The Recreate tab: slots for pages being built, the queue, and the versions made. */
-export function RecreateHub({ jobs }: { jobs: ReturnType<typeof useRecreateJobs> }) {
+/**
+ * The Recreate tab: slots for pages being built, the queue, and the versions
+ * made. `sourceFilter` (?page=) narrows the versions to one source page's.
+ */
+export function RecreateHub({
+  jobs,
+  sourceFilter = null,
+  onClearSourceFilter,
+}: {
+  jobs: ReturnType<typeof useRecreateJobs>;
+  sourceFilter?: string | null;
+  onClearSourceFilter?: () => void;
+}) {
   const [showArchived, setShowArchived] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
   const { slots, queue, recent, archived } = useMemo(() => splitItems(jobs.items), [jobs.items]);
@@ -127,7 +151,7 @@ export function RecreateHub({ jobs }: { jobs: ReturnType<typeof useRecreateJobs>
 
   // Extra running items (e.g. from the old route) stay visible, so slots can pass the limit.
   const emptySlots = Math.max(0, jobs.limit - slots.length);
-  const versions = showArchived ? archived : recent;
+  const versions = filterBySource(showArchived ? archived : recent, sourceFilter);
 
   return (
     <div className="history-list-wrap">
@@ -208,8 +232,26 @@ export function RecreateHub({ jobs }: { jobs: ReturnType<typeof useRecreateJobs>
           </button>
         </div>
       </div>
+      {sourceFilter ? (
+        <p className="history-item-meta" role="status">
+          <span>Showing versions of {sourceFilterName(jobs.items, sourceFilter)}</span>
+          {onClearSourceFilter ? (
+            <button type="button" className="chip-btn" onClick={onClearSourceFilter}>
+              Show all
+            </button>
+          ) : null}
+        </p>
+      ) : null}
       {versions.length === 0 ? (
-        <p className="empty-hint">{showArchived ? "No archived pages." : "No recreated pages yet."}</p>
+        <p className="empty-hint">
+          {sourceFilter
+            ? showArchived
+              ? "No archived versions of this page."
+              : "No versions of this page here yet. Pages still building or queued are shown above."
+            : showArchived
+              ? "No archived pages."
+              : "No recreated pages yet."}
+        </p>
       ) : (
         <ul className="history-list">
           {versions.map((item) => (

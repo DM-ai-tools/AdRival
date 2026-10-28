@@ -525,6 +525,8 @@ type LandingPageRecord = {
   pageName: string;
   analysis: LandingPageOfferAnalysis | null;
   recreatedStatus: string | null;
+  /** Recreations of this page (versions, or an old recreated page). */
+  versionCount?: number;
 };
 type DashSection = (typeof DASH_SECTIONS)[number];
 
@@ -1118,17 +1120,19 @@ export function SearchOffersDashboard({
 
                   {(() => {
                     const record = lpRecords[selectedPage.matchKey] || null;
+                    const versionCount = record?.versionCount ?? (record?.recreatedStatus ? 1 : 0);
                     const analysed = record?.analysis?.status === "completed";
                     const busy = lpBusy === selectedPage.matchKey;
                     return (
                       <div className="offers-lp-recreate">
                         <div className="offers-lp-actions">
-                          {canRunLp || record?.recreatedStatus ? (
+                          {canRunLp || versionCount > 0 ? (
                             // Adding analyses the page first when it has not been analysed (uses credits).
                             <AddToRecreateButton
                               source={{ runId: job.id, url: selectedPage.url }}
                               signals={pageSignals(selectedPageRawAds)}
-                              versionCount={record?.recreatedStatus ? 1 : 0}
+                              versionCount={versionCount}
+                              sourceId={record?.competitorId ?? null}
                               defaults={defaultDetails(job)}
                               disabled={!canRunLp || Boolean(lpBusy)}
                               disabledReason={canRunLp ? undefined : "View-only access"}

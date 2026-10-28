@@ -22,6 +22,18 @@ export const STYLE_OPTIONS: ReadonlyArray<{ id: StyleDirection; label: string; h
   { id: "brutalist", label: "Bold / brutalist", hint: "Square corners, solid rules, heavy headlines." },
 ];
 
+/** A look's name as the popup shows it; an unknown id is kept as is. */
+export function styleLabel(id: string | null | undefined): string | null {
+  if (!id) return null;
+  return STYLE_OPTIONS.find((o) => o.id === id)?.label ?? id;
+}
+
+/** The Recreate tab showing one source page's versions (all of them with no page). */
+export function versionsHref(sourceId: string | null | undefined): string {
+  const id = (sourceId ?? "").trim();
+  return id ? `/?mode=recreate&page=${encodeURIComponent(id)}` : "/?mode=recreate";
+}
+
 /** Dispatched on `window` after a page is added, so lists of recreations can refresh. */
 export const RECREATE_CHANGED_EVENT = "adrival:recreate-changed";
 
@@ -113,7 +125,7 @@ function announceChange(): void {
 export async function enqueueRecreation(
   body: EnqueueBody,
   fetchImpl: typeof fetch = (...args) => globalThis.fetch(...args),
-): Promise<{ job: RecreateJobDto; queuedAhead: number }> {
+): Promise<{ job: RecreateJobDto; queuedAhead: number; sourceId: string | null }> {
   const res = await fetchImpl("/api/recreate/jobs", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -127,7 +139,37 @@ export async function enqueueRecreation(
   }
   const queuedAhead = Number(data.queuedAhead);
   announceChange();
-  return { job, queuedAhead: Number.isFinite(queuedAhead) && queuedAhead > 0 ? queuedAhead : 0 };
+  return {
+    job,
+    queuedAhead: Number.isFinite(queuedAhead) && queuedAhead > 0 ? queuedAhead : 0,
+    // The page the version was made from (its versions are listed under it).
+    sourceId: text(data.sourceId),
+  };
+}
+
+/**
+ * How many recreations each source page of a search (or of a lookup) has, by
+ * source record id: one request for the whole list. A failure counts nothing.
+ */
+export async function fetchVersionCounts(
+  of: { runId: string } | { lookupId: string },
+  fetchImpl: typeof fetch = (...args) => globalThis.fetch(...args),
+): Promise<Record<string, number>> {
+  const query = "runId" in of ? `runId=${encodeURIComponent(of.runId)}` : `lookupId=${encodeURIComponent(of.lookupId)}`;
+  try {
+    const res = await fetchImpl(`/api/recreate/versions?${query}`, { cache: "no-store" });
+    if (!res.ok) return {};
+    const counts = (await readJson(res)).counts;
+    const out: Record<string, number> = {};
+    if (counts && typeof counts === "object") {
+      for (const [id, n] of Object.entries(counts as Record<string, unknown>)) {
+        if (typeof n === "number" && Number.isFinite(n) && n > 0) out[id] = n;
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
 }
 
 /** What the button says once a page is added: from the job's own status (queuedAhead is 0 for both). */

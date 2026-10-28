@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import type { RecreateListItem } from "@/lib/recreateList";
 import { formatSignal } from "@/lib/recreateSignals";
+import { hubOpenHref } from "@/lib/recreateHubState";
 
 /** One of the Recreate tab's slots: a page being built, or an empty slot. */
 export function SlotCard({
@@ -57,7 +58,7 @@ export function SlotCard({
         </div>
       </div>
       <div className="history-actions">
-        <Link href={item.openPath} className="chip-btn">
+        <Link href={hubOpenHref(item.openPath)} className="chip-btn">
           Open
         </Link>
         {jobId && onStop ? (

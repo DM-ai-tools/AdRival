@@ -5,8 +5,8 @@ import type { CompetitorRecord, RecreatedPageLight } from "./types";
 /*
  * The Recreate tab's list: the user's queue jobs merged with their recreated
  * pages. A job's page is its version record (made when the job was added);
- * a page with no job is "legacy" (recreated before the queue existed), or a
- * version whose job is another user's (it follows its page). Only
+ * a page with no job is an old page (recreated before the queue existed), or a
+ * version whose job is another user's: either follows its page's status. Only
  * fields chosen here reach the browser: never the design agent's task state,
  * the Undo copy or other stored internals.
  */
@@ -15,16 +15,20 @@ import type { CompetitorRecord, RecreatedPageLight } from "./types";
 export const ARCHIVE_AFTER_DAYS = 14;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-export type RecreateListState = RecreateJobStatus | "legacy";
+export type RecreateListState = RecreateJobStatus;
 
 export interface RecreateListItem {
   id: string;
   competitorId: string;
   jobId: string | null;
+  /** The page this is a version of (an old page is its own source). */
+  sourceId: string;
   state: RecreateListState;
   sourceUrl: string;
   sourceName: string;
   businessName: string | null;
+  /** The website the page was built (or is queued to be built) for. */
+  businessUrl: string | null;
   keyword: string | null;
   styleDirection: string | null;
   targetIcp: { icpId: string; stage: string } | null;
@@ -123,6 +127,11 @@ function textOrNull(value: string | null | undefined): string | null {
   return text || null;
 }
 
+/** The page a record is a version of; a record that is no version is its own source. */
+function sourceIdOf(record: CompetitorRecord | undefined, competitorId: string): string {
+  return record?.recreateOnly?.variantOf || competitorId;
+}
+
 function openPath(competitorId: string): string {
   return `/recreate/${encodeURIComponent(competitorId)}`;
 }
@@ -133,11 +142,13 @@ function jobItem(job: RecreateJob, record: CompetitorRecord | undefined, run: Re
     id: job.id,
     competitorId: job.competitorId,
     jobId: job.id,
+    sourceId: sourceIdOf(record, job.competitorId),
     state: job.status,
     sourceUrl: sourceUrlOf(record),
     sourceName: page?.sourceCompetitorName || record?.pageName || "",
     // The page records what it was built for; before it exists, the run's details.
     businessName: textOrNull(page?.businessName) ?? textOrNull(run?.businessName),
+    businessUrl: textOrNull(job.options.businessUrl) ?? textOrNull(page?.businessUrl),
     keyword: textOrNull(page?.keyword) ?? textOrNull(run?.keyword),
     styleDirection: job.options.styleDirection ?? page?.styleDirection ?? null,
     targetIcp: job.options.targetIcp ?? page?.targetIcp ?? null,
@@ -153,15 +164,34 @@ function jobItem(job: RecreateJob, record: CompetitorRecord | undefined, run: Re
   };
 }
 
+/** An old page still marked building after this long was cut off: nothing will finish it. */
+const OLD_BUILD_STALE_MS = DAY_MS;
+const OLD_BUILD_STALE_ERROR = "This build stopped before it finished.";
+
+function isOldPage(record: CompetitorRecord): boolean {
+  return !record.recreateOnly?.variantOf;
+}
+
+/** An old page left building by the old route long ago (see OLD_BUILD_STALE_MS). */
+function isStaleOldBuild(record: CompetitorRecord, page: RecreatedPageLight, now: Date): boolean {
+  if (!isOldPage(record) || !isBuilding(page)) return false;
+  const at = Date.parse(page.updatedAt || page.createdAt || "");
+  return Number.isFinite(at) && now.getTime() - at > OLD_BUILD_STALE_MS;
+}
+
 /**
- * How a page with no job in the user's list stands: a version (made for a
- * job, e.g. another member's on this user's run) follows its page like a job
- * would; any other record is a page recreated before the queue existed.
+ * How a page with no job in the user's list stands, from its page: a version
+ * (made for a job, e.g. another member's on this user's run) and a page
+ * recreated before the queue existed both follow their page's status. An old
+ * page with content but no design (the old route's "content ready") counts as
+ * finished.
  */
-function pageState(record: CompetitorRecord, page: RecreatedPageLight): RecreateListState {
-  if (!record.recreateOnly?.variantOf) return "legacy";
+function pageState(record: CompetitorRecord, page: RecreatedPageLight, now: Date): RecreateListState {
+  if (isStaleOldBuild(record, page, now)) return "failed";
   if (isBuilding(page)) return "running";
-  return page.status === "completed" && !page.error ? "finished" : "failed";
+  if (page.error) return "failed";
+  if (page.status === "completed") return "finished";
+  return isOldPage(record) && page.status === "content_ready" ? "finished" : "failed";
 }
 
 /**
@@ -169,20 +199,23 @@ function pageState(record: CompetitorRecord, page: RecreatedPageLight): Recreate
  * when it settled (completed or failed), from its last update.
  */
 function pageItem(record: CompetitorRecord, page: RecreatedPageLight, now: Date): RecreateListItem {
-  const settled = page.status === "completed" || page.status === "failed";
-  const finishedAt = settled ? page.updatedAt || page.createdAt || null : null;
+  const state = pageState(record, page, now);
+  const finishedAt = state === "running" ? null : page.updatedAt || page.createdAt || null;
+  const stale = isStaleOldBuild(record, page, now);
   return {
     id: record.id,
     competitorId: record.id,
     jobId: null,
-    state: pageState(record, page),
+    sourceId: sourceIdOf(record, record.id),
+    state,
     sourceUrl: sourceUrlOf(record),
     sourceName: page.sourceCompetitorName || record.pageName || "",
     businessName: textOrNull(page.businessName),
+    businessUrl: textOrNull(page.businessUrl),
     keyword: textOrNull(page.keyword),
     styleDirection: page.styleDirection ?? null,
     targetIcp: page.targetIcp ?? null,
-    progress: progressOf(page),
+    progress: state === "running" ? progressOf(page) : null,
     daysRunning: daysRunningOf(record),
     activeAds: activeAdsOf(record),
     createdAt: page.createdAt || record.createdAt,
@@ -190,7 +223,7 @@ function pageItem(record: CompetitorRecord, page: RecreatedPageLight, now: Date)
     archived: isArchived(finishedAt, now),
     hasPage: Boolean(page.hasPage),
     openPath: openPath(record.id),
-    error: maskClientFacingText(page.error),
+    error: stale ? OLD_BUILD_STALE_ERROR : maskClientFacingText(page.error),
   };
 }
 

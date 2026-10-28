@@ -226,7 +226,15 @@ export async function POST(request: Request) {
     );
     const job = await getRecreateJob(jobId);
     if (!job) return json({ error: "The recreation could not be added." }, 500);
-    return json({ job: toJobDto(job), queuedAhead: job.status === "queued" ? await countQueuedAhead(job.id) : 0 }, 202);
+    return json(
+      {
+        job: toJobDto(job),
+        queuedAhead: job.status === "queued" ? await countQueuedAhead(job.id) : 0,
+        // The page the version was made from, for its "View versions" link.
+        sourceId: source.id,
+      },
+      202,
+    );
   } catch (err) {
     if (isCreditError(err)) {
       return json({ error: (err as Error).message, code: (err as { code?: string }).code }, 402);

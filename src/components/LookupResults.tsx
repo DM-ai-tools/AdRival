@@ -14,6 +14,7 @@ import {
   LookupOffersTeaser,
 } from "@/components/LookupOffersReportPanel";
 import { AddToRecreateButton } from "@/components/recreate/AddToRecreateButton";
+import { useVersionCounts } from "@/components/recreate/useVersionCounts";
 import { readUrlParam, writeUrlParams } from "@/lib/urlState";
 import { externalUrl } from "@/lib/externalUrl";
 import { defaultDetails } from "@/lib/recreateClient";
@@ -68,12 +69,15 @@ function AdCard({
   ad,
   platform,
   job,
+  versionCount,
   onAdUpdated,
   onJobUpdated,
 }: {
   ad: LookupAdRecord;
   platform: AdPlatform;
   job: LookupJob;
+  /** Recreations of this ad's page (see useVersionCounts). */
+  versionCount: number;
   onAdUpdated?: (ad: LookupAdRecord) => void;
   onJobUpdated?: (job: LookupJob) => void;
 }) {
@@ -315,7 +319,8 @@ function AdCard({
               daysRunning: typeof ad.daysRunning === "number" && ad.daysRunning >= 0 ? ad.daysRunning : null,
               activeAds: null,
             }}
-            versionCount={ad.recreationCompetitorId ? 1 : 0}
+            versionCount={versionCount}
+            sourceId={ad.recreationCompetitorId ?? null}
             defaults={defaultDetails(job)}
             className="search-btn lp-recreate-link"
             onLookupBridged={({ lookupJob, ad: bridgedAd }) => {
@@ -365,6 +370,8 @@ export function LookupResults({
   const analyzingOffers = job.progress.stage === "analyzing_offers";
   const platform = (job.platform || "facebook") as AdPlatform;
   const [regeneratingReport, setRegeneratingReport] = useState(false);
+  // Recreations of each ad's page, read once for the lookup (not per ad).
+  const versionCounts = useVersionCounts(job.id ? { lookupId: job.id } : null);
   const [reportError, setReportError] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
   const [showOffersDash, setShowOffersDash] = useState(false);
@@ -790,6 +797,7 @@ export function LookupResults({
                 ad={ad}
                 platform={platform}
                 job={job}
+                versionCount={ad.recreationCompetitorId ? (versionCounts[ad.recreationCompetitorId] ?? 0) : 0}
                 onAdUpdated={onAdUpdated}
                 onJobUpdated={(next) => onJobUpdated?.(next)}
               />

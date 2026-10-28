@@ -109,7 +109,7 @@ test("isArchived uses the finish date, not the creation date", () => {
   assert.equal(byId.get("j-queued-long")?.archived, false, "a queued job is never archived");
 });
 
-test('legacy source records with a recreatedPage appear as legacy items with "—" fields', () => {
+test('old source records with a recreatedPage appear as finished items with "—" fields', () => {
   // A competitor recreated before versions existed: the page lives on the source record itself.
   const legacy = record("c-legacy", {
     activeAdsCount: 0,
@@ -128,8 +128,10 @@ test('legacy source records with a recreatedPage appear as legacy items with "�
   const items = buildRecreateList({ jobs: [], records: [legacy], now: NOW });
   assert.equal(items.length, 1);
   const item = items[0];
-  assert.equal(item.state, "legacy");
+  assert.equal(item.state, "finished", "an old page shows by its own status");
   assert.equal(item.id, "c-legacy");
+  assert.equal(item.sourceId, "c-legacy", "an old page is its own source");
+  assert.equal(item.businessUrl, "https://client.invalid");
   assert.equal(item.competitorId, "c-legacy");
   assert.equal(item.jobId, null, "no queue job: nothing to stop");
   assert.equal(item.businessName, null);
@@ -253,6 +255,54 @@ test("a real count of 0 active ads stays 0; it is unknown only on a page never a
     [
       ["j-zero", 0],
       ["j-unknown", null],
+    ],
+  );
+});
+
+test("old pages show running, failed or finished by their page status, with the error when failed", () => {
+  const building = record("c-building", {
+    recreatedPage: page({ status: "design_pending", createdAt: daysAgo(0.2), updatedAt: daysAgo(0.1), hasPage: false }),
+  });
+  const broke = record("c-broke", {
+    recreatedPage: page({ status: "failed", createdAt: daysAgo(1), updatedAt: daysAgo(1), error: "agent broke" }),
+  });
+  const content = record("c-content", { recreatedPage: page({ status: "content_ready", createdAt: daysAgo(2), updatedAt: daysAgo(2) }) });
+  // Left building by the old route long ago: nothing will finish it.
+  const stuck = record("c-stuck", {
+    recreatedPage: page({ status: "pending", createdAt: daysAgo(5), updatedAt: daysAgo(5), hasPage: false }),
+  });
+  const items = buildRecreateList({ jobs: [], records: [building, broke, content, stuck], now: NOW });
+  assert.deepEqual(
+    items.map((i) => [i.id, i.state, i.jobId, i.error]),
+    [
+      ["c-building", "running", null, null],
+      ["c-broke", "failed", null, "agent broke"],
+      ["c-content", "finished", null, null],
+      ["c-stuck", "failed", null, "This build stopped before it finished."],
+    ],
+  );
+  assert.equal(items[0].finishedAt, null);
+  assert.equal(items[1].finishedAt, daysAgo(1));
+});
+
+test("every item says which page it is a version of and which website it was built for", () => {
+  const items = buildRecreateList({
+    jobs: [
+      job("j-other-site", "rv-1", {
+        options: { businessUrl: "https://other-client.invalid", styleDirection: null, userFeedback: null, targetIcp: null },
+      }),
+    ],
+    records: [
+      version("rv-1"),
+      version("rv-2", { recreatedPage: page({ businessUrl: "https://page-site.invalid", createdAt: daysAgo(3) }) }),
+    ],
+    now: NOW,
+  });
+  assert.deepEqual(
+    items.map((i) => [i.id, i.sourceId, i.businessUrl]),
+    [
+      ["j-other-site", "src-1", "https://other-client.invalid"],
+      ["rv-2", "src-1", "https://page-site.invalid"],
     ],
   );
 });

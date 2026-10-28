@@ -200,3 +200,43 @@ test("a success without a job is an error, not a silent pass", async () => {
   const err = await errorOf(202, { queuedAhead: 0 });
   assert.equal(err.message, "The page could not be added to Recreate. Try again.");
 });
+
+import { fetchVersionCounts, styleLabel, versionsHref } from "../src/lib/recreateClient";
+
+test("enqueueRecreation hands back the page the version was made from", async () => {
+  const out = await enqueueRecreation({ jobId: "run-1", url: "https://rival.invalid" }, fakeFetch(202, { job: JOB, queuedAhead: 0, sourceId: "lp-1" }));
+  assert.equal(out.sourceId, "lp-1");
+  const none = await enqueueRecreation({ competitorId: "c-1" }, fakeFetch(202, { job: JOB, queuedAhead: 0 }));
+  assert.equal(none.sourceId, null);
+});
+
+test("versionsHref opens the Recreate tab on one page's versions", () => {
+  assert.equal(versionsHref("c 1/x"), "/?mode=recreate&page=c%201%2Fx");
+  assert.equal(versionsHref(null), "/?mode=recreate");
+  assert.equal(versionsHref("  "), "/?mode=recreate");
+});
+
+test("styleLabel names a look as the popup does", () => {
+  assert.equal(styleLabel("soft"), "High-end soft");
+  assert.equal(styleLabel("brand"), "Match the brand");
+  assert.equal(styleLabel(null), null);
+  assert.equal(styleLabel("retro"), "retro", "an unknown look keeps its id");
+});
+
+test("fetchVersionCounts asks once for a run's (or a lookup's) counts by source page", async () => {
+  const calls: FakeCall[] = [];
+  const counts = await fetchVersionCounts(
+    { runId: "run 1" },
+    fakeFetch(200, { counts: { "c-1": 2, "c-2": "x", "c-3": -1, "c-4": 1 } }, calls),
+  );
+  assert.deepEqual(counts, { "c-1": 2, "c-4": 1 });
+  assert.equal(calls[0].url, "/api/recreate/versions?runId=run%201");
+  const lookupCalls: FakeCall[] = [];
+  await fetchVersionCounts({ lookupId: "lk-1" }, fakeFetch(200, { counts: {} }, lookupCalls));
+  assert.equal(lookupCalls[0].url, "/api/recreate/versions?lookupId=lk-1");
+  assert.deepEqual(await fetchVersionCounts({ runId: "r" }, fakeFetch(404, { error: "no" })), {}, "a failure counts nothing");
+  const broken = (async () => {
+    throw new Error("offline");
+  }) as unknown as typeof fetch;
+  assert.deepEqual(await fetchVersionCounts({ runId: "r" }, broken), {});
+});

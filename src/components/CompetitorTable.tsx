@@ -13,6 +13,7 @@ import {
 } from "@/lib/pipeline/linkGuards";
 import { PageAnalysisPanel } from "@/components/PageAnalysisPanel";
 import { AddToRecreateButton } from "@/components/recreate/AddToRecreateButton";
+import { useVersionCounts } from "@/components/recreate/useVersionCounts";
 import { externalUrl } from "@/lib/externalUrl";
 import type { RecreateDetails } from "@/lib/recreateClient";
 
@@ -202,6 +203,8 @@ export function CompetitorTable({
   const [locationNote, setLocationNote] = useState<string | null>(null);
 
   const resolvedRunId = runId || competitors[0]?.runId || null;
+  // Recreations of each competitor's page (versions, or an old page), read once for the run.
+  const versionCounts = useVersionCounts(resolvedRunId ? { runId: resolvedRunId } : null);
 
   async function refreshOneLocation(competitorId: string) {
     setLocationError(null);
@@ -621,7 +624,7 @@ export function CompetitorTable({
                               typeof ad.daysRunning === "number" && ad.daysRunning >= 0 ? ad.daysRunning : null,
                             activeAds: c.activeAdsCount,
                           }}
-                          versionCount={c.recreatedPage ? 1 : 0}
+                          versionCount={versionCounts[c.id] ?? 0}
                           defaults={recreateDefaults}
                         />
                       )}

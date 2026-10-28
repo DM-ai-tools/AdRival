@@ -142,6 +142,25 @@ export function listRecreationsForUser(userId: string, spaceId: string | null): 
   );
 }
 
+/**
+ * How many recreations each source page of a run has, in one grouped read:
+ * versions count under the page they were made from (`recreateOnly.variantOf`),
+ * and a record that holds a page itself (recreated before versions) counts as
+ * one of its own. Pages with none are left out.
+ */
+export async function getRecreationVersionCounts(runId: string): Promise<Record<string, number>> {
+  const { rows } = await getDb().query<{ source_id: string; n: number }>(
+    `select coalesce(nullif(data->'recreateOnly'->>'variantOf', ''), id) as source_id, count(*)::int as n
+       from competitors
+      where run_id = $1
+        and (coalesce(data->'recreateOnly'->>'variantOf', '') <> ''
+             or coalesce(data->'recreatedPage', 'null'::jsonb) <> 'null'::jsonb)
+      group by 1`,
+    [runId],
+  );
+  return Object.fromEntries(rows.map((r) => [r.source_id, Number(r.n)]));
+}
+
 /** One competitor, with its light page (content via getRecreatedPage). */
 export function getCompetitor(id: string): Promise<CompetitorRecord | null> {
   return storedCompetitor(getDb(), id, false);

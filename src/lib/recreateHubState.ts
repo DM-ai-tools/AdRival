@@ -1,4 +1,5 @@
 import type { RecreateListItem } from "./recreateList";
+import { withReturn } from "./returnTo";
 
 /*
  * How the Recreate tab lays out its list. Pure: no React, no browser.
@@ -8,10 +9,11 @@ const time = (iso: string) => Date.parse(iso) || 0;
 
 /**
  * Running items fill the slots, oldest start first. The server runs at most
- * `limit` (normally 3) jobs, but a page being built by the old route shows as
- * running too: those stay visible, so slots can hold more than the limit
- * (the hub then shows no empty slot). Queued items wait oldest first; the rest
- * are recent (newest first), or archived once finished long enough ago.
+ * `limit` (normally 3) jobs, but a page still being built by the old route
+ * (an old page, listed from its page status) shows as running too: those stay
+ * visible, so slots can hold more than the limit (the hub then shows no empty
+ * slot). Queued items wait oldest first; the rest are recent (newest first),
+ * or archived once finished long enough ago.
  */
 export function splitItems(items: RecreateListItem[]): {
   slots: RecreateListItem[];
@@ -33,6 +35,30 @@ export function splitItems(items: RecreateListItem[]): {
   };
 }
 
+/** Where Back on a recreated page opened from the Recreate tab returns to. */
+export const HUB_RETURN_PATH = "/?mode=recreate";
+
+/** A page link from the Recreate tab (slot or version): Back on that page returns to the tab. */
+export function hubOpenHref(openPath: string): string {
+  return withReturn(openPath, HUB_RETURN_PATH);
+}
+
+/**
+ * The items of one source page (?page= on the Recreate tab): its versions and
+ * the page itself (an old page is its own source). No filter keeps them all.
+ */
+export function filterBySource(items: RecreateListItem[], sourceId: string | null | undefined): RecreateListItem[] {
+  const id = (sourceId ?? "").trim();
+  if (!id) return items;
+  return items.filter((i) => i.sourceId === id || i.competitorId === id);
+}
+
+/** The name the source filter shows ("Showing versions of …"). */
+export function sourceFilterName(items: RecreateListItem[], sourceId: string): string {
+  const mine = filterBySource(items, sourceId);
+  return mine.find((i) => i.sourceName)?.sourceName || mine.find((i) => i.sourceUrl)?.sourceUrl || "this page";
+}
+
 /** The message for a Stop/Remove that failed: the server's reason, else a generic one (status null: the request itself failed). */
 export function stopFailureMessage(status: number | null, serverMessage?: string | null): string {
   const reason = (serverMessage ?? "").trim();
@@ -45,7 +71,6 @@ export const STATE_PILL_CLASS: Record<RecreateListItem["state"], string> = {
   queued: "status-queued",
   running: "status-running",
   finished: "status-completed",
-  legacy: "status-completed",
   failed: "status-failed",
   stopped: "status-partial",
 };

@@ -305,9 +305,9 @@ test("GET is scoped to the requested space", async () => {
   assert.deepEqual(
     items.map((i) => i.id),
     [(plain.body.job as { id: string }).id, legacy.id],
-    "the space's job is left out; the legacy page is listed",
+    "the space's job is left out; the old page is listed",
   );
-  assert.equal(items[1].state, "legacy");
+  assert.equal(items[1].state, "finished", "an old page shows by its own status");
   assert.equal(items[0].daysRunning, 12);
   assert.equal(items[0].activeAds, 3);
   const text = JSON.stringify(noSpace.body);
@@ -497,4 +497,58 @@ test("an editor's recreation on the owner's run shows for the owner from its pag
     [[job.competitorId, null, "running"]],
     "not a legacy page; no job of the owner's to stop",
   );
+});
+
+const versionsRoute = await import("../src/app/api/recreate/versions/route");
+
+function versionCounts(user: AppUser, query: string) {
+  return asUser(user, async () =>
+    readJson(await versionsRoute.GET(jsonRequest(`http://localhost/api/recreate/versions${query}`, "GET"))),
+  );
+}
+
+test("version counts: one read per search (or lookup) gives each source page's recreations", async () => {
+  const owner = await makeUser({ credits: 1000 });
+  const stranger = await makeUser({ credits: 1000 });
+  const run = await makeRun(owner);
+  const source = await makeSource(run.id);
+  const untouched = await makeSource(run.id);
+  const oldPage = {
+    status: "completed",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    businessUrl: "https://client.invalid",
+    keyword: "dentist",
+    sourceCompetitorName: "Rival Clinic",
+    sourceAnalyzedUrl: "https://rival.invalid/offer",
+    brandColors: { primary: "#000", secondary: "#111", accent: "#222" },
+    hasPage: true,
+    pageBytes: 0,
+    pageUpdatedAt: null,
+  } as unknown as RecreatedPageLight;
+  const recreatedBefore = await makeSource(run.id, { recreatedPage: oldPage });
+
+  const first = await post(owner, { competitorId: source.id, userFeedback: "count 1" });
+  assert.equal(first.status, 202);
+  assert.equal(first.body.sourceId, source.id, "the add says which page the version belongs to");
+  assert.equal((await post(owner, { competitorId: source.id, userFeedback: "count 2" })).status, 202);
+
+  const res = await versionCounts(owner, `?runId=${run.id}`);
+  assert.equal(res.status, 200);
+  const counts = res.body.counts as Record<string, number>;
+  assert.equal(counts[source.id], 2);
+  assert.equal(counts[recreatedBefore.id], 1, "a page recreated before versions counts as one");
+  assert.equal(counts[untouched.id], undefined);
+  assert.equal(Object.keys(counts).some((id) => id.startsWith("rv-")), false, "versions are counted under their page");
+
+  assert.equal((await versionCounts(stranger, `?runId=${run.id}`)).status, 404);
+  assert.equal((await versionCounts(owner, "")).status, 400);
+
+  const { lookup, ad } = await makeLookupWithAd(owner, null);
+  const bridged = await ensureLookupRecreationCompetitor(ad.id);
+  assert.equal((await post(owner, { competitorId: bridged.competitorId, userFeedback: "lookup count" })).status, 202);
+  const fromLookup = await versionCounts(owner, `?lookupId=${lookup.id}`);
+  assert.equal(fromLookup.status, 200);
+  assert.deepEqual(fromLookup.body.counts, { [bridged.competitorId]: 1 });
+  assert.equal((await versionCounts(stranger, `?lookupId=${lookup.id}`)).status, 404);
 });

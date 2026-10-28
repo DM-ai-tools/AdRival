@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useRef, useState } from "react";
 import {
   RecreateRequestError,
@@ -10,6 +9,7 @@ import {
   type EnqueueBody,
   type LookupBridgeResult,
   type RecreateDetails,
+  versionsHref,
 } from "@/lib/recreateClient";
 import { formatSignal } from "@/lib/recreateSignals";
 import { stageNameText } from "@/lib/export/levelLabels";
@@ -37,6 +37,7 @@ export function AddToRecreateButton({
   signals,
   icp,
   versionCount = 0,
+  sourceId = null,
   disabled = false,
   defaults = NO_DEFAULTS,
   className = "search-btn lp-analyze-btn",
@@ -48,6 +49,8 @@ export function AddToRecreateButton({
   icp?: { icpId: string; stage: string };
   /** Versions of this page made already; above 0 adds a "View versions" link. */
   versionCount?: number;
+  /** The record the versions are made from, when the host knows it (a competitor source is its own). */
+  sourceId?: string | null;
   disabled?: boolean;
   /** The popup's starting values (see defaultDetails); the website is empty when the host has none. */
   defaults?: RecreateDetails;
@@ -62,6 +65,8 @@ export function AddToRecreateButton({
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [added, setAdded] = useState(0);
+  // The source record the server (or the lookup bridge) named for the last add.
+  const [addedSourceId, setAddedSourceId] = useState<string | null>(null);
   // Set synchronously, so two submits in the same frame cannot bridge or queue twice.
   const submitting = useRef(false);
 
@@ -78,14 +83,17 @@ export function AddToRecreateButton({
         ...(icp ? { icpId: icp.icpId } : {}),
       };
       let target: EnqueueBody;
+      let bridgedId: string | null = null;
       if ("competitorId" in source) target = { competitorId: source.competitorId, ...extra };
       else if ("lookupAdId" in source) {
         // The bridge keeps the lookup's own website; the job carries the one typed here.
         const bridged = await bridgeLookupAd(source.lookupAdId);
         onLookupBridged?.(bridged);
+        bridgedId = bridged.competitorId;
         target = { competitorId: bridged.competitorId, ...extra };
       } else target = { jobId: source.runId, url: source.url, ...extra };
-      const { job } = await enqueueRecreation(target);
+      const { job, sourceId: madeFrom } = await enqueueRecreation(target);
+      setAddedSourceId(madeFrom ?? bridgedId);
       setStatus(addedStatusText(job));
       setAdded((n) => n + 1);
       setOpen(false);
@@ -102,6 +110,7 @@ export function AddToRecreateButton({
   const days = signals?.daysRunning ?? null;
   const active = signals?.activeAds ?? null;
   const versions = versionCount + added;
+  const versionsOf = addedSourceId ?? sourceId ?? ("competitorId" in source ? source.competitorId : null);
 
   return (
     <span className="recreate-add">
@@ -133,9 +142,11 @@ export function AddToRecreateButton({
         </span>
       ) : null}
       {versions > 0 ? (
-        <Link className="recreate-add-versions" href="/?mode=recreate">
+        // A full page load: the home page reads ?mode= and ?page= when it opens,
+        // so a client-side link to the same route would change only the address.
+        <a className="recreate-add-versions" href={versionsHref(versionsOf)}>
           View versions
-        </Link>
+        </a>
       ) : null}
       <RecreateDetailsDialog
         open={open}

@@ -57,7 +57,7 @@ type ResultsView = "website" | "preview" | "brand" | "offers";
 
 
 /** The address parts this page owns; dashboards add their own (DASHBOARD_PARAMS). */
-const PAGE_PARAMS = ["mode", "run", "tab", "lookup", "item"] as const;
+const PAGE_PARAMS = ["mode", "run", "tab", "lookup", "item", "page"] as const;
 const DASHBOARD_PARAMS = ["osec", "offer", "ldash"] as const;
 
 function pageParams(params: URLSearchParams): URLSearchParams {
@@ -108,6 +108,8 @@ export default function HomePage() {
   });
   // Called once here, so the list keeps polling and the badge stays live on every tab.
   const recreateJobs = useRecreateJobs(activeSpace.id || null);
+  // ?mode=recreate&page=<source id>: the Recreate tab shows that page's versions ("View versions").
+  const [recreatePage, setRecreatePage] = useState<string | null>(null);
   const [selectedHistory, setSelectedHistory] =
     useState<UnifiedHistoryItem | null>(null);
   const [historyJob, setHistoryJob] = useState<SearchJob | null>(null);
@@ -574,6 +576,7 @@ export default function HomePage() {
       setLookupAds([]);
     }
     pendingHistoryItem.current = params.get("item");
+    setRecreatePage(nextMode === "recreate" ? params.get("page") || null : null);
     lastPushed.current = pageParams(params).toString();
     // If some of the address could not be applied (e.g. a tab with no run),
     // stop waiting for the state to match it.
@@ -620,6 +623,7 @@ export default function HomePage() {
       params.set("tab", resultsView);
     }
     if (mode === "lookup" && lookupId) params.set("lookup", lookupId);
+    if (mode === "recreate" && recreatePage) params.set("page", recreatePage);
     if (mode === "history" && selectedHistory) {
       params.set("item", `${selectedHistory.kind}:${selectedHistory.id}`);
       if (selectedHistory.kind === "search") params.set("tab", historyResultsView);
@@ -674,7 +678,7 @@ export default function HomePage() {
       window.history.pushState(null, "", `?${next}`);
     }
     lastPushed.current = next;
-  }, [mode, jobId, lookupId, resultsView, selectedHistory, historyResultsView]);
+  }, [mode, jobId, lookupId, resultsView, selectedHistory, historyResultsView, recreatePage]);
 
   // Reopen the history item named in the address once the list has loaded.
   useEffect(() => {
@@ -800,7 +804,10 @@ export default function HomePage() {
           type="button"
           role="tab"
           className={`tab-btn ${topTab === "recreate" ? "active" : ""}`}
-          onClick={() => setMode("recreate")}
+          onClick={() => {
+            setMode("recreate");
+            setRecreatePage(null);
+          }}
         >
           Recreate
           {recreateJobs.running + recreateJobs.queued > 0 && (
@@ -863,7 +870,9 @@ export default function HomePage() {
         </>
       )}
 
-      {mode === "recreate" && <RecreateHub jobs={recreateJobs} />}
+      {mode === "recreate" && (
+        <RecreateHub jobs={recreateJobs} sourceFilter={recreatePage} onClearSourceFilter={() => setRecreatePage(null)} />
+      )}
 
       {mode === "ab" && (
         <AbTestingPanel
