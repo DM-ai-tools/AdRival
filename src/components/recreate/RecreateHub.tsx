@@ -75,49 +75,62 @@ function Preview({ competitorId }: { competitorId: string }) {
     };
   }, [competitorId]);
 
-  if (state.kind === "loading") return <p className="empty-hint">Loading preview…</p>;
-  if (state.kind === "error") return <p className="error-text">{state.message}</p>;
+  if (state.kind === "loading") return <p className="recreate-preview-state">Loading preview…</p>;
+  if (state.kind === "error") return <p className="recreate-preview-state is-error">{state.message}</p>;
   return (
     <iframe
       title="Recreated page preview"
       srcDoc={state.html}
       sandbox="allow-scripts"
-      style={{ width: "100%", height: 480, border: "1px solid var(--line)", borderRadius: 8, background: "#fff" }}
     />
   );
 }
 
 function VersionRow({ item }: { item: RecreateListItem }) {
   const [open, setOpen] = useState(false);
+  const metaLine = [item.businessUrl ? `For ${shortUrl(item.businessUrl)}` : "", item.sourceUrl || ""].filter(Boolean).join(" · ");
   const stage = item.targetIcp ? stageNameText(item.targetIcp.stage) || item.targetIcp.stage : "";
   return (
-    <li className="history-item">
-      <div className="history-item-main">
-        <div className="history-item-top">
-          <strong className="history-keyword">{item.businessName || item.sourceName || "Recreated page"}</strong>
-          <span className={`status-pill ${STATE_PILL_CLASS[item.state]}`}>
-            {STATE_LABEL[item.state]}
-          </span>
-        </div>
-        <div className="history-item-meta">
-          {item.businessUrl ? <span title={item.businessUrl}>For {shortUrl(item.businessUrl)}</span> : null}
-          {item.sourceUrl ? <span>{item.sourceUrl}</span> : null}
-        </div>
-        <div className="history-item-meta">
-          <span>Keyword: {item.keyword || "—"}</span>
-          <span>Look: {styleLabel(item.styleDirection) || "—"}</span>
-          <span>Audience stage: {stage || "—"}</span>
-          <span>{formatDate(item.createdAt)}</span>
-        </div>
-        {item.error && (item.state === "failed" || item.state === "stopped") ? (
-          <p className="error-text">{item.error}</p>
-        ) : null}
-        {item.notice && item.state !== "failed" && item.state !== "stopped" ? (
-          <p className="muted">{item.notice}</p>
-        ) : null}
-        {open ? <Preview competitorId={item.competitorId} /> : null}
+    <li className="recreate-card recreate-version">
+      <div className="recreate-card-top">
+        <strong className="recreate-name">{item.businessName || item.sourceName || "Recreated page"}</strong>
+        <span className={`status-pill ${STATE_PILL_CLASS[item.state]}`}>{STATE_LABEL[item.state]}</span>
       </div>
-      <div className="history-actions">
+      {item.businessUrl || item.sourceUrl ? (
+        <span className="recreate-url" title={metaLine}>
+          {metaLine}
+        </span>
+      ) : null}
+      <dl className="recreate-meta-grid">
+        <div>
+          <dt className="recreate-label">Keyword</dt>
+          <dd>{item.keyword || "—"}</dd>
+        </div>
+        <div>
+          <dt className="recreate-label">Look</dt>
+          <dd>{styleLabel(item.styleDirection) || "—"}</dd>
+        </div>
+        <div>
+          <dt className="recreate-label">Audience stage</dt>
+          <dd>{stage || "—"}</dd>
+        </div>
+        <div>
+          <dt className="recreate-label">Created</dt>
+          <dd>{formatDate(item.createdAt)}</dd>
+        </div>
+      </dl>
+      {item.error && (item.state === "failed" || item.state === "stopped") ? (
+        <p className="recreate-error">{item.error}</p>
+      ) : null}
+      {item.notice && item.state !== "failed" && item.state !== "stopped" ? (
+        <p className="recreate-note">{item.notice}</p>
+      ) : null}
+      {open ? (
+        <div className="recreate-preview">
+          <Preview competitorId={item.competitorId} />
+        </div>
+      ) : null}
+      <div className="recreate-actions">
         {item.hasPage ? (
           <button type="button" className="chip-btn" onClick={() => setOpen((v) => !v)}>
             {open ? "Hide preview" : "Preview"}
@@ -149,7 +162,7 @@ export function RecreateHub({
   const { slots, queue, recent, archived } = useMemo(() => splitItems(jobs.items), [jobs.items]);
 
   if (jobs.loading && jobs.items.length === 0) {
-    return <p className="empty-hint">Loading recreated pages…</p>;
+    return <p className="recreate-state">Loading recreated pages…</p>;
   }
 
   // Extra running items (e.g. from the old route) stay visible, so slots can pass the limit.
@@ -157,16 +170,17 @@ export function RecreateHub({
   const versions = filterBySource(showArchived ? archived : recent, sourceFilter);
 
   return (
-    <div className="history-list-wrap">
-      {jobs.error ? <p className="error-text">{jobs.error}</p> : null}
+    <div className="recreate-hub">
+      {jobs.error ? <p className="recreate-alert">{jobs.error}</p> : null}
       {jobs.stopError ? (
-        <p className="error-text" role="alert">
+        <p className="recreate-alert" role="alert">
           {jobs.stopError}
         </p>
       ) : null}
 
-      <h3>Building now</h3>
-      <ul className="history-list">
+      <section className="recreate-section">
+      <h3 className="recreate-heading">Building now</h3>
+      <ul className="recreate-slots">
         {slots.map((item) => (
           <li key={item.id}>
             <SlotCard item={item} onStop={jobs.stop} />
@@ -178,32 +192,33 @@ export function RecreateHub({
           </li>
         ))}
       </ul>
+      </section>
 
       {queue.length > 0 ? (
-        <>
-          <h3>Queued</h3>
-          <ul className="history-list">
+        <section className="recreate-section">
+          <h3 className="recreate-heading">Queued</h3>
+          <ul className="recreate-queue">
             {queue.map((item, n) => {
               const jobId = item.jobId;
               return (
-                <li key={item.id} className="history-item">
-                  <div className="history-item-main">
-                    <div className="history-item-top">
-                      <strong className="history-keyword">
-                        {n + 1}. {item.businessName || item.sourceName || item.sourceUrl || "Queued page"}
-                      </strong>
-                      <span className={`status-pill ${STATE_PILL_CLASS.queued}`}>Queued</span>
-                    </div>
+                <li key={item.id} className="recreate-card recreate-queue-row">
+                  <span className="recreate-queue-pos">{n + 1}</span>
+                  <div className="recreate-queue-text">
+                    <strong className="recreate-name">
+                      {item.businessName || item.sourceName || item.sourceUrl || "Queued page"}
+                    </strong>
                     {item.sourceUrl ? (
-                      <div className="history-item-meta">
-                        <span>{item.sourceUrl}</span>
-                      </div>
+                      <span className="recreate-url" title={item.sourceUrl}>
+                        {item.sourceUrl}
+                      </span>
                     ) : null}
                   </div>
+                  <span className={`status-pill ${STATE_PILL_CLASS.queued}`}>Queued</span>
                   {jobId ? (
+                    <div className="recreate-actions">
                     <button
                       type="button"
-                      className="history-delete"
+                      className="recreate-danger"
                       disabled={removing === jobId}
                       onClick={async () => {
                         setRemoving(jobId);
@@ -216,17 +231,18 @@ export function RecreateHub({
                     >
                       {removing === jobId ? "…" : "Remove"}
                     </button>
+                    </div>
                   ) : null}
                 </li>
               );
             })}
           </ul>
-        </>
+        </section>
       ) : null}
 
-      <div className="history-actions history-actions-bar">
-        <h3>Versions</h3>
-        <div className="kind-filters">
+      <div className="recreate-bar">
+        <h3 className="recreate-heading">Versions</h3>
+        <div className="recreate-seg">
           <button type="button" className={`chip-btn ${!showArchived ? "active" : ""}`} onClick={() => setShowArchived(false)}>
             Recent
           </button>
@@ -236,7 +252,7 @@ export function RecreateHub({
         </div>
       </div>
       {sourceFilter ? (
-        <p className="history-item-meta" role="status">
+        <p className="recreate-notice" role="status">
           <span>Showing versions of {sourceFilterName(jobs.items, sourceFilter)}</span>
           {onClearSourceFilter ? (
             <button type="button" className="chip-btn" onClick={onClearSourceFilter}>
@@ -246,7 +262,7 @@ export function RecreateHub({
         </p>
       ) : null}
       {versions.length === 0 ? (
-        <p className="empty-hint">
+        <p className="recreate-state">
           {sourceFilter
             ? showArchived
               ? "No archived versions of this page."
@@ -256,7 +272,7 @@ export function RecreateHub({
               : "No recreated pages yet."}
         </p>
       ) : (
-        <ul className="history-list">
+        <ul className="recreate-versions">
           {versions.map((item) => (
             <VersionRow key={item.id} item={item} />
           ))}

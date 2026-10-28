@@ -18,53 +18,53 @@ export function SlotCard({
 
   if (!item) {
     return (
-      <div className="history-item">
-        <p className="empty-hint">Pick a page to recreate</p>
+      <div className="recreate-card recreate-slot recreate-slot-empty">
+        <span>Pick a page to recreate</span>
       </div>
     );
   }
 
   const pct = item.progress?.pct ?? 0;
   const jobId = item.jobId;
+  const message = item.progress?.message || "Working";
   return (
-    <div className="history-item">
-      <div className="history-item-main">
-        <div className="history-item-top">
-          <strong className="history-keyword">{item.businessName || item.sourceName || item.sourceUrl || "Recreating"}</strong>
-          <span className="status-pill status-running">Running</span>
-        </div>
-        {item.sourceUrl ? (
-          <div className="history-item-meta">
-            <span>{item.sourceUrl}</span>
-          </div>
-        ) : null}
-        <div className="history-item-meta">
-          <span>Days running: {formatSignal(item.daysRunning)}</span>
-          <span>Active ads: {formatSignal(item.activeAds)}</span>
-        </div>
-        <div
-          role="progressbar"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={pct}
-          style={{ height: 6, borderRadius: 3, background: "var(--line)", overflow: "hidden", margin: "8px 0 4px" }}
-        >
-          <div style={{ width: `${pct}%`, height: "100%", background: "var(--accent, currentColor)" }} />
-        </div>
-        <div className="history-item-meta">
-          <span>
-            {item.progress?.message || "Working"} · {pct}%
-          </span>
-        </div>
+    <div className="recreate-card recreate-slot">
+      <div className="recreate-card-top">
+        <strong className="recreate-name">{item.businessName || item.sourceName || item.sourceUrl || "Recreating"}</strong>
+        <span className="status-pill status-running">Running</span>
       </div>
-      <div className="history-actions">
+      {item.sourceUrl ? (
+        <span className="recreate-url" title={item.sourceUrl}>
+          {item.sourceUrl}
+        </span>
+      ) : null}
+      <dl className="recreate-stats">
+        <div className="recreate-stat">
+          <dt>Days running</dt>
+          <dd>{formatSignal(item.daysRunning)}</dd>
+        </div>
+        <div className="recreate-stat">
+          <dt>Active ads</dt>
+          <dd>{formatSignal(item.activeAds)}</dd>
+        </div>
+      </dl>
+      <div className="recreate-progress-row">
+        <div className="recreate-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
+          <div style={{ width: `${pct}%` }} />
+        </div>
+        <span className="recreate-pct">{pct}%</span>
+      </div>
+      <p className="recreate-message" title={message}>
+        {message}
+      </p>
+      <div className="recreate-actions">
         <Link href={hubOpenHref(item.openPath)} className="chip-btn">
           Open
         </Link>
         {jobId && onStop ? (
           <button
             type="button"
-            className="history-delete"
+            className="recreate-danger"
             disabled={stopping}
             onClick={async () => {
               setStopping(true);
