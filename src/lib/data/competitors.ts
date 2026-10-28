@@ -184,6 +184,27 @@ export async function updateCompetitor(id: string, patch: Partial<CompetitorReco
   });
 }
 
+/**
+ * Deletes a recreation version that holds no page yet (a queued recreation
+ * removed before it started). Any other record is left alone: false.
+ */
+export async function deleteCompetitor(id: string): Promise<boolean> {
+  return withTx(async (tx) => {
+    const owner = await tx.query<{ run_id: string }>("select run_id from competitors where id = $1", [id]);
+    const runId = owner.rows[0]?.run_id;
+    if (runId === undefined) return false;
+    await lockRun(tx, runId);
+    const { rowCount } = await tx.query(
+      `delete from competitors
+        where id = $1
+          and coalesce(data->'recreateOnly'->>'variantOf', '') <> ''
+          and coalesce(data->'recreatedPage', 'null'::jsonb) = 'null'::jsonb`,
+      [id],
+    );
+    return rowCount > 0;
+  });
+}
+
 /** What an updateCompetitorWith updater returns: a patch, with optional page content apart. */
 export type CompetitorUpdate = Partial<CompetitorRecord> & { recreatedPageHeavy?: RecreatedPageHeavy };
 

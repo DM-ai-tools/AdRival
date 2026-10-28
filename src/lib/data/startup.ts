@@ -79,9 +79,23 @@ export function startSchedulers(): { archive: boolean; backup: boolean; keepAliv
       return false;
     }
   };
-  return {
+  const started = {
     archive: start("archive scheduler", startArchiveScheduler),
     backup: start("backup scheduler", startBackupScheduler),
     keepAlive: start("keep-alive", startKeepAlive),
   };
+  startRecreateQueue();
+  return started;
+}
+
+/**
+ * Picks the recreate queue up again in the background (builds still running on
+ * the design agent's side, queued jobs). Startup never waits for it.
+ */
+function startRecreateQueue(): void {
+  void import("../pipeline/recreateQueue")
+    .then((queue) => queue.sweepRecreateQueue())
+    .catch((err: unknown) =>
+      console.error("[startup] recreate queue sweep failed:", err instanceof Error ? err.message : err),
+    );
 }

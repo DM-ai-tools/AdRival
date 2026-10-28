@@ -78,6 +78,40 @@ test("removeQueued only removes the owner's queued job", async () => {
   assert.equal((await jobs.listJobs("u-rm", null)).length, 1);
 });
 
+test("settleRunningJob only settles a job that is still running", async () => {
+  const j = await jobs.insertJob(input("u-settle"));
+  assert.equal(await jobs.settleRunningJob(j.id, "finished"), false, "a queued job is not settled");
+  await jobs.claimNextQueued("u-settle", 3);
+  await jobs.finishJob(j.id, "stopped", "Stopped by user");
+  assert.equal(await jobs.settleRunningJob(j.id, "failed", "late failure"), false);
+  const stopped = await jobs.getRecreateJob(j.id);
+  assert.equal(stopped?.status, "stopped");
+  assert.equal(stopped?.error, "Stopped by user");
+
+  const k = await jobs.insertJob(input("u-settle"));
+  await jobs.claimNextQueued("u-settle", 3);
+  assert.equal(await jobs.settleRunningJob(k.id, "failed", "agent broke"), true);
+  const failed = await jobs.getRecreateJob(k.id);
+  assert.equal(failed?.status, "failed");
+  assert.equal(failed?.error, "agent broke");
+  assert.ok(failed?.finishedAt);
+  assert.equal(await jobs.getRecreateJob("missing"), null);
+});
+
+test("requeueJob puts a running job back at its place in the queue", async () => {
+  const a = await jobs.insertJob(input("u-requeue"));
+  const b = await jobs.insertJob(input("u-requeue"));
+  assert.equal((await jobs.claimNextQueued("u-requeue", 1))?.id, a.id);
+  assert.equal(await jobs.requeueJob(a.id), true);
+  const back = await jobs.getRecreateJob(a.id);
+  assert.equal(back?.status, "queued");
+  assert.equal(back?.startedAt, null);
+  assert.equal((await jobs.claimNextQueued("u-requeue", 1))?.id, a.id, "it keeps its place ahead of later jobs");
+  await jobs.finishJob(a.id, "finished");
+  assert.equal(await jobs.requeueJob(a.id), false, "a finished job is not requeued");
+  assert.equal((await jobs.claimNextQueued("u-requeue", 1))?.id, b.id);
+});
+
 test("listJobs scopes by space and usersWithQueuedJobs lists owners with queued work", async () => {
   const mine = await jobs.insertJob(input("u-list", "space-a"));
   await jobs.insertJob(input("u-list", "space-b"));

@@ -130,6 +130,40 @@ export async function finishJob(
   );
 }
 
+/**
+ * finishJob only while the job is still running, so a run that settles late
+ * never overwrites a stop (or another outcome) recorded first. True when it
+ * was settled now.
+ */
+export async function settleRunningJob(
+  id: string,
+  status: "finished" | "failed" | "stopped",
+  error: string | null = null,
+): Promise<boolean> {
+  const { rowCount } = await getDb().query(
+    "update recreate_jobs set status = $2, error = $3, finished_at = now() where id = $1 and status = 'running'",
+    [id, status, error],
+  );
+  return rowCount > 0;
+}
+
+/**
+ * Puts a running job back in the queue (it keeps its place: the queue is
+ * ordered by creation). Used when it could not start after all.
+ */
+export async function requeueJob(id: string): Promise<boolean> {
+  const { rowCount } = await getDb().query(
+    "update recreate_jobs set status = 'queued', started_at = null where id = $1 and status = 'running'",
+    [id],
+  );
+  return rowCount > 0;
+}
+
+export async function getRecreateJob(id: string): Promise<RecreateJob | null> {
+  const { rows } = await getDb().query<JobRow>(`select ${COLUMNS} from recreate_jobs where id = $1`, [id]);
+  return rows[0] ? toJob(rows[0]) : null;
+}
+
 /** Deletes a queued job of this owner. False when it is missing, not theirs, or already started. */
 export async function removeQueued(id: string, ownerUserId: string): Promise<boolean> {
   const { rowCount } = await getDb().query(
