@@ -125,6 +125,23 @@ export function getRecreateOnlyPagesByRun(runId: string): Promise<CompetitorReco
   );
 }
 
+/**
+ * A user's recreations: every record they own that holds a recreated page
+ * (versions, and older source records that already had one). Scoped to a
+ * client space through the run's job; a null space means runs with no space.
+ */
+export function listRecreationsForUser(userId: string, spaceId: string | null): Promise<CompetitorRecord[]> {
+  return selectCompetitors(
+    `select c.data from competitors c
+       join jobs j on j.id = c.run_id
+      where c.owner_user_id = $1
+        and j.space_id is not distinct from $2::text
+        and coalesce(c.data->'recreatedPage', 'null'::jsonb) <> 'null'::jsonb
+      order by c.created_at desc, c.id desc`,
+    [userId, spaceId],
+  );
+}
+
 /** One competitor, with its light page (content via getRecreatedPage). */
 export function getCompetitor(id: string): Promise<CompetitorRecord | null> {
   return storedCompetitor(getDb(), id, false);

@@ -387,6 +387,11 @@ export interface CompetitorRecord {
     matchKey: string;
     /** The competitor whose ads point at this page, when known. */
     fromCompetitorId: string | null;
+    /**
+     * Set when this record is one recreation (version) of another record's
+     * page: the source record's id. Versions never stand in for the source.
+     */
+    variantOf?: string | null;
   } | null;
 }
 

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   getCompetitor,
   getCompetitorsByRun,
@@ -53,7 +53,8 @@ export async function landingPageRecordsByKey(runId: string): Promise<Map<string
   }
   // A page held for recreation wins: it is the record the dashboard opened.
   for (const c of await getRecreateOnlyPagesByRun(runId)) {
-    if (c.recreateOnly?.matchKey) out.set(c.recreateOnly.matchKey, c);
+    // A version is one recreation of a page, never the page's record.
+    if (c.recreateOnly?.matchKey && !c.recreateOnly.variantOf) out.set(c.recreateOnly.matchKey, c);
   }
   return out;
 }
@@ -121,4 +122,28 @@ export async function ensureLandingPageRecord(
   };
   if (!(await saveCompetitor(record))) throw new Error("The landing page could not be saved for recreation.");
   return { competitor: (await getCompetitor(record.id)) || record, created: true };
+}
+
+/**
+ * One recreation of an analysed page, as its own record, so every recreation
+ * runs the pipeline (keyed by record id) on its own and none overwrites another.
+ */
+export async function createRecreationVersion(source: CompetitorRecord): Promise<CompetitorRecord> {
+  if (source.pageAnalysis?.status !== "completed") throw new Error("Analyse this page before recreating it.");
+  const sourceUrl = source.pageAnalysis.analyzedUrl || source.sampleAd?.landingPageUrl || "";
+  const matchKey =
+    source.recreateOnly?.matchKey ||
+    landingPageMatchKey(source.pageAnalysis.analyzedUrl) ||
+    landingPageMatchKey(source.sampleAd?.landingPageUrl) ||
+    "";
+  const record: CompetitorRecord = {
+    ...structuredClone({ ...source, recreatedPage: null, recreateOnly: null }),
+    id: `rv-${randomBytes(8).toString("hex")}`,
+    pageAnalysis: structuredClone(source.pageAnalysis),
+    recreatedPage: null,
+    createdAt: new Date().toISOString(),
+    recreateOnly: { sourceUrl, matchKey, fromCompetitorId: source.id, variantOf: source.id },
+  };
+  if (!(await saveCompetitor(record))) throw new Error("The recreation could not be saved.");
+  return (await getCompetitor(record.id)) || record;
 }
