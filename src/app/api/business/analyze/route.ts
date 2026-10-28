@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { errorResponse, requireUser } from "@/lib/authz";
 import { runBillable } from "@/lib/accounting/run";
 import { isCreditError } from "@/lib/accounting/errors";
-import { analyzeBusinessProfile } from "@/lib/pipeline/businessProfile";
+import { analysisSetupMessage, analyzeBusinessProfile } from "@/lib/pipeline/businessProfile";
 import { sanitizeClientFacingText } from "@/lib/clientFacing";
 
 export const runtime = "nodejs";
@@ -10,16 +10,7 @@ export const maxDuration = 180;
 
 function friendlyAnalyzeError(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
-  if (/402|credits|max_tokens/i.test(message)) {
-    return "URL analysis credit limit reached. Please try again later or contact support.";
-  }
-  if (/401|unauthorized|invalid.*key/i.test(message)) {
-    return "URL analysis is not configured correctly. Please contact support.";
-  }
-  if (/OPENROUTER_API_KEY is not set|API_KEY is missing/i.test(message)) {
-    return "URL analysis is not configured. Please contact support.";
-  }
-  return sanitizeClientFacingText(message);
+  return analysisSetupMessage(err) ?? sanitizeClientFacingText(message);
 }
 
 export async function POST(request: Request) {

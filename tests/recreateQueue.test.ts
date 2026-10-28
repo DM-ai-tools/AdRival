@@ -116,6 +116,7 @@ const { resumeManusRecreation, editManusRecreation } = await import("@/lib/pipel
 const { getJob } = await import("@/lib/db");
 const { sameWebsite, setBusinessProfileAnalyzerForTests } = await import("@/lib/pipeline/businessProfile");
 const { InsufficientCreditsError } = await import("@/lib/accounting/errors");
+const { saveRunBusinessUrl } = await import("@/lib/runBusinessUrl");
 import type { BusinessProfile, CompetitorRecord, RecreatedLandingPage, RecreatedPageLight, SearchJob } from "@/lib/types";
 import type { RecreateJob } from "@/lib/data/recreateJobs";
 
@@ -571,6 +572,164 @@ test("a job stopped while its website is being read builds nothing", async () =>
   } finally {
     release();
     analyzeWith = null;
+  }
+  await drain(ctx.user.id);
+});
+
+/** Sets the run's website as POST /api/recreate/jobs does when a job is added (the profile's own url is kept). */
+async function addedWebsite(runId: string, website: string): Promise<void> {
+  assert.equal(await saveRunBusinessUrl(runId, website, { fillProfileUrl: false }), true);
+}
+
+test("a run without a business profile: every job's website is analysed, whatever website the run holds now", async () => {
+  const ctx = await setup({ count: 0 });
+  const before = analyzed.length;
+  // Adding a job saves its website on the run before the job starts.
+  await addedWebsite(ctx.run.id, "https://site-a.invalid");
+  const a = await addJob(ctx, "https://site-a.invalid");
+  await dispatchRecreateQueue(ctx.user.id);
+  const taskA = await taskOf(a.competitorId);
+  assert.deepEqual(analyzed.slice(before), ["https://site-a.invalid"], "the first job's website is analysed");
+  assert.match(briefOf(taskA), /Biz site-a/);
+
+  await addedWebsite(ctx.run.id, "https://site-b.invalid");
+  const b = await addJob(ctx, "https://site-b.invalid");
+  await dispatchRecreateQueue(ctx.user.id);
+  const taskB = await taskOf(b.competitorId);
+  assert.deepEqual(analyzed.slice(before), ["https://site-a.invalid", "https://site-b.invalid"]);
+  assert.match(briefOf(taskB), /Biz site-b/);
+  assert.doesNotMatch(briefOf(taskB), /Biz site-a/);
+  await drain(ctx.user.id);
+});
+
+test("a run whose business profile has no website: the job's website is analysed and the profile keeps no website", async () => {
+  const ctx = await setup({ count: 0, profile: { ...ORIGINAL, url: "" } });
+  const before = analyzed.length;
+  await addedWebsite(ctx.run.id, "https://site-a.invalid");
+  assert.equal((await getJob(ctx.run.id))?.businessProfile?.url, "", "the search's profile is not given the job's website");
+  const a = await addJob(ctx, "https://site-a.invalid");
+  await dispatchRecreateQueue(ctx.user.id);
+  const brief = briefOf(await taskOf(a.competitorId));
+  assert.deepEqual(analyzed.slice(before), ["https://site-a.invalid"]);
+  assert.match(brief, /Biz site-a/);
+  assert.doesNotMatch(brief, /Original Dental/);
+  await drain(ctx.user.id);
+});
+
+test("saveRunBusinessUrl fills a profile without a website unless told not to", async () => {
+  const ctx = await setup({ count: 0, profile: { ...ORIGINAL, url: "" } });
+  await saveRunBusinessUrl(ctx.run.id, "https://site-a.invalid", { fillProfileUrl: false });
+  assert.equal((await getJob(ctx.run.id))?.businessProfile?.url, "");
+  assert.equal((await getJob(ctx.run.id))?.businessUrl, "https://site-a.invalid");
+  await saveRunBusinessUrl(ctx.run.id, "https://site-b.invalid");
+  assert.equal((await getJob(ctx.run.id))?.businessProfile?.url, "https://site-b.invalid", "the set_business_url action keeps filling it");
+});
+
+test("a website whose brand colours cannot be read fails the job and saves no profile", async () => {
+  const ctx = await setup({ count: 0, profile: ORIGINAL });
+  const createsBefore = createCount();
+  analyzeWith = async (url) => ({ ...profileOf(url, "Newco Smiles", "#ABCDEF"), brandColors: null, brandAssets: null });
+  try {
+    const job = await addJob(ctx, "https://newco.invalid");
+    await dispatchRecreateQueue(ctx.user.id);
+    const failed = await jobEnded(ctx.user.id, job.id, "failed");
+    assert.equal(failed.error, "Could not read the brand colours of the website newco.invalid. Check the address and try again.");
+    assert.equal(createCount(), createsBefore, "no design agent task");
+    const version = await getCompetitor(job.competitorId);
+    assert.equal(version?.recreatedPage ?? null, null);
+    assert.equal(version?.recreateOnly?.businessProfile ?? null, null, "a profile without colours is not kept");
+  } finally {
+    analyzeWith = null;
+  }
+  await drain(ctx.user.id);
+});
+
+test("a setup problem with the analysis shows its own message, not 'could not read the website'", async () => {
+  const ctx = await setup({ count: 0, profile: ORIGINAL });
+  analyzeWith = async () => {
+    throw new Error("OPENROUTER_API_KEY is not set");
+  };
+  try {
+    const job = await addJob(ctx, "https://newco.invalid");
+    await dispatchRecreateQueue(ctx.user.id);
+    const failed = await jobEnded(ctx.user.id, job.id, "failed");
+    assert.equal(failed.error, "URL analysis is not configured. Please contact support.");
+  } finally {
+    analyzeWith = null;
+  }
+  await drain(ctx.user.id);
+});
+
+test("a rebuild of a version for the search's own website drops the version's other business", async () => {
+  const ctx = await setup({ count: 0, profile: ORIGINAL });
+  analyzeWith = async (url) => profileOf(url, "Newco Smiles", "#ABCDEF");
+  try {
+    const job = await addJob(ctx, "https://newco.invalid");
+    await dispatchRecreateQueue(ctx.user.id);
+    const first = await taskOf(job.competitorId);
+    taskState.set(first, "done");
+    await jobEnded(ctx.user.id, job.id, "finished");
+
+    const before = analyzed.length;
+    const own = await addJob(ctx, "https://client.invalid", job.competitorId);
+    await dispatchRecreateQueue(ctx.user.id);
+    const second = await waitFor(async () => {
+      const id = (await getCompetitor(job.competitorId))?.recreatedPage?.manus?.taskId;
+      return id && id !== first ? id : null;
+    }, "the rebuild's task");
+    assert.equal(analyzed.length, before);
+    assert.match(briefOf(second), /Original Dental/);
+    assert.equal((await getCompetitor(job.competitorId))?.recreateOnly?.businessProfile ?? null, null, "the other business is dropped");
+    taskState.set(second, "done");
+    await jobEnded(ctx.user.id, own.id, "finished");
+
+    // A later change that has to rebuild stays on the search's own website.
+    failSend = true;
+    const editing = editManusRecreation(job.competitorId, "Make the headline bigger");
+    const third = await waitFor(async () => {
+      const id = (await getCompetitor(job.competitorId))?.recreatedPage?.manus?.taskId;
+      return id && id !== second ? id : null;
+    }, "the change's build");
+    failSend = false;
+    assert.match(briefOf(third), /Original Dental/);
+    assert.doesNotMatch(briefOf(third), /Newco Smiles/);
+    taskState.set(third, "done");
+    await editing;
+  } finally {
+    failSend = false;
+    analyzeWith = null;
+  }
+  await drain(ctx.user.id);
+});
+
+test("a change to a version rebuilds for the version's website, not one a later job saved on the run", async () => {
+  const ctx = await setup({ count: 0, profile: ORIGINAL });
+  try {
+    const job = await addJob(ctx, "https://client.invalid");
+    await dispatchRecreateQueue(ctx.user.id);
+    const first = await taskOf(job.competitorId);
+    taskState.set(first, "done");
+    await jobEnded(ctx.user.id, job.id, "finished");
+    // A later job for another website was added: the run now holds that website.
+    await addedWebsite(ctx.run.id, "https://later.invalid");
+
+    const before = analyzed.length;
+    failSend = true;
+    const editing = editManusRecreation(job.competitorId, "Make the headline bigger");
+    const second = await waitFor(async () => {
+      const id = (await getCompetitor(job.competitorId))?.recreatedPage?.manus?.taskId;
+      return id && id !== first ? id : null;
+    }, "the change's build");
+    failSend = false;
+    assert.equal(analyzed.length, before, "nothing is analysed");
+    const brief = briefOf(second);
+    assert.match(brief, /Original Dental/);
+    assert.doesNotMatch(brief, /later\.invalid/);
+    assert.equal((await getCompetitor(job.competitorId))?.recreatedPage?.businessUrl, "https://client.invalid");
+    taskState.set(second, "done");
+    await editing;
+  } finally {
+    failSend = false;
   }
   await drain(ctx.user.id);
 });

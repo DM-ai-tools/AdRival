@@ -26,7 +26,7 @@ import { LOOKUP_RECREATE_PREFIX } from "../lookupRecreateBridge";
 import { getBillingContext } from "../../accounting/context";
 import { touchReservation } from "../../accounting/service";
 import { isCreditError } from "../../accounting/errors";
-import { businessProfileAnalyzer, sameWebsite } from "../businessProfile";
+import { analysisSetupMessage, businessProfileAnalyzer, sameWebsite } from "../businessProfile";
 import { sanitizeClientFacingText } from "../../clientFacing";
 import { resolveBrandDisplayName } from "../brandDisplayName";
 import { embedRemoteImagesInHtml } from "../design/packageHtml";
@@ -384,14 +384,28 @@ function versionProfile(competitor: CompetitorRecord, businessUrl: string): Busi
   return saved && sameWebsite(saved.url, businessUrl) ? saved : null;
 }
 
+/** Saves (or, with null, drops) the business profile kept on a version. */
+async function saveVersionProfile(competitorId: string, profile: BusinessProfile | null): Promise<void> {
+  await updateCompetitorWith(competitorId, (stored) =>
+    stored.recreateOnly ? { recreateOnly: { ...stored.recreateOnly, businessProfile: profile } } : null,
+  );
+}
+
 /**
  * The business a build for `businessUrl` writes the page for, when it is not
  * the search's own: the version's saved profile for that website, else that
  * website analysed now (inside the build's credit reservation) and saved on
  * the version, so retries, rebuilds and changes reuse it. Null when the
- * website is the search's own (the search's profile applies, as before).
- * Throws a client-facing error when the website cannot be read; credit
- * errors pass through as they are.
+ * website is the search's own (the search's profile applies, as before; a
+ * profile the version kept for another website is dropped).
+ *
+ * The search's own website is its business profile's: the run's businessUrl
+ * cannot tell, since adding a job saves that job's website on the run. A
+ * search without a profile (or one without a website) has no business to
+ * keep, so the job's website is analysed.
+ *
+ * Throws a client-facing error when the website or its brand colours cannot
+ * be read, or the analysis is not set up; credit errors pass through.
  */
 async function businessForBuild(
   competitor: CompetitorRecord,
@@ -400,23 +414,27 @@ async function businessForBuild(
 ): Promise<BusinessProfile | null> {
   const saved = versionProfile(competitor, businessUrl);
   if (saved) return saved;
-  const own = (job.businessProfile?.url || "").trim() || (job.businessUrl || "").trim();
-  if (sameWebsite(own, businessUrl)) return null;
+  const own = (job.businessProfile?.url || "").trim();
+  if (own && sameWebsite(own, businessUrl)) {
+    if (competitor.recreateOnly?.businessProfile) await saveVersionProfile(competitor.id, null);
+    return null;
+  }
+  const host = hostOf(businessUrl);
   let profile: BusinessProfile;
   try {
     profile = await businessProfileAnalyzer()(businessUrl);
   } catch (err) {
     if (isCreditError(err)) throw err;
     console.warn(`[manus] could not analyse ${businessUrl} for competitor ${competitor.id}`, err);
-    throw new Error(`Could not read the website ${hostOf(businessUrl)}. Check the address and try again.`);
+    throw new Error(analysisSetupMessage(err) ?? `Could not read the website ${host}. Check the address and try again.`);
+  }
+  // Without colours the page would fall back to made-up ones; nothing is kept, so the next build reads it again.
+  if (!profile.brandColors) {
+    throw new Error(`Could not read the brand colours of the website ${host}. Check the address and try again.`);
   }
   // Saved under the website it was asked for, so the next build finds it.
   profile = { ...profile, url: businessUrl };
-  if (competitor.recreateOnly) {
-    await updateCompetitorWith(competitor.id, (stored) =>
-      stored.recreateOnly ? { recreateOnly: { ...stored.recreateOnly, businessProfile: profile } } : null,
-    );
-  }
+  if (competitor.recreateOnly) await saveVersionProfile(competitor.id, profile);
   return profile;
 }
 
@@ -631,8 +649,9 @@ export async function runManusRecreation(
     /** A new reader to write for; omitted keeps the one already on the page. */
     targetIcp?: { icpId: string; stage: AwarenessStage } | null;
     /**
-     * The client's website for this build (a queued job's own); omitted uses
-     * the website of the version's own business profile, else the run's.
+     * The client's website for this build (a queued job's own). Omitted, a
+     * version keeps its own website (its saved business profile's, else its
+     * page's); any other record uses the run's.
      */
     businessUrl?: string | null;
     /**
@@ -651,9 +670,14 @@ export async function runManusRecreation(
   }
   const job = await getJob(competitor.runId);
   if (!job) throw new Error("Search job not found for this competitor");
-  // A version built for another website keeps that website (and its business) on rebuilds and changes.
+  // A version keeps its own website (and business) on rebuilds and changes: the run's
+  // website may since have been replaced by a later job's.
+  const isVersion = Boolean(competitor.recreateOnly?.variantOf);
+  const versionUrl = isVersion
+    ? competitor.recreateOnly?.businessProfile?.url || competitor.recreatedPage?.businessUrl || null
+    : null;
   const businessUrl = resolveBusinessUrl({
-    businessUrl: options.businessUrl || competitor.recreateOnly?.businessProfile?.url || job.businessUrl,
+    businessUrl: options.businessUrl || versionUrl || job.businessUrl,
     businessProfile: job.businessProfile,
   });
   if (!businessUrl) {
@@ -672,9 +696,10 @@ export async function runManusRecreation(
   const targetIcp = resolved?.target ?? null;
   const icp = resolved ? { stage: resolved.record.stage, content: resolved.record } : null;
 
-  // A job's own website that is not the search's: its business is read now,
-  // before anything is stopped, written or sent (a failure builds nothing).
-  const business = options.businessUrl ? await businessForBuild(competitor, job, businessUrl) : null;
+  // A job's (or version's) website that is not the search's: its business is read
+  // now, before anything is stopped, written or sent (a failure builds nothing).
+  // Other records build for the run's website as they always have.
+  const business = options.businessUrl || isVersion ? await businessForBuild(competitor, job, businessUrl) : null;
   if (business && options.stillWanted && !(await options.stillWanted())) {
     return (await getCompetitor(competitorId)) || competitor;
   }

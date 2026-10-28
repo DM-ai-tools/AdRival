@@ -20,6 +20,7 @@ import { cleanAssets } from "@/lib/pipeline/manus/assets";
 import { shouldReuseCachedPage } from "@/lib/pipeline/manus/reuse";
 import { icpBelongsToRun } from "@/lib/pipeline/awareness/icp";
 import { normalizeWebsite, saveRunBusinessUrl } from "@/lib/runBusinessUrl";
+import { withoutVersionProfile } from "@/lib/competitorView";
 
 export const runtime = "nodejs";
 /** A design-agent build runs well past 10 minutes; it continues after the reply. */
@@ -189,9 +190,11 @@ function pageForClient<T extends { previousHtml?: string | null } | null | undef
 function maskCompetitor<T extends {
   recreatedPage?: unknown;
   pageAnalysis?: unknown;
+  recreateOnly?: CompetitorRecord["recreateOnly"];
 }>(competitor: T, options: { light?: boolean } = {}): T {
   return {
-    ...competitor,
+    // A version's own business profile stays on the server.
+    ...withoutVersionProfile(competitor),
     recreatedPage: pageForClient(
       maskRecreatedPage((competitor.recreatedPage ?? null) as Parameters<typeof maskRecreatedPage>[0]) as { previousHtml?: string | null } | null,
       options,

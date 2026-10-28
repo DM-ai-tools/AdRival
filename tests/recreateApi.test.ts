@@ -65,6 +65,18 @@ const { assignRunsToSpace, createProjectSpace } = await import("@/lib/data/space
 const jobsRepo = await import("@/lib/data/recreateJobs");
 const { getDb } = await import("@/lib/data/client");
 const { createRecreationVersion } = await import("@/lib/pipeline/landingRecreateBridge");
+const { setBusinessProfileAnalyzerForTests } = await import("@/lib/pipeline/businessProfile");
+// A build for a website that is not the search's own reads that website first; faked here.
+setBusinessProfileAnalyzerForTests(async (url) => ({
+  url,
+  businessName: `Biz ${new URL(url).hostname}`,
+  industry: "dental",
+  description: "d",
+  offerings: [],
+  competitorKeywords: ["dentist"],
+  positioningSummary: "p",
+  brandColors: { primary: "#123456", secondary: "#234567", accent: "#345678", background: "#FFFFFF", text: "#000000" },
+}));
 const jobsRoute = await import("../src/app/api/recreate/jobs/route");
 const jobRoute = await import("../src/app/api/recreate/jobs/[id]/route");
 import type { AppUser, CompetitorRecord, LookupAdRecord, LookupJob, RecreatedPageLight, SearchJob } from "@/lib/types";
@@ -78,6 +90,7 @@ after(async () => {
   while ((await jobsRepo.listRunning()).length && Date.now() < until) await settle(25);
   await settle(100);
   globalThis.fetch = realFetch;
+  setBusinessProfileAnalyzerForTests(null);
   await store.cleanup();
 });
 
@@ -240,6 +253,27 @@ test("POST with a changed businessUrl saves it on the run", async () => {
   assert.equal((await getJob(run.id))?.businessUrl, "https://newclient.com.au");
   const job = res.body.job as { options: { businessUrl: string } };
   assert.equal(job.options.businessUrl, "https://newclient.com.au");
+});
+
+test("POST with another website never gives the search's business profile that website", async () => {
+  const owner = await makeUser({ credits: 1000 });
+  const businessProfile = {
+    url: "",
+    businessName: "Original Dental",
+    industry: "dental",
+    description: "d",
+    offerings: [],
+    competitorKeywords: ["dentist"],
+    positioningSummary: "p",
+  };
+  const run = await makeRun(owner, { businessProfile });
+  const source = await makeSource(run.id);
+  const res = await post(owner, { competitorId: source.id, businessUrl: "newclient.com.au" });
+  assert.equal(res.status, 202);
+  const stored = await getJob(run.id);
+  assert.equal(stored?.businessUrl, "https://newclient.com.au", "the run keeps the latest website as the next default");
+  assert.equal(stored?.businessProfile?.url, "", "the search's own business keeps no website");
+  assert.equal(stored?.businessProfile?.businessName, "Original Dental");
 });
 
 test("POST validates the audience profile against the source's search", async () => {
