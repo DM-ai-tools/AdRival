@@ -1,14 +1,5 @@
 import { NextResponse } from "next/server";
-import {
-  getCompetitor,
-  getIcp,
-  getJob,
-  getLookupJob,
-  getRecreatedPage,
-  updateCompetitor,
-  updateJob,
-  updateLookupJob,
-} from "@/lib/db";
+import { getCompetitor, getIcp, getJob, getRecreatedPage, updateCompetitor } from "@/lib/db";
 import { ArchivedPageUnavailableError } from "@/lib/data/archive";
 import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
 import { runBillable } from "@/lib/accounting/run";
@@ -28,12 +19,11 @@ import {
 import { cleanAssets } from "@/lib/pipeline/manus/assets";
 import { shouldReuseCachedPage } from "@/lib/pipeline/manus/reuse";
 import { icpBelongsToRun } from "@/lib/pipeline/awareness/icp";
+import { normalizeWebsite, saveRunBusinessUrl } from "@/lib/runBusinessUrl";
 
 export const runtime = "nodejs";
 /** A design-agent build runs well past 10 minutes; it continues after the reply. */
 export const maxDuration = 1800;
-
-const LOOKUP_RECREATE_PREFIX = "lookup-recreate-";
 
 /** Actions of the earlier built-in pipeline (content review, image slots, colour refresh). */
 const RETIRED_ACTIONS = new Set([
@@ -61,19 +51,6 @@ const BUILD_ACTIONS = new Set([
   "regenerate_design",
   "revise_page",
 ]);
-
-/** "acme.com.au/" → "https://acme.com.au", or null when it is not a website. */
-function normalizeWebsite(raw: unknown): string | null {
-  const text = String(raw ?? "").trim();
-  if (!text) return null;
-  try {
-    const u = new URL(/^https?:\/\//i.test(text) ? text : `https://${text}`);
-    if (!/^https?:$/.test(u.protocol) || !u.hostname.includes(".")) return null;
-    return `${u.protocol}//${u.host}${u.pathname.replace(/\/$/, "")}`;
-  } catch {
-    return null;
-  }
-}
 
 /** The client's website and name for a competitor's run, if the run has one. */
 async function brandFor(runId: string): Promise<{ businessUrl: string | null; businessName: string | null }> {
@@ -282,17 +259,8 @@ export async function POST(request: Request) {
       if (!website) {
         return NextResponse.json({ error: "Enter a website address, like yourbusiness.com" }, { status: 400 });
       }
-      const job = await getJob(existing.runId);
-      if (!job) return NextResponse.json({ error: "Search job not found for this competitor" }, { status: 404 });
-      await updateJob(job.id, {
-        businessUrl: website,
-        ...(job.businessProfile && !job.businessProfile.url
-          ? { businessProfile: { ...job.businessProfile, url: website } }
-          : {}),
-      });
-      if (job.id.startsWith(LOOKUP_RECREATE_PREFIX)) {
-        const lookupId = job.id.slice(LOOKUP_RECREATE_PREFIX.length);
-        if (await getLookupJob(lookupId)) await updateLookupJob(lookupId, { businessUrl: website });
+      if (!(await saveRunBusinessUrl(existing.runId, website))) {
+        return NextResponse.json({ error: "Search job not found for this competitor" }, { status: 404 });
       }
       // The browser only reads `brand` from this reply, so the page content is not read.
       return NextResponse.json({ competitor: maskCompetitor(existing), brand: await brandFor(existing.runId) });

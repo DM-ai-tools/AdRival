@@ -173,6 +173,21 @@ export async function removeQueued(id: string, ownerUserId: string): Promise<boo
   return rowCount > 0;
 }
 
+/** How many of the owner's queued jobs (in any space) start before this one; 0 once it has started. */
+export async function countQueuedAhead(id: string): Promise<number> {
+  const { rows } = await getDb().query<{ n: number }>(
+    `select count(q.id)::int as n
+       from recreate_jobs j
+       join recreate_jobs q
+         on q.owner_user_id = j.owner_user_id
+        and q.status = 'queued'
+        and (q.created_at, q.id) < (j.created_at, j.id)
+      where j.id = $1 and j.status = 'queued'`,
+    [id],
+  );
+  return Number(rows[0]?.n ?? 0);
+}
+
 export async function usersWithQueuedJobs(): Promise<string[]> {
   const { rows } = await getDb().query<{ owner_user_id: string }>(
     "select distinct owner_user_id from recreate_jobs where status = 'queued'",
