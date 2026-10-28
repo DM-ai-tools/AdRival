@@ -2,9 +2,7 @@ import { NextResponse } from "next/server";
 import { errorResponse, requireUser } from "@/lib/authz";
 import { runBillable } from "@/lib/accounting/run";
 import { isCreditError } from "@/lib/accounting/errors";
-import { analyzeBusinessUrl } from "@/lib/openrouter/businessAnalyzer";
-import { analyzeServiceArea } from "@/lib/openrouter/serviceArea";
-import { prefetchBrandBranding, resolveBrandBundle } from "@/lib/pipeline/resolveBrandBundle";
+import { analyzeBusinessProfile } from "@/lib/pipeline/businessProfile";
 import { sanitizeClientFacingText } from "@/lib/clientFacing";
 
 export const runtime = "nodejs";
@@ -57,37 +55,7 @@ export async function POST(request: Request) {
         projectId: null,
         runId: null,
       },
-      async () => {
-        // Reading the site's branding is slow and needs only the URL, so it
-        // starts alongside the profile analysis instead of after it.
-        const branding = prefetchBrandBranding(url);
-        const base = await analyzeBusinessUrl(url);
-        // Location, local-vs-national suggestion and search rings run
-        // alongside the brand read; it never fails the analysis.
-        const area = analyzeServiceArea(base);
-
-        // Brand identity via site branding (+ links) — colors, fonts, logo, socials
-        let bundle: Awaited<ReturnType<typeof resolveBrandBundle>> | null = null;
-        try {
-          bundle = await resolveBrandBundle({
-            businessUrl: base.url || url,
-            profile: base,
-            prefetched: branding,
-          });
-        } catch (err) {
-          console.warn("[business/analyze] brand bundle failed", err);
-        }
-        const analyzed = await area;
-        if (bundle) {
-          analyzed.brandColors = bundle.colors;
-          analyzed.brandAssets = bundle.assets;
-          analyzed.brandDesign = bundle.design;
-          if (bundle.warnings.length) {
-            console.warn("[business/analyze] brand warnings", bundle.warnings);
-          }
-        }
-        return analyzed;
-      },
+      () => analyzeBusinessProfile(url),
     );
 
     return NextResponse.json({ profile });
