@@ -1259,7 +1259,8 @@ export interface RecreatedLandingPage {
   publishBlockers?: string[] | null;
   /**
    * Set when the build's website was read but its brand colours were not: the
-   * page uses neutral colours. Shown on the finished page and in the Recreate tab.
+   * design agent chose the colours from the site, to be checked. Shown on the
+   * finished page and in the Recreate tab.
    */
   brandNotice?: string | null;
   /**

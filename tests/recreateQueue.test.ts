@@ -112,7 +112,7 @@ const { RECREATE_BUILD_OPERATION } = await import("@/lib/accounting/scope");
 const { LOW_CREDIT_MESSAGE } = await import("@/lib/accounting/errors");
 const { RECREATE_QUEUE_STATE_KEY, dispatchRecreateQueue, resumedBuildStaleMs, stopRecreateJob, sweepRecreateQueue } =
   await import("@/lib/pipeline/recreateQueue");
-const { resumeManusRecreation, editManusRecreation } = await import("@/lib/pipeline/manus/run");
+const { resumeManusRecreation, editManusRecreation, runManusRecreation } = await import("@/lib/pipeline/manus/run");
 const { getJob } = await import("@/lib/db");
 const { sameWebsite, setBusinessProfileAnalyzerForTests } = await import("@/lib/pipeline/businessProfile");
 const { InsufficientCreditsError } = await import("@/lib/accounting/errors");
@@ -630,7 +630,7 @@ test("saveRunBusinessUrl fills a profile without a website unless told not to", 
 const BRAND_NOTICE =
   "Could not read the brand colours of newco.invalid automatically; the design agent chose colours from the site. Check them, or describe yours in Apply changes.";
 
-test("a website whose brand colours cannot be read still builds, with neutral colours, a notice and no saved profile", async () => {
+test("a website whose brand colours cannot be read still builds, with colours the agent reads from the site, a notice and no saved profile", async () => {
   const ctx = await setup({ count: 0, profile: ORIGINAL });
   analyzeWith = async (url) => ({ ...profileOf(url, "Newco Smiles", "#ABCDEF"), brandColors: null });
   try {
@@ -643,7 +643,8 @@ test("a website whose brand colours cannot be read still builds, with neutral co
     assert.doesNotMatch(brief, /Original Dental/);
     assert.doesNotMatch(brief, /#111111/, "never the search's colours");
     const version = await getCompetitor(job.competitorId);
-    assert.equal(version?.recreatedPage?.brandColors.primary, "#0F7A6C", "the neutral default colours");
+    assert.equal(version?.recreatedPage?.brandColors.primary, "#0F7A6C", "the page record keeps the default colours");
+    assert.match(brief, /not found — sample the colours from the website/, "the agent samples the colours from the site");
     assert.equal(version?.recreatedPage?.brandNotice, BRAND_NOTICE);
     assert.equal(version?.recreateOnly?.businessProfile ?? null, null, "a profile without colours is not kept");
 
@@ -780,6 +781,82 @@ test("Stop while a recreate-page build reads the website cancels it; a rebuild a
     await waitFor(async () => ((await getCompetitor(version.id))?.recreatedPage?.status !== "pending" ? true : null), "the build to end");
   } finally {
     for (const finish of finishRead) finish();
+    analyzeWith = null;
+  }
+});
+
+/** The page's design agent task once it is not `not` (or the old version's). */
+function newTaskOf(competitorId: string, not: string): Promise<string> {
+  return waitFor(async () => {
+    const id = (await getCompetitor(competitorId))?.recreatedPage?.manus?.taskId;
+    return id && id !== not && id !== "T-old-version" ? id : null;
+  }, `a task for ${competitorId} other than ${not}`);
+}
+
+test("a rebuild that reads the website while an earlier build is still running and finishing goes ahead", async () => {
+  const { version, call } = await olderVersionWithRoute();
+  // Every read finds no colours, so nothing is kept and the rebuild reads again.
+  // The first read finishes at once; later ones wait until the test lets them.
+  const finishRead: Array<() => void> = [];
+  let readCount = 0;
+  analyzeWith = (url) => {
+    const profile = { ...profileOf(url, "Newco Smiles", "#ABCDEF"), brandColors: null };
+    readCount += 1;
+    if (readCount === 1) return Promise.resolve(profile);
+    return new Promise((resolve) => finishRead.push(() => resolve(profile)));
+  };
+  const createsBefore = createCount();
+  try {
+    assert.equal((await call("regenerate_page")).status, 202);
+    const first = await newTaskOf(version.id, "");
+    // The rebuild is asked for while the first build runs: it reads the website again.
+    assert.equal((await call("regenerate_page")).status, 202);
+    assert.equal((await getCompetitor(version.id))?.recreatedPage?.progress?.message, "Reading newco.invalid…");
+    // The earlier build finishes during the read and writes its page.
+    taskState.set(first, "done");
+    await waitFor(async () => ((await getCompetitor(version.id))?.recreatedPage?.status === "completed" ? true : null), "the first build to finish");
+    finishRead[0]();
+    const second = await newTaskOf(version.id, first);
+    assert.equal(createCount() - createsBefore, 2, "the rebuild created its own task");
+    assert.match(briefOf(second), /Newco Smiles/);
+    taskState.set(second, "error");
+    await waitFor(async () => ((await getCompetitor(version.id))?.recreatedPage?.status !== "pending" ? true : null), "the rebuild to end");
+  } finally {
+    for (const finish of finishRead) finish();
+    analyzeWith = null;
+  }
+});
+
+test("only the newest website read builds; an older read's failure is not recorded once a newer read took the page", async () => {
+  const { version } = await olderVersionWithRoute();
+  const reads: Array<{ ok: () => void; fail: (err: Error) => void }> = [];
+  analyzeWith = (url) =>
+    new Promise((resolve, reject) =>
+      reads.push({ ok: () => resolve(profileOf(url, "Newco Smiles", "#ABCDEF")), fail: reject }),
+    );
+  const createsBefore = createCount();
+  const before = analyzed.length;
+  try {
+    const older = runManusRecreation(version.id, {});
+    await waitFor(async () => analyzed.length - before === 1, "the first read");
+    const newer = runManusRecreation(version.id, { userFeedback: "Warmer" });
+    await waitFor(async () => analyzed.length - before === 2, "the second read");
+
+    reads[0].fail(new Error("getaddrinfo ENOTFOUND newco.invalid"));
+    await assert.rejects(older);
+    let page = (await getCompetitor(version.id))?.recreatedPage;
+    assert.equal(page?.status, "pending", "the newer read still shows");
+    assert.equal(page?.error ?? null, null, "the older read's failure is not recorded");
+
+    reads[1].ok();
+    const taskId = await newTaskOf(version.id, "");
+    assert.equal(createCount() - createsBefore, 1, "one task, for the newest read");
+    page = (await getCompetitor(version.id))?.recreatedPage;
+    assert.equal(page?.userFeedback, "Warmer");
+    taskState.set(taskId, "error");
+    await newer;
+  } finally {
+    for (const r of reads) r.ok();
     analyzeWith = null;
   }
 });

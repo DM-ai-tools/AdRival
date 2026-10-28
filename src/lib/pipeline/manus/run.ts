@@ -304,6 +304,40 @@ async function saveOutcome(
   }
 }
 
+/**
+ * saveOutcome when `patch` (run inside the write, on the page as stored) says
+ * so; null writes nothing. True when it wrote. Used where the decision must not
+ * race another writer (a website read's id, a stale read).
+ */
+async function saveOutcomeIf(
+  competitorId: string,
+  patch: (stored: RecreatedPageLight, hasHtml: boolean) => PagePatch | null,
+): Promise<boolean> {
+  let wrote = false;
+  const write = (withContent: boolean) =>
+    updateCompetitorWith(
+      competitorId,
+      (competitor, content) => {
+        const page = competitor.recreatedPage;
+        if (!page) return null;
+        const change = patch(page, withContent ? Boolean(content?.html) : Boolean(page.hasPage));
+        if (!change) return null;
+        wrote = true;
+        return pageUpdate(page, change, content);
+      },
+      { withContent },
+    );
+  try {
+    await write(true);
+  } catch (err) {
+    if (!(err instanceof ArchivedPageUnavailableError)) throw err;
+    console.warn(`[manus] page content of competitor ${competitorId} unavailable (${err.message}); using its marker`);
+    wrote = false;
+    await write(false);
+  }
+  return wrote;
+}
+
 async function writePage(
   competitorId: string,
   update: (page: RecreatedPageLight, content: RecreatedPageHeavy | null | undefined) => CompetitorUpdate,
@@ -342,7 +376,8 @@ const NEUTRAL_COLORS = {
  * Shows on the page that its build is reading the client's website (see
  * isReadingWebsite). The page's content and its other fields are kept; a
  * record without a page gets a pending one. Returns the read's id: the build
- * goes on only while the page still shows this read (claimReading), so a Stop
+ * goes on only while the page still carries this read's id (stillReading, and
+ * again inside the build's first page write), so a Stop
  * or a newer build in the meantime wins.
  */
 async function markReading(competitor: CompetitorRecord, job: SearchJob, businessUrl: string): Promise<string> {
@@ -372,49 +407,57 @@ async function markReading(competitor: CompetitorRecord, job: SearchJob, busines
 }
 
 /**
- * Ends the read `readingId` in one write when the page still shows it (true:
- * the build may go on). False when the read was stopped, timed out, or a newer
- * build took the page over: that build then creates nothing.
+ * Whether the page still carries the read `readingId`. Only the id counts: an
+ * earlier build still running writes its progress and result onto the stored
+ * page and keeps the id, while a Stop, an expired read and a newer read
+ * (markReading) replace or clear it.
  */
-async function claimReading(competitorId: string, readingId: string): Promise<boolean> {
-  let ours = false;
-  await updateCompetitorWith(competitorId, (stored) => {
-    const page = stored.recreatedPage;
-    ours = Boolean(page && page.status === "pending" && page.progress?.phase === READING_PHASE && page.readingId === readingId);
-    return ours && page ? { recreatedPage: { ...page, readingId: null, updatedAt: new Date().toISOString() } } : null;
-  });
-  return ours;
+async function stillReading(competitorId: string, readingId: string): Promise<boolean> {
+  return (await getCompetitor(competitorId))?.recreatedPage?.readingId === readingId;
 }
 
 /** Shown on a page whose website read never finished (a restart cut it off). */
 const READING_INTERRUPTED = "The website read was interrupted. Try again.";
 
-/**
- * Marks the page failed when it still shows a website read older than the
- * reading window (the process doing it is gone). True when it did.
- */
-export async function expireStaleReading(competitorId: string): Promise<boolean> {
-  const page = (await getCompetitor(competitorId))?.recreatedPage;
-  if (!page || page.status !== "pending" || page.progress?.phase !== READING_PHASE || isReadingWebsite(page)) return false;
-  await saveOutcome(competitorId, (_stored, hasHtml) => ({
-    status: hasHtml ? "completed" : "failed",
-    error: READING_INTERRUPTED,
-    readingId: null,
-    progress: progress("send", READING_INTERRUPTED, 0, { blocked: READING_INTERRUPTED }),
-  }));
-  return true;
+/** A page still showing a website read older than the reading window (the process doing it is gone). */
+function isStaleReading(page: RecreatedPageLight): boolean {
+  return page.status === "pending" && page.progress?.phase === READING_PHASE && !isReadingWebsite(page);
 }
 
-/** Records on the page that reading the client's website failed (the earlier page, if any, stays). */
-async function recordReadFailure(competitorId: string, err: unknown): Promise<void> {
+/** Marks the page failed when it shows a stale website read (checked inside the write). True when it did. */
+export async function expireStaleReading(competitorId: string): Promise<boolean> {
+  const page = (await getCompetitor(competitorId))?.recreatedPage;
+  if (!page || !isStaleReading(page)) return false;
+  return saveOutcomeIf(competitorId, (stored, hasHtml) =>
+    isStaleReading(stored)
+      ? {
+          status: hasHtml ? "completed" : "failed",
+          error: READING_INTERRUPTED,
+          readingId: null,
+          progress: progress("send", READING_INTERRUPTED, 0, { blocked: READING_INTERRUPTED }),
+        }
+      : null,
+  );
+}
+
+/**
+ * Records on the page that the read `readingId` failed, when the page still
+ * carries that read (the earlier page, if any, stays).
+ */
+async function recordReadFailure(competitorId: string, readingId: string, err: unknown): Promise<void> {
   const raw = (err as Error)?.message || "Recreation failed";
   const message = isCreditError(err) ? raw : sanitizeClientFacingText(raw);
   try {
-    await saveOutcome(competitorId, (_stored, hasHtml) => ({
-      status: hasHtml ? "completed" : "failed",
-      error: message,
-      progress: progress("send", message, 0, { blocked: message }),
-    }));
+    await saveOutcomeIf(competitorId, (stored, hasHtml) =>
+      stored.readingId === readingId
+        ? {
+            status: hasHtml ? "completed" : "failed",
+            error: message,
+            readingId: null,
+            progress: progress("send", message, 0, { blocked: message }),
+          }
+        : null,
+    );
   } catch (writeErr) {
     console.error(`[manus] could not record the failed website read of competitor ${competitorId}`, writeErr);
   }
@@ -822,13 +865,13 @@ export async function runManusRecreation(
   try {
     found = options.businessUrl || isVersion ? await businessForBuild(competitor, job, businessUrl, announce) : null;
   } catch (err) {
-    // Recorded only while the page still shows this read (not after a Stop or a newer build).
-    if (readingId && (await claimReading(competitorId, readingId))) await recordReadFailure(competitorId, err);
+    // Recorded only while the page still carries this read (not after a Stop or a newer read).
+    if (readingId) await recordReadFailure(competitorId, readingId, err);
     throw err;
   }
-  // Stopped (or taken over by a newer build) while the website was read: nothing is
-  // saved, created or written over the page.
-  if (readingId && !(await claimReading(competitorId, readingId))) {
+  // Stopped (or taken over by a newer read) while the website was read: nothing is
+  // saved, created or written over the page. Checked again inside the first page write.
+  if (readingId && !(await stillReading(competitorId, readingId))) {
     return (await getCompetitor(competitorId)) || competitor;
   }
   if (found && options.stillWanted && !(await options.stillWanted())) {
@@ -891,19 +934,29 @@ export async function runManusRecreation(
     // The new page replaces the old one whole (its source archive is not carried over).
     // A business read for it is kept on the version in the same write (one read
     // without colours is not, and a profile kept for another website goes), so
-    // the version's profile and its page's website never disagree.
-    await updateCompetitorWith(competitorId, (stored) => ({
-      ...(found && stored.recreateOnly
-        ? {
-            recreateOnly: {
-              ...stored.recreateOnly,
-              businessProfile: found.fresh ? found.profile : versionProfile(stored, businessUrl),
-            },
-          }
-        : {}),
-      recreatedPage: baseLight as RecreatedPageLight,
-      recreatedPageHeavy: { html: baseHtml ?? null, previousHtml: basePrevious, generatedImages: baseImages },
-    }));
+    // the version's profile and its page's website never disagree. A build that
+    // read a website writes only while the page still carries that read (a Stop
+    // in the meantime wins); the new page replaces it and its id.
+    let superseded = false;
+    await updateCompetitorWith(competitorId, (stored) => {
+      if (readingId && stored.recreatedPage?.readingId !== readingId) {
+        superseded = true;
+        return null;
+      }
+      return {
+        ...(found && stored.recreateOnly
+          ? {
+              recreateOnly: {
+                ...stored.recreateOnly,
+                businessProfile: found.fresh ? found.profile : versionProfile(stored, businessUrl),
+              },
+            }
+          : {}),
+        recreatedPage: baseLight as RecreatedPageLight,
+        recreatedPageHeavy: { html: baseHtml ?? null, previousHtml: basePrevious, generatedImages: baseImages },
+      };
+    });
+    if (superseded) return (await getCompetitor(competitorId)) || competitor;
     const brief = buildManusBrief(input);
     const shots = options.screenshots || [];
     const taskMessage = `${buildManusTaskMessage(input)}${screenshotNote(shots)}`;
@@ -1050,6 +1103,8 @@ export async function stopManusRecreation(competitorId: string, reason = "Recrea
   await saveOutcome(competitorId, (_stored, hasHtml) => ({
     status: hasHtml ? "completed" : "failed",
     error: reason,
+    // A website read in progress is cancelled: its build then creates nothing.
+    readingId: null,
     progress: progress(stage, reason, page.progress?.pct || 0, { blocked: reason }),
   }));
   const latest = await getCompetitor(competitorId);

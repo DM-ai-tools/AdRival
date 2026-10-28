@@ -492,6 +492,8 @@ test("GET /api/competitors/recreate-page never sends a version's own business pr
   assert.ok(
     await competitors.updateCompetitor(version.id, {
       recreateOnly: { sourceUrl: "https://rival.invalid", matchKey: "rival.invalid", fromCompetitorId: source.id, variantOf: source.id, businessProfile: profile },
+      // The id of a website read in progress stays on the server too.
+      recreatedPage: { ...version.recreatedPage!, readingId: "secret-read-id" },
     } as Partial<CompetitorRecord>),
   );
 
@@ -499,6 +501,7 @@ test("GET /api/competitors/recreate-page never sends a version's own business pr
     const res = await get(recreatePageRoute, owner, `/competitors/recreate-page?competitorId=${version.id}${query}`);
     assert.equal(res.status, 200);
     assert.equal(JSON.stringify(res.body).includes(SECRET), false, `not in the response${query}`);
+    assert.equal(JSON.stringify(res.body).includes("secret-read-id"), false, `no read id in the response${query}`);
     const sent = (res.body.competitor as { recreateOnly?: Record<string, unknown> }).recreateOnly;
     assert.equal(sent?.variantOf, source.id, "the rest of recreateOnly is still sent");
     assert.equal("businessProfile" in (sent ?? {}), false);

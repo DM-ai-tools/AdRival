@@ -185,6 +185,8 @@ function pageForClient<T extends { previousHtml?: string | null } | null | undef
   const { previousHtml, ...rest } = page;
   // The design agent's task state (ids, answer context) stays on the server.
   delete (rest as { manus?: unknown }).manus;
+  // So does the id of a website read in progress.
+  delete (rest as { readingId?: unknown }).readingId;
   if (options.light) return rest as unknown as T;
   return { ...rest, canUndo: Boolean(previousHtml) } as unknown as T;
 }
