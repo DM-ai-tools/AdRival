@@ -24,14 +24,14 @@ after(async () => {
 test("migrate applies every migration once and is idempotent", async () => {
   const fresh = await createPgliteClient();
   try {
-    assert.deepEqual(await migrate(fresh), ["001_init.sql", "002_indexes.sql", "003_provider_calls_idempotency.sql"]);
+    assert.deepEqual(await migrate(fresh), ["001_init.sql", "002_indexes.sql", "003_provider_calls_idempotency.sql", "004_recreate_jobs.sql"]);
     assert.deepEqual(await migrate(fresh), []);
     const { rows } = await fresh.query<{ name: string }>(
       "select name from schema_migrations order by name",
     );
     assert.deepEqual(
       rows.map((r) => r.name),
-      ["001_init.sql", "002_indexes.sql", "003_provider_calls_idempotency.sql"],
+      ["001_init.sql", "002_indexes.sql", "003_provider_calls_idempotency.sql", "004_recreate_jobs.sql"],
     );
   } finally {
     await fresh.close();
@@ -207,11 +207,11 @@ test("concurrent migrators: one applies, the other skips without error", async (
   const fresh = await createPgliteClient();
   try {
     const [a, b] = await Promise.all([migrate(fresh), migrate(fresh)]);
-    assert.deepEqual([...a, ...b].sort(), ["001_init.sql", "002_indexes.sql", "003_provider_calls_idempotency.sql"]);
+    assert.deepEqual([...a, ...b].sort(), ["001_init.sql", "002_indexes.sql", "003_provider_calls_idempotency.sql", "004_recreate_jobs.sql"]);
     const { rows } = await fresh.query<{ n: string }>(
       "select count(*)::text as n from schema_migrations",
     );
-    assert.equal(rows[0].n, "3");
+    assert.equal(rows[0].n, "4");
   } finally {
     await fresh.close();
   }
