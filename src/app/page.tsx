@@ -22,6 +22,7 @@ import { PlatformPicker } from "@/components/PlatformPicker";
 import { BusinessProfileSummary } from "@/components/BusinessProfileSummary";
 import { RunCreditLine, type RunCredits } from "@/components/RunCreditLine";
 import { PLATFORM_META, type AdPlatform } from "@/lib/platforms";
+import { defaultDetails } from "@/lib/recreateClient";
 import type { UnifiedHistoryItem } from "@/lib/historyUnified";
 import type {
   CompetitorRecord,
@@ -970,6 +971,7 @@ export default function HomePage() {
                   );
                 }}
                 onCompetitorsUpdated={setCompetitors}
+                recreateDefaults={defaultDetails(job)}
               />
             ) : resultsView === "brand" ? (
               <BrandReviewPanel
@@ -1260,6 +1262,7 @@ export default function HomePage() {
                       );
                     }}
                     onCompetitorsUpdated={setHistoryCompetitors}
+                    recreateDefaults={defaultDetails(historyJob)}
                   />
                 ) : historyResultsView === "brand" ? (
                   <BrandReviewPanel

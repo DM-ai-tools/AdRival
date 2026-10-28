@@ -2221,6 +2221,48 @@ a.lp-recreate-link {
   border-radius: 8px;
 }
 
+/* "Add to Recreate": the button, its decision signals and what happened. */
+.recreate-add {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+}
+
+.recreate-add-signals,
+.recreate-add-status,
+.recreate-add-versions {
+  font-size: 0.78rem;
+}
+
+.recreate-add-status {
+  font-weight: 650;
+  color: var(--accent);
+}
+
+.recreate-details-dialog {
+  width: min(480px, 100%);
+}
+
+.recreate-details-field {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 0.85rem;
+}
+
+.recreate-details-field .search-label {
+  margin-bottom: 2px;
+}
+
+.recreate-details-field .search-input {
+  min-width: 0;
+  padding: 9px 12px;
+}
+
+.recreate-details-hint {
+  font-size: 0.8rem;
+}
+
 .comp-analysis-row td {
   background: color-mix(in srgb, var(--panel) 88%, transparent);
   padding: 10px 14px 16px;
@@ -5105,6 +5147,13 @@ select.search-input {
   line-height: 1.45;
 }
 .insights-open {
+  justify-self: start;
+}
+.insights-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
   justify-self: start;
 }
 .insights-row {

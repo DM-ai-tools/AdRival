@@ -104,8 +104,8 @@ export function JourneySteps({
     if (offersDone) next = { key: "recreate", label: "Next: recreate a page" };
   } else {
     hint = analysed
-      ? "Pick a competitor below and press “Recreate for my brand”. Nothing is charged until you press “Create my page” on the next screen."
-      : "Pick a competitor below and press “Get offer & page details”. Then press “Recreate for my brand”.";
+      ? "Pick a competitor below and press “Add to Recreate”. Nothing is charged until you confirm the details."
+      : "Pick a competitor below and press “Get offer & page details”. Then press “Add to Recreate”.";
   }
 
   return (

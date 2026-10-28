@@ -2,7 +2,6 @@
 
 import { offersPhaseLabel, statusLabel } from "@/lib/progressLabels";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import type {
   FunnelStage,
   LandingPageOfferAnalysis,
@@ -16,8 +15,8 @@ import { OfferWorkspace } from "./OfferWorkspace";
 import { offerKey, parseOfferKey, readUrlParam, writeUrlParams } from "@/lib/urlState";
 import { OfferInsights } from "./OfferInsights";
 import { PageAnalysisPanel } from "./PageAnalysisPanel";
-import { ReturnLink } from "./ReturnLink";
-import { currentReturnPath, withReturn } from "@/lib/returnTo";
+import { AddToRecreateButton } from "./recreate/AddToRecreateButton";
+import { defaultDetails } from "@/lib/recreateClient";
 import {
   offerFitsSearchedService,
   searchedServiceFocus,
@@ -526,7 +525,6 @@ type LandingPageRecord = {
   pageName: string;
   analysis: LandingPageOfferAnalysis | null;
   recreatedStatus: string | null;
-  recreatePath: string;
 };
 type DashSection = (typeof DASH_SECTIONS)[number];
 
@@ -565,11 +563,11 @@ export function SearchOffersDashboard({
     Record<string, boolean>
   >({});
   const [showAllPageAds, setShowAllPageAds] = useState(false);
-  const router = useRouter();
   // Landing pages that have been analysed or recreated, by match key.
   const [lpRecords, setLpRecords] = useState<Record<string, LandingPageRecord>>({});
   const [canRunLp, setCanRunLp] = useState(true);
-  const [lpBusy, setLpBusy] = useState<{ key: string; then: "details" | "recreate" } | null>(null);
+  /** Match key of the landing page being analysed. */
+  const [lpBusy, setLpBusy] = useState<string | null>(null);
   const [lpError, setLpError] = useState<{ key: string; message: string } | null>(null);
   const [lpDetailsOpen, setLpDetailsOpen] = useState(true);
 
@@ -613,12 +611,9 @@ export function SearchOffersDashboard({
     };
   }, [section, job.id]);
 
-  /**
-   * Analyse a landing page (offer + page architecture) so it can be
-   * recreated, then show the details or open the Recreate page.
-   */
-  async function prepareLandingPage(page: LookupUniqueLandingPage, then: "details" | "recreate", force = false) {
-    setLpBusy({ key: page.matchKey, then });
+  /** Analyse a landing page (offer + page architecture) and show the details. */
+  async function analyseLandingPage(page: LookupUniqueLandingPage, force = false) {
+    setLpBusy(page.matchKey);
     setLpError(null);
     try {
       const res = await fetch("/api/search/landing-recreate", {
@@ -631,9 +626,6 @@ export function SearchOffersDashboard({
       const record = data.page as LandingPageRecord;
       setLpRecords((prev) => ({ ...prev, [page.matchKey]: record }));
       setLpDetailsOpen(true);
-      if (then === "recreate" && record.analysis?.status === "completed") {
-        router.push(withReturn(record.recreatePath, currentReturnPath()));
-      }
     } catch (err) {
       setLpError({ key: page.matchKey, message: (err as Error).message });
     } finally {
@@ -1127,35 +1119,19 @@ export function SearchOffersDashboard({
                   {(() => {
                     const record = lpRecords[selectedPage.matchKey] || null;
                     const analysed = record?.analysis?.status === "completed";
-                    const busy = lpBusy?.key === selectedPage.matchKey ? lpBusy.then : null;
-                    const recreateLabel =
-                      record?.recreatedStatus === "completed"
-                        ? "View recreated page"
-                        : record?.recreatedStatus === "content_ready"
-                          ? "Review content draft"
-                          : "Recreate for my brand";
+                    const busy = lpBusy === selectedPage.matchKey;
                     return (
                       <div className="offers-lp-recreate">
                         <div className="offers-lp-actions">
-                          {analysed && record && (canRunLp || record.recreatedStatus) ? (
-                            <ReturnLink
-                              className="search-btn lp-analyze-btn lp-recreate-link"
-                              href={record.recreatePath}
-                              title="Recreate this landing page for your client's brand. Nothing is charged until you press Create."
-                            >
-                              {recreateLabel}
-                            </ReturnLink>
-                          ) : null}
-                          {!analysed && canRunLp ? (
-                            <button
-                              type="button"
-                              className="search-btn lp-analyze-btn"
-                              disabled={Boolean(lpBusy)}
-                              title="Analyses the page (offer and page architecture), then opens Recreate. Nothing else is charged until you press Create."
-                              onClick={() => void prepareLandingPage(selectedPage, "recreate")}
-                            >
-                              {busy === "recreate" ? "Analysing the page…" : "Recreate for my brand"}
-                            </button>
+                          {canRunLp || record?.recreatedStatus ? (
+                            // Adding analyses the page first when it has not been analysed (uses credits).
+                            <AddToRecreateButton
+                              source={{ runId: job.id, url: selectedPage.url }}
+                              signals={pageSignals(selectedPageRawAds)}
+                              versionCount={record?.recreatedStatus ? 1 : 0}
+                              defaults={defaultDetails(job)}
+                              disabled={!canRunLp || Boolean(lpBusy)}
+                            />
                           ) : null}
                           {analysed ? (
                             <button
@@ -1171,9 +1147,9 @@ export function SearchOffersDashboard({
                               className="ghost-btn lp-analyze-btn"
                               disabled={Boolean(lpBusy)}
                               title="Fetch the landing page and extract its offer and page architecture"
-                              onClick={() => void prepareLandingPage(selectedPage, "details")}
+                              onClick={() => void analyseLandingPage(selectedPage)}
                             >
-                              {busy === "details" ? "Analysing…" : "Get offer & page details"}
+                              {busy ? "Analysing…" : "Get offer & page details"}
                             </button>
                           ) : null}
                           {analysed && canRunLp ? (
@@ -1181,7 +1157,7 @@ export function SearchOffersDashboard({
                               type="button"
                               className="ghost-btn lp-analyze-btn"
                               disabled={Boolean(lpBusy)}
-                              onClick={() => void prepareLandingPage(selectedPage, "details", true)}
+                              onClick={() => void analyseLandingPage(selectedPage, true)}
                             >
                               {busy ? "Refreshing…" : "Refresh"}
                             </button>
@@ -1530,6 +1506,8 @@ export function SearchOffersDashboard({
           ladders={ladders}
           ads={visibleAds}
           adsLoading={!adsLoaded}
+          runId={job.id}
+          recreateDefaults={defaultDetails(job)}
           summary={report.summary || report.valueLadder?.summary || null}
           onOpenOffer={(id, competitor) => {
             setLadderFocus({ id, competitor: competitor || "Other advertisers" });

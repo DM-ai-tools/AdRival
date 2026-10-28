@@ -5,11 +5,19 @@ import type { LookupCoreOfferLadder, SearchCompetitorAdRecord } from "@/lib/type
 import { adDays, competitorLadder, marketSnapshot, rankOffers, type OfferInsight } from "@/lib/offerInsights";
 import { tierName } from "./OfferLadderFlow";
 import { externalUrl } from "@/lib/externalUrl";
+import { pageSignals } from "@/lib/recreateSignals";
+import type { RecreateDetails } from "@/lib/recreateClient";
+import { AddToRecreateButton } from "./recreate/AddToRecreateButton";
 
 const TOP = 5;
 
 function host(url: string | null | undefined): string {
   return String(url || "").replace(/^https?:\/\//i, "").replace(/^www\./i, "").replace(/\/$/, "");
+}
+
+/** One landing page whatever its scheme or trailing slash (as the dashboard's Landing pages tab matches them). */
+function pageKey(url: string | null | undefined): string {
+  return String(url || "").replace(/^https?:\/\//i, "").replace(/\/$/, "").toLowerCase();
 }
 
 function funnelWords(stage?: string | null): string | null {
@@ -47,12 +55,17 @@ export function OfferInsights({
   ladders,
   ads,
   adsLoading,
+  runId,
+  recreateDefaults,
   summary,
   onOpenOffer,
 }: {
   ladders: LookupCoreOfferLadder[];
   ads: SearchCompetitorAdRecord[];
   adsLoading?: boolean;
+  /** The search run; with it, each best offer's landing page can be added to Recreate. */
+  runId?: string;
+  recreateDefaults?: RecreateDetails;
   summary?: string | null;
   onOpenOffer: (offerId: string, competitor: string) => void;
 }) {
@@ -213,13 +226,22 @@ export function OfferInsights({
                   </div>
                 ) : null}
 
-                <button
-                  type="button"
-                  className="ghost-btn insights-open"
-                  onClick={() => onOpenOffer(row.ladder.id, row.competitor || "")}
-                >
-                  See this offer in the ladders →
-                </button>
+                <div className="insights-card-actions">
+                  <button
+                    type="button"
+                    className="ghost-btn insights-open"
+                    onClick={() => onOpenOffer(row.ladder.id, row.competitor || "")}
+                  >
+                    See this offer in the ladders →
+                  </button>
+                  {runId && row.landingPage ? (
+                    <AddToRecreateButton
+                      source={{ runId, url: row.landingPage }}
+                      signals={pageSignals(ads.filter((ad) => pageKey(ad.landingPageUrl) === pageKey(row.landingPage)))}
+                      defaults={recreateDefaults}
+                    />
+                  ) : null}
+                </div>
               </div>
             </li>
           );

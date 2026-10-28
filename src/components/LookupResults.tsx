@@ -1,7 +1,6 @@
 "use client";
 
 import { stageLabel, statusLabel } from "@/lib/progressLabels";
-import { useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import type {
   LookupAdRecord,
@@ -14,10 +13,10 @@ import {
   LookupOffersDashboard,
   LookupOffersTeaser,
 } from "@/components/LookupOffersReportPanel";
-import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { currentReturnPath, withReturn } from "@/lib/returnTo";
+import { AddToRecreateButton } from "@/components/recreate/AddToRecreateButton";
 import { readUrlParam, writeUrlParams } from "@/lib/urlState";
 import { externalUrl } from "@/lib/externalUrl";
+import { defaultDetails } from "@/lib/recreateClient";
 
 interface LookupResultsProps {
   job: LookupJob;
@@ -70,26 +69,15 @@ function AdCard({
   platform,
   job,
   onAdUpdated,
-  onJobUpdated,
 }: {
   ad: LookupAdRecord;
   platform: AdPlatform;
   job: LookupJob;
   onAdUpdated?: (ad: LookupAdRecord) => void;
-  onJobUpdated?: (job: LookupJob) => void;
 }) {
-  const router = useRouter();
   const [openRaw, setOpenRaw] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
-  const [bridging, setBridging] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [confirmExisting, setConfirmExisting] = useState<{
-    competitorId: string;
-    status: string;
-    sourceAnalyzedUrl: string;
-    pageName: string;
-  } | null>(null);
   const snap = (ad.raw.snapshot ?? ad.raw) as Record<string, unknown>;
   const isMeta = platform === "facebook" || platform === "instagram";
   const isLinkedIn = platform === "linkedin";
@@ -97,9 +85,6 @@ function AdCard({
   const canAnalyze = hasAnalyzableUrl(ad);
   const analysis = ad.pageAnalysis;
   const canRecreate = analysis?.status === "completed";
-  const hasBrandUrl = Boolean(
-    (job.businessUrl || job.businessProfile?.url || "").trim(),
-  );
 
   async function runAnalysis(force = false) {
     setError(null);
@@ -178,52 +163,6 @@ function AdCard({
       window.clearTimeout(timeout);
       window.clearInterval(pollTimer);
       setAnalyzing(false);
-    }
-  }
-
-  async function startRecreation(confirmRedesign = false) {
-    setError(null);
-    if (!hasBrandUrl) {
-      setError(
-        "Add your brand website above (Your brand website) before recreating this page.",
-      );
-      return;
-    }
-    setBridging(true);
-    try {
-      const res = await fetch("/api/lookup/recreate-bridge", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          adId: ad.id,
-          businessUrl: job.businessUrl || job.businessProfile?.url,
-          confirmRedesign,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Could not open recreation");
-
-      if (data.lookupJob) onJobUpdated?.(data.lookupJob as LookupJob);
-      if (data.ad) onAdUpdated?.(data.ad as LookupAdRecord);
-
-      if (data.needsConfirm && data.existing) {
-        setConfirmExisting({
-          competitorId: String(data.existing.competitorId),
-          status: String(data.existing.status),
-          sourceAnalyzedUrl: String(data.existing.sourceAnalyzedUrl || ""),
-          pageName: String(data.existing.pageName || "this page"),
-        });
-        setConfirmOpen(true);
-        return;
-      }
-
-      if (data.recreatePath) {
-        router.push(withReturn(String(data.recreatePath), currentReturnPath()));
-      }
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setBridging(false);
     }
   }
 
@@ -353,7 +292,7 @@ function AdCard({
           type="button"
           // The main action until the page is analysed; then Recreate is.
           className={`${analysis?.status === "completed" ? "ghost-btn" : "search-btn"} lookup-analyze-btn`}
-          disabled={!canAnalyze || analyzing || bridging}
+          disabled={!canAnalyze || analyzing}
           title={
             canAnalyze
               ? "Fetch landing page and extract offer + page architecture"
@@ -368,25 +307,16 @@ function AdCard({
               : "Get offer & page details"}
         </button>
         {canRecreate ? (
-          <>
-            <button
-              type="button"
-              className="search-btn lp-recreate-link"
-              disabled={bridging}
-              title={
-                hasBrandUrl
-                  ? "Generate brand content draft for this landing page"
-                  : "Set your brand website first"
-              }
-              onClick={() => void startRecreation(false)}
-            >
-              {bridging
-                ? "Opening…"
-                : ad.recreationCompetitorId
-                  ? "Recreate again"
-                  : "Recreate for my brand"}
-            </button>
-          </>
+          <AddToRecreateButton
+            source={{ lookupAdId: ad.id }}
+            signals={{
+              daysRunning: typeof ad.daysRunning === "number" && ad.daysRunning >= 0 ? ad.daysRunning : null,
+              activeAds: null,
+            }}
+            versionCount={ad.recreationCompetitorId ? 1 : 0}
+            defaults={defaultDetails(job)}
+            className="search-btn lp-recreate-link"
+          />
         ) : null}
         <button
           type="button"
@@ -403,65 +333,11 @@ function AdCard({
         </p>
       )}
 
-      {bridging ? (
-        <div
-          className="recreate-status panel recreate-progress-panel"
-          aria-live="polite"
-        >
-          <div className="offers-analysis-progress-head">
-            <span className="offers-analysis-progress-label">
-              Content creation
-            </span>
-            <span className="offers-analysis-progress-count">…</span>
-          </div>
-          <div className="progress-bar-track offers-analysis-bar">
-            <div
-              className="progress-bar-fill progress-bar-offers"
-              style={{ width: "18%" }}
-            />
-          </div>
-          <p className="muted recreate-progress-msg">
-            Opening content &amp; design for this landing page…
-          </p>
-        </div>
-      ) : null}
-
       {analysis && <PageAnalysisPanel analysis={analysis} />}
 
       {openRaw && (
         <pre className="lookup-raw-json">{JSON.stringify(ad.raw, null, 2)}</pre>
       )}
-
-      <ConfirmDialog
-        open={confirmOpen}
-        title="Landing page already recreated"
-        description={
-          confirmExisting
-            ? `A ${confirmExisting.status.replace(/_/g, " ")} recreation already exists for this landing page${
-                confirmExisting.sourceAnalyzedUrl
-                  ? ` (${confirmExisting.sourceAnalyzedUrl})`
-                  : ""
-              }. Confirm only if you want to redesign it again for your brand.`
-            : "This landing page was already recreated. Confirm to redesign."
-        }
-        confirmLabel="Redesign anyway"
-        cancelLabel="Open existing"
-        busy={bridging}
-        tone="danger"
-        onDismiss={() => setConfirmOpen(false)}
-        onCancel={() => {
-          setConfirmOpen(false);
-          if (confirmExisting?.competitorId) {
-            router.push(
-              withReturn(`/recreate/${encodeURIComponent(confirmExisting.competitorId)}`, currentReturnPath()),
-            );
-          }
-        }}
-        onConfirm={() => {
-          setConfirmOpen(false);
-          void startRecreation(true);
-        }}
-      />
     </article>
   );
 }
@@ -685,8 +561,8 @@ export function LookupResults({
           ) : (
             <p className="muted form-hint">
               After analyzing a competitor landing page, use{" "}
-              <strong>Content &amp; design</strong> on an ad. If that URL was
-              already recreated, you&apos;ll be asked to confirm a redesign.
+              <strong>Add to Recreate</strong> on an ad. The same page can be
+              recreated again, for another business or style.
             </p>
           )}
         </div>
@@ -909,7 +785,6 @@ export function LookupResults({
                 platform={platform}
                 job={job}
                 onAdUpdated={onAdUpdated}
-                onJobUpdated={(next) => onJobUpdated?.(next)}
               />
             ))}
           </div>
