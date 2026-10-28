@@ -24,6 +24,8 @@ const taskState = new Map<string, TaskState>();
 /** While set, every task reports an error (used to end the runs a test left going). */
 let failAll = false;
 let taskSeq = 0;
+/** While set, creating a task waits for it (a build held just before it reaches the agent). */
+let holdCreate: Promise<void> | null = null;
 const calls: Array<{ method: string; taskId: string }> = [];
 const realFetch = globalThis.fetch;
 
@@ -40,6 +42,10 @@ function fakeFetch(input: string | URL | Request, init?: RequestInit): Promise<R
   calls.push({ method, taskId });
   const json = (data: unknown) => Promise.resolve(new Response(JSON.stringify(data), { status: 200 }));
   if (method === "task.create") {
+    if (holdCreate) {
+      calls.pop(); // recorded again when the held call goes through
+      return holdCreate.then(() => fakeFetch(input, init));
+    }
     taskSeq += 1;
     const id = `T-${taskSeq}`;
     taskState.set(id, "running");
@@ -96,7 +102,9 @@ const { reserveCredits, releaseReservation } = await import("@/lib/accounting/se
 const { creditsToSubunits } = await import("@/lib/accounting/units");
 const { RECREATE_BUILD_OPERATION } = await import("@/lib/accounting/scope");
 const { LOW_CREDIT_MESSAGE } = await import("@/lib/accounting/errors");
-const { dispatchRecreateQueue, stopRecreateJob, sweepRecreateQueue } = await import("@/lib/pipeline/recreateQueue");
+const { RECREATE_QUEUE_STATE_KEY, dispatchRecreateQueue, resumedBuildStaleMs, stopRecreateJob, sweepRecreateQueue } =
+  await import("@/lib/pipeline/recreateQueue");
+const { resumeManusRecreation } = await import("@/lib/pipeline/manus/run");
 import type { CompetitorRecord, RecreatedLandingPage, RecreatedPageLight, SearchJob } from "@/lib/types";
 import type { RecreateJob } from "@/lib/data/recreateJobs";
 
@@ -398,4 +406,75 @@ test("a job refused for too many running builds goes back to the queue and start
   assert.equal((await jobById(user.id, jobs[0].id))?.status, "running");
   for (const id of holds.slice(1)) await releaseReservation(id, "test", "settled");
   await drain(user.id);
+});
+
+/*
+ * Next.js can load a module more than once (instrumentation and route
+ * handlers). A cache-busting specifier gives a second, separate copy here.
+ */
+function secondCopy(file: string): string {
+  return `../src/lib/pipeline/${file}?instance=2`;
+}
+
+test("a second copy of the queue module sees the jobs the first is running", async () => {
+  const { user, jobs } = await setup({ count: 1 });
+  const [job] = jobs;
+  let release!: () => void;
+  holdCreate = new Promise<void>((resolve) => (release = resolve));
+  const createsBefore = calls.filter((c) => c.method === "task.create").length;
+  try {
+    await dispatchRecreateQueue(user.id);
+    // The build is held just before it reaches the agent: a pending page with no task yet.
+    await waitFor(async () => (await getCompetitor(job.competitorId))?.recreatedPage?.status === "pending", "the build to start");
+    const startedAt = (await jobById(user.id, job.id))?.startedAt;
+    const state = (globalThis as Record<string, unknown>)[RECREATE_QUEUE_STATE_KEY] as { inFlight: Set<string> };
+    assert.ok(state?.inFlight.has(job.id), "the job is tracked on globalThis");
+
+    const other = (await import(secondCopy("recreateQueue.ts"))) as typeof import("../src/lib/pipeline/recreateQueue");
+    assert.notEqual(other.sweepRecreateQueue, sweepRecreateQueue, "a separate module copy");
+    await other.sweepRecreateQueue(user.id);
+    const after = await jobById(user.id, job.id);
+    assert.equal(after?.status, "running");
+    assert.equal(after?.startedAt, startedAt, "the other copy did not requeue and restart it");
+  } finally {
+    holdCreate = null;
+    release();
+  }
+  await taskOf(job.competitorId);
+  await settle(100);
+  assert.equal(calls.filter((c) => c.method === "task.create").length - createsBefore, 1, "one build, not two");
+  await drain(user.id);
+});
+
+test("a stop from a second copy of the pipeline module aborts a run the first follows", async () => {
+  const { user, jobs } = await setup({ count: 1 });
+  const [job] = jobs;
+  assert.equal(await jobsRepo.removeQueued(job.id, user.id), true);
+  taskState.set("T-shared-stop", "running");
+  await updateCompetitor(job.competitorId, { recreatedPage: manusPage("T-shared-stop") });
+  const polls = () => calls.filter((c) => c.method === "task.listMessages" && c.taskId === "T-shared-stop").length;
+
+  await resumeManusRecreation(job.competitorId);
+  await waitFor(async () => polls() > 0, "the run to be followed");
+  const otherRun = (await import(secondCopy("manus/run.ts"))) as typeof import("../src/lib/pipeline/manus/run");
+  await otherRun.stopManusRecreation(job.competitorId, "Stopped by user");
+  await settle(100);
+  const afterStop = polls();
+  await settle(200);
+  assert.equal(polls(), afterStop, "the followed run stopped polling");
+  assert.equal((await getCompetitor(job.competitorId))?.recreatedPage?.error, "Stopped by user");
+});
+
+test("a resumed build is not taken for dead before the agent's own time limit", () => {
+  const saved = process.env.MANUS_TIMEOUT_MINUTES;
+  try {
+    delete process.env.MANUS_TIMEOUT_MINUTES;
+    assert.ok(resumedBuildStaleMs() > 90 * 60_000, "longer than the default 90-minute limit");
+    process.env.MANUS_TIMEOUT_MINUTES = "120";
+    assert.ok(resumedBuildStaleMs() > 120 * 60_000, "follows MANUS_TIMEOUT_MINUTES");
+    assert.ok(resumedBuildStaleMs() <= 130 * 60_000, "with only a small margin");
+  } finally {
+    if (saved === undefined) delete process.env.MANUS_TIMEOUT_MINUTES;
+    else process.env.MANUS_TIMEOUT_MINUTES = saved;
+  }
 });

@@ -15,7 +15,7 @@ import {
   type RecreateJob,
 } from "../data/recreateJobs";
 import type { RecreatedPageLight } from "../types";
-import { resumeManusRecreation, runManusRecreation, stopManusRecreation } from "./manus/run";
+import { manusTimeoutMs, resumeManusRecreation, runManusRecreation, stopManusRecreation } from "./manus/run";
 
 /*
  * The server-side recreate queue. A user's recreations run up to
@@ -43,13 +43,35 @@ function retryMs(): number {
   return Number.isFinite(ms) && ms > 0 ? ms : 30_000;
 }
 
-/** A resumed build whose page has not changed for this long is taken for dead. */
-const STALE_MS = 35 * 60_000;
+/**
+ * A resumed build whose page has not changed for this long (counted from when
+ * it was picked up at the latest) is taken for dead. The agent run stops itself
+ * after manusTimeoutMs and saves nothing while the agent waits, so this allows
+ * that whole time plus a margin.
+ */
+export function resumedBuildStaleMs(): number {
+  return manusTimeoutMs() + 5 * 60_000;
+}
 
-/** Jobs this process is running or following, so one is never started twice. */
-const inFlight = new Set<string>();
-/** Users with a retry waiting (see retryLater). */
-const retries = new Map<string, ReturnType<typeof setTimeout>>();
+interface QueueState {
+  /** Jobs this process is running or following, so one is never started twice. */
+  inFlight: Set<string>;
+  /** Users with a retry waiting (see retryLater). */
+  retries: Map<string, ReturnType<typeof setTimeout>>;
+}
+
+/**
+ * Kept on globalThis: Next.js can load this module more than once
+ * (instrumentation and route handlers), and every copy must see the same jobs.
+ */
+export const RECREATE_QUEUE_STATE_KEY = "__adrivalRecreateQueue";
+
+function queueState(): QueueState {
+  const g = globalThis as typeof globalThis & { [RECREATE_QUEUE_STATE_KEY]?: QueueState };
+  return (g[RECREATE_QUEUE_STATE_KEY] ??= { inFlight: new Set<string>(), retries: new Map() });
+}
+
+const { inFlight, retries } = queueState();
 
 export class RecreateJobNotFoundError extends Error {
   constructor() {
@@ -262,7 +284,7 @@ function watch(job: RecreateJob): void {
           return;
         }
         const updated = Date.parse(page?.updatedAt || "") || 0;
-        if (Date.now() - Math.max(updated, since) > STALE_MS) {
+        if (Date.now() - Math.max(updated, since) > resumedBuildStaleMs()) {
           await settleRunningJob(job.id, "failed", "The design agent stopped responding. Add the page again.");
           return;
         }

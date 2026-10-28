@@ -105,10 +105,13 @@ Replace every repeat so each photo appears only once. For each repeated spot use
 
 const NUDGE_MESSAGE = `Please attach the complete final page as a single self-contained ${MANUS_HTML_FILENAME} file (inline CSS and JS, images as data URIs or absolute https URLs) to your reply. Do not deploy or publish it.`;
 
-function timeoutMs(): number {
+/** How long one build (or change) may run before it is stopped: MANUS_TIMEOUT_MINUTES, default 90. */
+export function manusTimeoutMs(): number {
   const minutes = Number(process.env.MANUS_TIMEOUT_MINUTES || 90);
   return (Number.isFinite(minutes) && minutes > 0 ? minutes : 90) * 60_000;
 }
+
+const timeoutMs = manusTimeoutMs;
 
 function agentProfile(): string {
   return process.env.MANUS_AGENT_PROFILE?.trim() || "standard";
@@ -405,7 +408,17 @@ function briefInput(
 
 // ── Runs in this process (stop + no double polling) ─────────────────────
 
-const runs = new Map<string, AbortController>();
+/**
+ * Runs this app process follows, by competitor id. Kept on globalThis: Next.js
+ * can load this module more than once (instrumentation and route handlers),
+ * and a stop must reach a run started from any of them.
+ */
+function runsInProcess(): Map<string, AbortController> {
+  const g = globalThis as typeof globalThis & { __adrivalManusRuns?: Map<string, AbortController> };
+  return (g.__adrivalManusRuns ??= new Map<string, AbortController>());
+}
+
+const runs = runsInProcess();
 
 function beginRun(competitorId: string): AbortSignal {
   runs.get(competitorId)?.abort();
