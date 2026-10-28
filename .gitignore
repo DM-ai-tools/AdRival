@@ -61,3 +61,6 @@ FRAMEWORK-COMPARISON-REPORT.md
 /rg.log
 /unit.log
 /status.json
+
+# Claude Code local
+.superpowers/
