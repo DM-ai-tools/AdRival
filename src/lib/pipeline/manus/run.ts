@@ -329,6 +329,58 @@ async function saveState(competitorId: string, patch: Partial<ManusRecreationSta
   return page.manus!;
 }
 
+/** Colours of a page whose client colours are not known. */
+const NEUTRAL_COLORS = {
+  primary: "#0F7A6C",
+  secondary: "#134E4A",
+  accent: "#F59E0B",
+  background: "#FFFFFF",
+  text: "#0F172A",
+};
+
+/**
+ * Shows on the page that its build is reading the client's website (see
+ * isReadingWebsite). The page's content and its other fields are kept; a
+ * record without a page gets a pending one.
+ */
+async function markReading(competitor: CompetitorRecord, job: SearchJob, businessUrl: string): Promise<void> {
+  const reading = { ...progress("send", `Reading ${hostOf(businessUrl)}…`, 1), phase: READING_PHASE };
+  const now = new Date().toISOString();
+  await updateCompetitorWith(competitor.id, (stored) => ({
+    recreatedPage: stored.recreatedPage
+      ? { ...stored.recreatedPage, status: "pending", error: null, progress: reading, updatedAt: now }
+      : ({
+          createdAt: now,
+          updatedAt: now,
+          status: "pending",
+          businessUrl,
+          keyword: job.keywords?.[0] || job.keyword,
+          sourceCompetitorName: competitor.pageName,
+          sourceAnalyzedUrl: competitor.pageAnalysis?.analyzedUrl || "",
+          brandColors: NEUTRAL_COLORS,
+          pipelineVersion: MANUS_PIPELINE_VERSION,
+          error: null,
+          manus: null,
+          progress: reading,
+        } as RecreatedPageLight),
+  }));
+}
+
+/** Records on the page that reading the client's website failed (the earlier page, if any, stays). */
+async function recordReadFailure(competitorId: string, err: unknown): Promise<void> {
+  const raw = (err as Error)?.message || "Recreation failed";
+  const message = isCreditError(err) ? raw : sanitizeClientFacingText(raw);
+  try {
+    await saveOutcome(competitorId, (_stored, hasHtml) => ({
+      status: hasHtml ? "completed" : "failed",
+      error: message,
+      progress: progress("send", message, 0, { blocked: message }),
+    }));
+  } catch (writeErr) {
+    console.error(`[manus] could not record the failed website read of competitor ${competitorId}`, writeErr);
+  }
+}
+
 type Activity = NonNullable<NonNullable<RecreationProgressDetails>["activity"]>;
 
 function progress(
@@ -404,38 +456,56 @@ async function saveVersionProfile(competitorId: string, profile: BusinessProfile
  * search without a profile (or one without a website) has no business to
  * keep, so the job's website is analysed.
  *
- * Throws a client-facing error when the website or its brand colours cannot
- * be read, or the analysis is not set up; credit errors pass through.
+ * `fresh` is true for a profile read now that the version should keep: the
+ * build saves it once it goes ahead (with the page it starts). A profile
+ * without brand colours (the brand read found none) is used for the brief's
+ * name and services but never kept, so the next build reads it again.
+ * `onRead` runs just before the website is read.
+ *
+ * Throws a client-facing error when the website cannot be read, or the
+ * analysis is not set up; credit errors pass through.
  */
 async function businessForBuild(
   competitor: CompetitorRecord,
   job: SearchJob,
   businessUrl: string,
-): Promise<BusinessProfile | null> {
+  onRead?: () => Promise<void>,
+): Promise<{ profile: BusinessProfile; fresh: boolean } | null> {
   const saved = versionProfile(competitor, businessUrl);
-  if (saved) return saved;
+  if (saved) return { profile: saved, fresh: false };
   const own = (job.businessProfile?.url || "").trim();
   if (own && sameWebsite(own, businessUrl)) {
     if (competitor.recreateOnly?.businessProfile) await saveVersionProfile(competitor.id, null);
     return null;
   }
-  const host = hostOf(businessUrl);
+  await onRead?.();
   let profile: BusinessProfile;
   try {
     profile = await businessProfileAnalyzer()(businessUrl);
   } catch (err) {
     if (isCreditError(err)) throw err;
     console.warn(`[manus] could not analyse ${businessUrl} for competitor ${competitor.id}`, err);
-    throw new Error(analysisSetupMessage(err) ?? `Could not read the website ${host}. Check the address and try again.`);
+    throw new Error(analysisSetupMessage(err) ?? `Could not read the website ${hostOf(businessUrl)}. Check the address and try again.`);
   }
-  // Without colours the page would fall back to made-up ones; nothing is kept, so the next build reads it again.
-  if (!profile.brandColors) {
-    throw new Error(`Could not read the brand colours of the website ${host}. Check the address and try again.`);
-  }
-  // Saved under the website it was asked for, so the next build finds it.
-  profile = { ...profile, url: businessUrl };
-  if (competitor.recreateOnly) await saveVersionProfile(competitor.id, profile);
-  return profile;
+  // Kept under the website it was asked for, so the next build finds it.
+  return { profile: { ...profile, url: businessUrl }, fresh: Boolean(profile.brandColors) };
+}
+
+/** Shown when the build's website was read without its brand colours. */
+function brandNoticeFor(businessUrl: string): string {
+  return `Could not read the brand colours of ${hostOf(businessUrl)}; the page uses neutral colours. Describe your colours in Apply changes.`;
+}
+
+/** Progress phase of a build reading the client's website before anything else. */
+const READING_PHASE = "reading";
+/** A page still "reading" after this long was cut off (a restart): a new build may start. */
+const READING_STALE_MS = 15 * 60_000;
+
+/** Whether the page's build is reading the client's website right now (started from the recreate page). */
+export function isReadingWebsite(page: RecreatedLandingPage | null | undefined): boolean {
+  if (!page || page.status !== "pending" || page.progress?.phase !== READING_PHASE) return false;
+  const updated = Date.parse(page.updatedAt || "");
+  return Number.isFinite(updated) && Date.now() - updated < READING_STALE_MS;
 }
 
 function briefInput(
@@ -465,7 +535,8 @@ function briefInput(
     searchKeywords: job.keywords?.length ? job.keywords : job.keyword.split(",").map((k) => k.trim()),
     selectedCategory: job.selectedCategory?.label || null,
     profile,
-    brandColors: profile?.brandColors || competitor.recreatedPage?.brandColors || null,
+    // A business read for this build without colours gets neutral ones, never an earlier page's.
+    brandColors: profile?.brandColors || (business ? null : competitor.recreatedPage?.brandColors) || null,
     pageAnalysis: competitor.pageAnalysis || null,
     styleDirection,
     userFeedback,
@@ -650,8 +721,8 @@ export async function runManusRecreation(
     targetIcp?: { icpId: string; stage: AwarenessStage } | null;
     /**
      * The client's website for this build (a queued job's own). Omitted, a
-     * version keeps its own website (its saved business profile's, else its
-     * page's); any other record uses the run's.
+     * version keeps its own website (its page's, else its saved business
+     * profile's); any other record uses the run's.
      */
     businessUrl?: string | null;
     /**
@@ -674,7 +745,7 @@ export async function runManusRecreation(
   // website may since have been replaced by a later job's.
   const isVersion = Boolean(competitor.recreateOnly?.variantOf);
   const versionUrl = isVersion
-    ? competitor.recreateOnly?.businessProfile?.url || competitor.recreatedPage?.businessUrl || null
+    ? competitor.recreatedPage?.businessUrl || competitor.recreateOnly?.businessProfile?.url || null
     : null;
   const businessUrl = resolveBusinessUrl({
     businessUrl: options.businessUrl || versionUrl || job.businessUrl,
@@ -697,12 +768,30 @@ export async function runManusRecreation(
   const icp = resolved ? { stage: resolved.record.stage, content: resolved.record } : null;
 
   // A job's (or version's) website that is not the search's: its business is read
-  // now, before anything is stopped, written or sent (a failure builds nothing).
-  // Other records build for the run's website as they always have.
-  const business = options.businessUrl || isVersion ? await businessForBuild(competitor, job, businessUrl) : null;
-  if (business && options.stillWanted && !(await options.stillWanted())) {
+  // now, before anything is stopped or sent. A queued job writes nothing until it
+  // is read (a failure builds nothing; the queue records it). A build asked for on
+  // the recreate page (no stillWanted) shows "Reading …" on the page first, so the
+  // page follows it and a second request is not started, and a failure lands on
+  // the page. Other records build for the run's website as they always have.
+  let announced = false;
+  const announce = options.stillWanted
+    ? undefined
+    : async () => {
+        await markReading(competitor, job, businessUrl);
+        announced = true;
+      };
+  let found: Awaited<ReturnType<typeof businessForBuild>> = null;
+  try {
+    found = options.businessUrl || isVersion ? await businessForBuild(competitor, job, businessUrl, announce) : null;
+  } catch (err) {
+    if (announced) await recordReadFailure(competitorId, err);
+    throw err;
+  }
+  if (found && options.stillWanted && !(await options.stillWanted())) {
     return (await getCompetitor(competitorId)) || competitor;
   }
+  const business = found?.profile ?? null;
+  const brandNotice = business && !business.brandColors ? brandNoticeFor(businessUrl) : null;
 
   // The content as it was when this build was asked for (the light page above is from then too).
   // Read before a running build is stopped: a failed read leaves that build alone.
@@ -734,13 +823,7 @@ export async function runManusRecreation(
     keyword: input.keyword,
     sourceCompetitorName: competitor.pageName,
     sourceAnalyzedUrl: input.competitorUrl,
-    brandColors: input.brandColors || existing?.brandColors || {
-      primary: "#0F7A6C",
-      secondary: "#134E4A",
-      accent: "#F59E0B",
-      background: "#FFFFFF",
-      text: "#0F172A",
-    },
+    brandColors: input.brandColors || (brandNotice ? null : existing?.brandColors) || NEUTRAL_COLORS,
     // The last page stays visible until the new one is ready, and Undo brings it
     // back afterwards (so a built-in page can be compared with the agent's).
     html: existingContent?.html || null,
@@ -752,6 +835,7 @@ export async function runManusRecreation(
     ...(targetIcp ? { targetIcp } : {}),
     publishReady: false,
     publishBlockers: [],
+    brandNotice,
     qualityReport: null,
     error: null,
     manus: null,
@@ -761,7 +845,18 @@ export async function runManusRecreation(
 
   try {
     // The new page replaces the old one whole (its source archive is not carried over).
-    await updateCompetitorWith(competitorId, () => ({
+    // A business read for it is kept on the version in the same write (one read
+    // without colours is not, and a profile kept for another website goes), so
+    // the version's profile and its page's website never disagree.
+    await updateCompetitorWith(competitorId, (stored) => ({
+      ...(found && stored.recreateOnly
+        ? {
+            recreateOnly: {
+              ...stored.recreateOnly,
+              businessProfile: found.fresh ? found.profile : versionProfile(stored, businessUrl),
+            },
+          }
+        : {}),
       recreatedPage: baseLight as RecreatedPageLight,
       recreatedPageHeavy: { html: baseHtml ?? null, previousHtml: basePrevious, generatedImages: baseImages },
     }));
@@ -928,6 +1023,8 @@ export async function resumeManusRecreation(competitorId: string): Promise<void>
   const page = (await getCompetitor(competitorId))?.recreatedPage;
   if (!page?.manus?.taskId || !isManusPage(page)) return;
   if (page.status !== "pending" && page.status !== "design_pending") return;
+  // A new build is reading the client's website: the task on the page is the earlier build's.
+  if (isReadingWebsite(page)) return;
   // Another call may have picked the run up while the page was read.
   if (runs.has(competitorId)) return;
   const signal = beginRun(competitorId);
@@ -1332,6 +1429,8 @@ async function collectResult(
   const notMatched = (result?.sections || []).filter((s) => !s.layout_matches).map((s) => s.competitor_section);
   const offService = heroMissesService(html, state.service || null);
   const publishBlockers = [
+    // The client's colours could not be read: the page uses neutral ones.
+    ...(page.brandNotice ? [page.brandNotice] : []),
     ...(offService
       ? [`The hero does not name ${offService}, the service searched for. Ask for a change so the headline and call to action match the competitor's ${offService} offer.`]
       : []),

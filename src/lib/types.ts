@@ -1257,6 +1257,11 @@ export interface RecreatedLandingPage {
   /** Publish readiness from last design fit */
   publishReady?: boolean | null;
   publishBlockers?: string[] | null;
+  /**
+   * Set when the build's website was read but its brand colours were not: the
+   * page uses neutral colours. Shown on the finished page and in the Recreate tab.
+   */
+  brandNotice?: string | null;
   /** Canonical evidence-backed content. Design builds load approvedSnapshot only. */
   contentPack?: import("./pipeline/content/model").ContentPack | null;
   /** Approved revision used by the current HTML, if a design exists. */

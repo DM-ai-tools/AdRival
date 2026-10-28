@@ -41,6 +41,8 @@ export interface RecreateListItem {
   hasPage: boolean;
   openPath: string;
   error: string | null;
+  /** A note on the page, e.g. that the client's brand colours could not be read. */
+  notice: string | null;
 }
 
 /** A queue job as the browser gets it (no owner id; the error masked). */
@@ -161,6 +163,7 @@ function jobItem(job: RecreateJob, record: CompetitorRecord | undefined, run: Re
     hasPage: Boolean(page?.hasPage),
     openPath: openPath(job.competitorId),
     error: maskClientFacingText(job.error),
+    notice: maskClientFacingText(page?.brandNotice),
   };
 }
 
@@ -224,6 +227,7 @@ function pageItem(record: CompetitorRecord, page: RecreatedPageLight, now: Date)
     hasPage: Boolean(page.hasPage),
     openPath: openPath(record.id),
     error: stale ? OLD_BUILD_STALE_ERROR : maskClientFacingText(page.error),
+    notice: maskClientFacingText(page.brandNotice),
   };
 }
 

@@ -568,7 +568,9 @@ test("a job stopped while its website is being read builds nothing", async () =>
     await settle(300);
     assert.equal((await jobById(ctx.user.id, job.id))?.status, "stopped");
     assert.equal(createCount(), createsBefore, "no design agent task after the stop");
-    assert.equal((await getCompetitor(job.competitorId))?.recreatedPage ?? null, null);
+    const version = await getCompetitor(job.competitorId);
+    assert.equal(version?.recreatedPage ?? null, null);
+    assert.equal(version?.recreateOnly?.businessProfile ?? null, null, "no profile is saved for a build that never ran");
   } finally {
     release();
     analyzeWith = null;
@@ -625,23 +627,88 @@ test("saveRunBusinessUrl fills a profile without a website unless told not to", 
   assert.equal((await getJob(ctx.run.id))?.businessProfile?.url, "https://site-b.invalid", "the set_business_url action keeps filling it");
 });
 
-test("a website whose brand colours cannot be read fails the job and saves no profile", async () => {
+const BRAND_NOTICE =
+  "Could not read the brand colours of newco.invalid; the page uses neutral colours. Describe your colours in Apply changes.";
+
+test("a website whose brand colours cannot be read still builds, with neutral colours, a notice and no saved profile", async () => {
   const ctx = await setup({ count: 0, profile: ORIGINAL });
-  const createsBefore = createCount();
-  analyzeWith = async (url) => ({ ...profileOf(url, "Newco Smiles", "#ABCDEF"), brandColors: null, brandAssets: null });
+  analyzeWith = async (url) => ({ ...profileOf(url, "Newco Smiles", "#ABCDEF"), brandColors: null });
   try {
     const job = await addJob(ctx, "https://newco.invalid");
     await dispatchRecreateQueue(ctx.user.id);
-    const failed = await jobEnded(ctx.user.id, job.id, "failed");
-    assert.equal(failed.error, "Could not read the brand colours of the website newco.invalid. Check the address and try again.");
-    assert.equal(createCount(), createsBefore, "no design agent task");
+    const taskId = await taskOf(job.competitorId);
+    const brief = briefOf(taskId);
+    assert.match(brief, /Newco Smiles/, "the brief names the analysed business");
+    assert.match(brief, /Newco Smiles check-ups/, "and its services");
+    assert.doesNotMatch(brief, /Original Dental/);
+    assert.doesNotMatch(brief, /#111111/, "never the search's colours");
     const version = await getCompetitor(job.competitorId);
-    assert.equal(version?.recreatedPage ?? null, null);
+    assert.equal(version?.recreatedPage?.brandColors.primary, "#0F7A6C", "the neutral default colours");
+    assert.equal(version?.recreatedPage?.brandNotice, BRAND_NOTICE);
     assert.equal(version?.recreateOnly?.businessProfile ?? null, null, "a profile without colours is not kept");
+
+    taskState.set(taskId, "done");
+    await jobEnded(ctx.user.id, job.id, "finished");
+    const done = (await getCompetitor(job.competitorId))?.recreatedPage;
+    assert.ok(done?.publishBlockers?.includes(BRAND_NOTICE), "the finished page lists the notice for review");
+    const { buildRecreateList } = await import("@/lib/recreateList");
+    const [item] = buildRecreateList({ jobs: [(await jobById(ctx.user.id, job.id))!], records: [(await getCompetitor(job.competitorId))!], now: new Date() });
+    assert.equal(item.notice, BRAND_NOTICE, "the Recreate tab row shows it");
   } finally {
     analyzeWith = null;
   }
   await drain(ctx.user.id);
+});
+
+test("a rebuild from the recreate page that has to read a website shows it at once, is not started twice, and records a failure", async () => {
+  const ctx = await setup({ count: 0, profile: ORIGINAL });
+  // An older version built for another website, with no saved profile.
+  const version = await createRecreationVersion(ctx.source);
+  await updateCompetitor(version.id, {
+    recreatedPage: { ...manusPage("T-old-version", "completed"), businessUrl: "https://newco.invalid" },
+  });
+  let fail!: (err: Error) => void;
+  const gate = new Promise<never>((_, reject) => (fail = reject));
+  gate.catch(() => undefined);
+  const before = analyzed.length;
+  analyzeWith = async () => gate;
+  // The request helpers first: they set up the async storage Next's modules read when loaded.
+  const { asUser, jsonRequest, readJson } = await import("./helpers/routeRequest");
+  const { POST } = await import("../src/app/api/competitors/recreate-page/route");
+  const rebuild = () =>
+    asUser(ctx.user, async () =>
+      readJson(
+        await POST(
+          jsonRequest("http://localhost/api/competitors/recreate-page", "POST", {
+            competitorId: version.id,
+            action: "regenerate_page",
+          }),
+        ),
+      ),
+    );
+  try {
+    const first = await rebuild();
+    assert.equal(first.status, 202);
+    const reading = (await getCompetitor(version.id))?.recreatedPage;
+    assert.equal(reading?.status, "pending");
+    assert.equal(reading?.progress?.message, "Reading newco.invalid…");
+    assert.equal(analyzed.length - before, 1);
+
+    const second = await rebuild();
+    assert.ok(second.status < 300, "the second request is answered");
+    assert.equal(second.body.inFlight, true, "it follows the running build");
+    assert.equal(analyzed.length - before, 1, "no second analysis");
+
+    fail(new Error("getaddrinfo ENOTFOUND newco.invalid"));
+    const failed = await waitFor(async () => {
+      const page = (await getCompetitor(version.id))?.recreatedPage;
+      return page?.status !== "pending" ? page : null;
+    }, "the failure to be recorded");
+    assert.equal(failed?.status, "failed");
+    assert.equal(failed?.error, "Could not read the website newco.invalid. Check the address and try again.");
+  } finally {
+    analyzeWith = null;
+  }
 });
 
 test("a setup problem with the analysis shows its own message, not 'could not read the website'", async () => {

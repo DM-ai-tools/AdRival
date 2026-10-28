@@ -11,6 +11,7 @@ import {
   cleanScreenshots,
   editManusRecreation,
   isManusRunActive,
+  isReadingWebsite,
   resumeManusRecreation,
   runManusRecreation,
   stopManusRecreation,
@@ -291,6 +292,14 @@ export async function POST(request: Request) {
         },
         fn,
       );
+
+    // A build that is reading the client's website (paid, minutes) is followed, never started again.
+    if ((action === "edit_page" || BUILD_ACTIONS.has(action)) && isReadingWebsite(existing.recreatedPage)) {
+      return NextResponse.json(
+        { competitor: maskCompetitor(await withContentIfReadable(existing)), cached: true, inFlight: true },
+        { status: 202 },
+      );
+    }
 
     // Targeted changes: the same agent task makes them on the page it built.
     if (action === "edit_page") {

@@ -32,6 +32,7 @@ function item(
     hasPage: false,
     openPath: `/recreate/${id}`,
     error: null,
+    notice: null,
     ...extra,
   };
 }
