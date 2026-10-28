@@ -267,6 +267,104 @@ export async function sweepRecreateQueue(ownerUserId?: string): Promise<void> {
   }
 }
 
+/** How often the whole queue is swept in the background (RECREATE_QUEUE_SWEEP_MS; default 3 minutes). */
+export function recreateSweepMs(): number {
+  const ms = Number(process.env.RECREATE_QUEUE_SWEEP_MS || "");
+  return Number.isFinite(ms) && ms > 0 ? ms : 3 * 60_000;
+}
+
+export interface PeriodicSweep {
+  /** Arms the timer; false (and nothing armed) when it was already started. */
+  start(): boolean;
+  /** One sweep now; false when skipped (a sweep is still running, or stopped). */
+  tick(): Promise<boolean>;
+  /** Clears the timer; no tick runs afterwards. */
+  stop(): void;
+}
+
+/**
+ * A sweep on a timer that never overlaps itself: a tick while the previous
+ * sweep is still running is skipped. Errors go to `onError` and the next tick
+ * runs as usual. The default timer is unref'd, so it never keeps a process
+ * (or a test run) alive.
+ */
+export function createPeriodicSweep(opts: {
+  everyMs: number;
+  sweep: () => Promise<void>;
+  onError?: (err: unknown) => void;
+  setTimer?: (fn: () => void, ms: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
+}): PeriodicSweep {
+  const setTimer =
+    opts.setTimer ??
+    ((fn: () => void, ms: number) => {
+      const timer = setInterval(fn, ms);
+      timer.unref?.();
+      return timer;
+    });
+  const clearTimer = opts.clearTimer ?? ((h: unknown) => clearInterval(h as ReturnType<typeof setInterval>));
+  let handle: unknown = null;
+  let started = false;
+  let stopped = false;
+  let running = false;
+
+  const tick = async (): Promise<boolean> => {
+    if (stopped || running) return false;
+    running = true;
+    try {
+      await opts.sweep();
+    } catch (err) {
+      (opts.onError ?? logError("periodic sweep failed"))(err);
+    } finally {
+      running = false;
+    }
+    return true;
+  };
+
+  return {
+    start() {
+      if (started || stopped) return false;
+      started = true;
+      handle = setTimer(() => void tick(), opts.everyMs);
+      return true;
+    },
+    tick,
+    stop() {
+      stopped = true;
+      if (handle !== null) clearTimer(handle);
+      handle = null;
+    },
+  };
+}
+
+/** The process's periodic sweep, on globalThis like the queue state (one per process, whatever copy of this module starts it). */
+const PERIODIC_SWEEP_KEY = "__adrivalRecreateSweep";
+
+function periodicSweepSlot(): { current?: PeriodicSweep } {
+  const g = globalThis as typeof globalThis & { [PERIODIC_SWEEP_KEY]?: { current?: PeriodicSweep } };
+  return (g[PERIODIC_SWEEP_KEY] ??= {});
+}
+
+/**
+ * Sweeps every user's queue every few minutes, so queued jobs start even when
+ * the dispatch after a finished build failed and nobody opens the Recreate tab.
+ * Started once per process (false when it already runs).
+ */
+export function startPeriodicRecreateSweep(): boolean {
+  const slot = periodicSweepSlot();
+  if (slot.current) return false;
+  const sweep = createPeriodicSweep({ everyMs: recreateSweepMs(), sweep: () => sweepRecreateQueue() });
+  slot.current = sweep;
+  return sweep.start();
+}
+
+/** Stops the process's periodic sweep (tests; a later start makes a new one). */
+export function stopPeriodicRecreateSweep(): void {
+  const slot = periodicSweepSlot();
+  slot.current?.stop();
+  slot.current = undefined;
+}
+
 /**
  * Follows a build resumed after a restart (its run has no settle of its own
  * here) until its page settles, records the outcome, then starts the next job.

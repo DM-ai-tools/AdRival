@@ -523,3 +523,98 @@ test("a resumed build is not taken for dead before the agent's own time limit", 
     else process.env.MANUS_TIMEOUT_MINUTES = saved;
   }
 });
+
+const { createPeriodicSweep, recreateSweepMs, startPeriodicRecreateSweep, stopPeriodicRecreateSweep } = await import(
+  "@/lib/pipeline/recreateQueue"
+);
+
+function fakeInterval() {
+  const timers = new Map<number, { fn: () => void; ms: number }>();
+  let next = 1;
+  return {
+    timers,
+    setTimer: (fn: () => void, ms: number) => {
+      timers.set(next, { fn, ms });
+      return next++;
+    },
+    clearTimer: (h: unknown) => {
+      timers.delete(h as number);
+    },
+  };
+}
+
+test("the periodic sweep starts once, never overlaps itself, and stops", async () => {
+  const clock = fakeInterval();
+  let calls = 0;
+  let release: () => void = () => {};
+  const sweep = createPeriodicSweep({
+    everyMs: 1000,
+    sweep: () => {
+      calls += 1;
+      return new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    },
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+  });
+  assert.equal(sweep.start(), true);
+  assert.equal(sweep.start(), false, "a second start is refused");
+  assert.equal(clock.timers.size, 1, "one timer");
+  assert.equal([...clock.timers.values()][0].ms, 1000);
+
+  const first = sweep.tick();
+  assert.equal(await sweep.tick(), false, "a tick while one is running is skipped");
+  assert.equal(calls, 1);
+  release();
+  assert.equal(await first, true);
+  const second = sweep.tick();
+  release();
+  assert.equal(await second, true, "the next tick runs once the first finished");
+  assert.equal(calls, 2);
+
+  sweep.stop();
+  assert.equal(clock.timers.size, 0, "stop clears the timer");
+  assert.equal(await sweep.tick(), false, "nothing runs after stop");
+});
+
+test("a failing sweep is logged and the next tick still runs", async () => {
+  const errors: unknown[] = [];
+  let calls = 0;
+  const sweep = createPeriodicSweep({
+    everyMs: 10,
+    sweep: async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("db down");
+    },
+    onError: (err) => errors.push(err),
+    setTimer: fakeInterval().setTimer,
+    clearTimer: () => {},
+  });
+  sweep.start();
+  assert.equal(await sweep.tick(), true);
+  assert.equal(errors.length, 1);
+  assert.equal(await sweep.tick(), true);
+  assert.equal(calls, 2);
+  sweep.stop();
+});
+
+test("the process-wide periodic sweep is started once and can be stopped", () => {
+  const saved = process.env.RECREATE_QUEUE_SWEEP_MS;
+  try {
+    delete process.env.RECREATE_QUEUE_SWEEP_MS;
+    assert.equal(recreateSweepMs(), 3 * 60_000, "every three minutes by default");
+    process.env.RECREATE_QUEUE_SWEEP_MS = "60000";
+    assert.equal(recreateSweepMs(), 60_000);
+    process.env.RECREATE_QUEUE_SWEEP_MS = "nonsense";
+    assert.equal(recreateSweepMs(), 3 * 60_000);
+    assert.equal(startPeriodicRecreateSweep(), true);
+    assert.equal(startPeriodicRecreateSweep(), false, "started twice: the second is refused");
+  } finally {
+    stopPeriodicRecreateSweep();
+    if (saved === undefined) delete process.env.RECREATE_QUEUE_SWEEP_MS;
+    else process.env.RECREATE_QUEUE_SWEEP_MS = saved;
+  }
+  assert.equal(startPeriodicRecreateSweep(), true, "can start again after a stop");
+  stopPeriodicRecreateSweep();
+});
