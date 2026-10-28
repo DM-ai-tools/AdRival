@@ -1,5 +1,6 @@
 import { getAppSettings } from "@/lib/db";
-import type { AppUser, ProjectKind } from "@/lib/types";
+import type { AppSettings, AppUser, ProjectKind } from "@/lib/types";
+import { scopeOf, type ConcurrencyScope } from "./scope";
 import { runWithBillingContext } from "./context";
 import {
   InsufficientCreditsError,
@@ -30,6 +31,19 @@ export class TooManyConcurrentRunsError extends Error {
   }
 }
 
+/** Landing-page builds use their own limit; everything else keeps the shared one. */
+function concurrencyLimitFor(
+  user: AppUser,
+  settings: AppSettings,
+  scope: ConcurrencyScope,
+): number {
+  if (scope === "recreate") {
+    // Settings saved before this field existed have no value.
+    return settings.maxConcurrentRecreationsPerUser ?? 3;
+  }
+  return user.maxConcurrentRuns ?? settings.maxConcurrentRunsPerUser;
+}
+
 export interface BillableRunOptions {
   user: AppUser;
   operation: string;
@@ -57,6 +71,7 @@ export interface RunPrecheck {
 export async function precheckRun(
   user: AppUser,
   initialHoldSubunits = DEFAULT_INITIAL_HOLD,
+  operation = "",
 ): Promise<RunPrecheck> {
   const summary = await getCreditSummary(user.id);
   if (user.status !== "active") {
@@ -69,8 +84,9 @@ export async function precheckRun(
     };
   }
   const settings = await getAppSettings();
-  const limit = user.maxConcurrentRuns ?? settings.maxConcurrentRunsPerUser;
-  if ((await countOpenReservations(user.id)) >= limit) {
+  const scope = scopeOf(operation);
+  const limit = concurrencyLimitFor(user, settings, scope);
+  if ((await countOpenReservations(user.id, scope)) >= limit) {
     return {
       ok: false,
       reason: "too_many_concurrent_runs",
@@ -129,8 +145,8 @@ export async function runBillable<T>(
   await sweepAbandonedReservations();
 
   const settings = await getAppSettings();
-  const concurrencyLimit =
-    user.maxConcurrentRuns ?? settings.maxConcurrentRunsPerUser;
+  const scope = scopeOf(options.operation);
+  const concurrencyLimit = concurrencyLimitFor(user, settings, scope);
 
   const runBudget = Math.min(
     options.runBudgetSubunits ?? settings.maxRunReservationSubunits,
@@ -150,6 +166,7 @@ export async function runBillable<T>(
     runId: options.runId,
     // Counted under the credits lock, before the account and balance checks.
     maxOpenReservations: concurrencyLimit,
+    scope,
   });
   if (!reserved.ok) {
     if (reserved.reason === "too_many_concurrent_runs") {

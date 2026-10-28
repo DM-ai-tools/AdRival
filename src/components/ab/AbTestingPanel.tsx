@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import type { AbPage } from "@/lib/pipeline/awareness/abPages";
 import { pickDisplayedBase } from "@/lib/pipeline/awareness/icpText";
 import type { IcpRecord } from "@/lib/types";
@@ -12,6 +11,8 @@ import { RunPicker } from "./RunPicker";
 import { CoverageStrip, STAGE_LABELS } from "./CoverageStrip";
 import { IcpDrawer } from "./IcpDrawer";
 import { inFlightKey, stageInFlight, tryAddInFlight } from "@/lib/pipeline/awareness/inFlight";
+import { defaultDetails } from "@/lib/recreateClient";
+import type { RecreateSource } from "@/components/recreate/AddToRecreateButton";
 
 // Module scope on purpose: a paid request keeps its guard while the user
 // switches sources or leaves the tab, and only its own finally clears it.
@@ -25,6 +26,8 @@ type AbData = {
   profileReady: boolean;
   icps?: IcpRecord[];
   baseForStage?: Record<string, AbPage | null>;
+  /** The run's client website, the "Add to Recreate" default. */
+  businessUrl?: string | null;
 };
 
 const key = (s: Source) => `${s.kind}:${s.id}`;
@@ -41,7 +44,6 @@ export function AbTestingPanel({
   spaceId?: string | null;
   spaceName?: string | null;
 }) {
-  const router = useRouter();
   const [allRuns, setAllRuns] = useState<RunItem[]>([]);
   const [runsLoaded, setRunsLoaded] = useState(false);
   const [source, setSource] = useState<Source | null>(defaultSource);
@@ -53,7 +55,6 @@ export function AbTestingPanel({
   const [labelCount, setLabelCount] = useState<number | null>(null);
   const [, setTick] = useState(0);
   const bump = () => setTick((n) => n + 1);
-  const [recreatingId, setRecreatingId] = useState<string | null>(null);
   // Drawer for one stage's ICP. baseId is the user's "Change page" pick.
   const [drawer, setDrawer] = useState<{ stage: string; baseId: string | null } | null>(null);
   const [icpError, setIcpError] = useState<string | null>(null);
@@ -213,58 +214,14 @@ export function AbTestingPanel({
     }
   }
 
-  async function recreate(page: AbPage, icpId?: string) {
-    // Guard double clicks: the offers path can spend credits.
-    if (recreatingId !== null) return;
-    setRecreatingId(page.id);
-    setError(null);
-    try {
-      if (page.origin === "offers" && source) {
-        // Dashboard pages use the offers dashboard's own route, authorised
-        // through the search run. It analyses the page first if needed.
-        const res = await fetch("/api/search/landing-recreate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jobId: source.id, url: page.url }),
-        });
-        const body = await res.json().catch(() => ({}));
-        if (!res.ok || !body.page?.recreatePath) {
-          throw new Error(body.error || "The landing page could not be analysed. Try again.");
-        }
-        if (body.page.analysis?.status !== "completed") {
-          throw new Error("The landing page could not be analysed. Try again.");
-        }
-        const path = String(body.page.recreatePath);
-        router.push(icpId ? `${path}${path.includes("?") ? "&" : "?"}icp=${encodeURIComponent(icpId)}` : path);
-        return;
-      }
-      let competitorId = page.id;
-      if (page.source === "lookupAd") {
-        const call = (extra: Record<string, unknown>) =>
-          fetch("/api/lookup/recreate-bridge", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ adId: page.id, ...extra }),
-          });
-        let res = await call({});
-        let body = await res.json();
-        if (res.ok && body.needsConfirm) {
-          if (!window.confirm(`${body.message}\n\nRedesign anyway?`)) return;
-          res = await call({ confirmRedesign: true });
-          body = await res.json();
-        }
-        if (!res.ok) throw new Error(body.error || "Could not start recreate");
-        competitorId = body.competitorId;
-      }
-      router.push(
-        `/recreate/${encodeURIComponent(competitorId)}${icpId ? `?icp=${encodeURIComponent(icpId)}` : ""}`,
-      );
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not start recreate");
-    } finally {
-      setRecreatingId(null);
-    }
+  /** What "Add to Recreate" queues for a page of this run. */
+  function recreateSourceFor(page: AbPage): RecreateSource | null {
+    // Dashboard pages go through the search run; the queue analyses them first if needed.
+    if (page.origin === "offers") return source?.kind === "search" ? { runId: source.id, url: page.url } : null;
+    if (page.source === "lookupAd") return { lookupAdId: page.id };
+    return { competitorId: page.id };
   }
+  const recreateDefaults = defaultDetails({ businessUrl: data?.businessUrl });
 
   function openDrawer(stage: string, opener: HTMLElement) {
     openerRef.current = opener;
@@ -458,10 +415,10 @@ export function AbTestingPanel({
                     <AbPageCard
                       key={`${p.source}:${p.id}`}
                       page={p}
-                      onRecreate={recreate}
+                      recreateSource={recreateSourceFor(p)}
+                      recreateDefaults={recreateDefaults}
                       onLabel={startLabel}
                       labelAllCount={unlabelled}
-                      recreating={recreatingId === p.id}
                     />
                   ))}
                 </ul>
@@ -479,12 +436,10 @@ export function AbTestingPanel({
           error={icpError}
           basePage={drawerBase}
           pages={data.pages}
-          recreating={recreatingId !== null && recreatingId === drawerBase?.id}
+          recreateSource={drawerBase ? recreateSourceFor(drawerBase) : null}
+          recreateDefaults={recreateDefaults}
           onRegenerate={(notes) => void generateIcp(drawer.stage, notes)}
           onPickBase={(p) => setDrawer({ ...drawer, baseId: p.id })}
-          onRecreate={() => {
-            if (drawerBase && drawerIcp) void recreate(drawerBase, drawerIcp.id);
-          }}
           onClose={closeDrawer}
         />
       ) : null}

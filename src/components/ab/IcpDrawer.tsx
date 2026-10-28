@@ -5,6 +5,8 @@ import type { AbPage } from "@/lib/pipeline/awareness/abPages";
 import { icpToText } from "@/lib/pipeline/awareness/icpText";
 import type { IcpRecord } from "@/lib/types";
 import { STAGE_LABELS } from "./CoverageStrip";
+import type { RecreateDetails } from "@/lib/recreateClient";
+import { AddToRecreateButton, type RecreateSource } from "@/components/recreate/AddToRecreateButton";
 
 export const NO_BASE_TIP = "Analyse a competitor page first";
 
@@ -41,10 +43,10 @@ export function IcpDrawer({
   error,
   basePage,
   pages,
-  recreating,
+  recreateSource,
+  recreateDefaults,
   onRegenerate,
   onPickBase,
-  onRecreate,
   onClose,
 }: {
   stage: string;
@@ -54,11 +56,12 @@ export function IcpDrawer({
   basePage: AbPage | null;
   /** Pages of the run; only completed ones are offered under "Change page". */
   pages: AbPage[];
-  recreating?: boolean;
+  /** What "Add to Recreate" queues for the base page, written for this ICP. */
+  recreateSource: RecreateSource | null;
+  recreateDefaults?: RecreateDetails;
   /** Spends credits; only ever called from an explicit click. */
   onRegenerate: (notes: string) => void;
   onPickBase: (page: AbPage) => void;
-  onRecreate: () => void;
   onClose: () => void;
 }) {
   const titleId = useId();
@@ -262,21 +265,23 @@ export function IcpDrawer({
               <span className="muted" role="status">
                 {copied === "ok" ? "Copied" : copied === "fail" ? "Copy is not available in this browser" : ""}
               </span>
-              <button
-                type="button"
-                className="ghost-btn ab-drawer-primary ab-modal-cta"
-                disabled={!basePage || recreating || generating}
-                title={
-                  !basePage
-                    ? NO_BASE_TIP
-                    : basePage.origin === "offers"
-                      ? "Analyses the base page first and uses credits if it has not been analysed for recreation yet"
-                      : undefined
-                }
-                onClick={onRecreate}
-              >
-                {recreating ? "Opening…" : "Recreate a page for this ICP"}
-              </button>
+              {basePage && recreateSource ? (
+                // The page is written for this profile; an offers page is analysed first (uses credits).
+                <span className="ab-modal-cta">
+                  <AddToRecreateButton
+                    source={recreateSource}
+                    signals={{ daysRunning: null, activeAds: basePage.activeAds }}
+                    icp={{ icpId: icp.id, stage: icp.stage }}
+                    defaults={recreateDefaults}
+                    disabled={generating}
+                    className="ghost-btn ab-drawer-primary"
+                  />
+                </span>
+              ) : (
+                <button type="button" className="ghost-btn ab-drawer-primary ab-modal-cta" disabled title={NO_BASE_TIP}>
+                  Add to Recreate
+                </button>
+              )}
             </>
           ) : !generating ? (
             <button type="button" className="ghost-btn" onClick={() => onRegenerate(notes)}>

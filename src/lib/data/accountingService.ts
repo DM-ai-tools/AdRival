@@ -35,6 +35,7 @@ import {
 } from "./credits";
 import { getUserById } from "./identity";
 import { getAppSettings } from "./settings";
+import { RECREATE_BUILD_OPERATION, type ConcurrencyScope } from "../accounting/scope";
 
 /*
  * Async port of accounting/service.ts and the ledger half of
@@ -468,6 +469,8 @@ export async function reserveCredits(input: {
   note?: string | null;
   ttlMs?: number;
   maxOpenReservations?: number;
+  /** Which holds `maxOpenReservations` counts; omitted counts all of them. */
+  scope?: ConcurrencyScope;
 }): Promise<ReserveResult> {
   return withTx(async (tx): Promise<ReserveResult> => {
     // Locks this user together with any user whose holds it recovers.
@@ -475,7 +478,7 @@ export async function reserveCredits(input: {
 
     if (input.maxOpenReservations !== undefined) {
       // Counted after recovery, as runBillable did after its sweep.
-      const open = await countOpenReservationsIn(tx, input.userId);
+      const open = await countOpenReservationsIn(tx, input.userId, input.scope);
       if (open >= input.maxOpenReservations) {
         return {
           ok: false,
@@ -1222,16 +1225,30 @@ export async function creditsForRun(
   };
 }
 
-async function countOpenReservationsIn(q: Queryable, userId: string): Promise<number> {
+/** The reservation's operation lives in its jsonb `data`, not a column. */
+async function countOpenReservationsIn(
+  q: Queryable,
+  userId: string,
+  scope?: ConcurrencyScope,
+): Promise<number> {
+  const scopeClause =
+    scope === undefined
+      ? ""
+      : scope === "recreate"
+        ? " and data->>'operation' = $2"
+        : " and data->>'operation' is distinct from $2";
   const { rows } = await q.query<{ n: number }>(
-    "select count(*)::int as n from credit_reservations where user_id = $1 and status = 'open'",
-    [userId],
+    `select count(*)::int as n from credit_reservations where user_id = $1 and status = 'open'${scopeClause}`,
+    scope === undefined ? [userId] : [userId, RECREATE_BUILD_OPERATION],
   );
   return rows[0]?.n ?? 0;
 }
 
-export async function countOpenReservations(userId: string): Promise<number> {
-  return countOpenReservationsIn(getDb(), userId);
+export async function countOpenReservations(
+  userId: string,
+  scope?: ConcurrencyScope,
+): Promise<number> {
+  return countOpenReservationsIn(getDb(), userId, scope);
 }
 
 /** Credits charged per run id (calls without a run id are not counted). */

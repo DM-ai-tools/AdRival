@@ -105,10 +105,13 @@ Replace every repeat so each photo appears only once. For each repeated spot use
 
 const NUDGE_MESSAGE = `Please attach the complete final page as a single self-contained ${MANUS_HTML_FILENAME} file (inline CSS and JS, images as data URIs or absolute https URLs) to your reply. Do not deploy or publish it.`;
 
-function timeoutMs(): number {
+/** How long one build (or change) may run before it is stopped: MANUS_TIMEOUT_MINUTES, default 90. */
+export function manusTimeoutMs(): number {
   const minutes = Number(process.env.MANUS_TIMEOUT_MINUTES || 90);
   return (Number.isFinite(minutes) && minutes > 0 ? minutes : 90) * 60_000;
 }
+
+const timeoutMs = manusTimeoutMs;
 
 function agentProfile(): string {
   return process.env.MANUS_AGENT_PROFILE?.trim() || "standard";
@@ -366,7 +369,7 @@ const STAGE_RANGE: Record<StageId, [number, number]> = {
 
 // ── Inputs ──────────────────────────────────────────────────────────────
 
-function resolveBusinessUrl(job: SearchJob): string | null {
+function resolveBusinessUrl(job: Pick<SearchJob, "businessUrl" | "businessProfile">): string | null {
   const url = (job.businessUrl || "").trim() || (job.businessProfile?.url || "").trim();
   if (!url) return null;
   return /^https?:\/\//i.test(url) ? url : `https://${url}`;
@@ -405,7 +408,17 @@ function briefInput(
 
 // ── Runs in this process (stop + no double polling) ─────────────────────
 
-const runs = new Map<string, AbortController>();
+/**
+ * Runs this app process follows, by competitor id. Kept on globalThis: Next.js
+ * can load this module more than once (instrumentation and route handlers),
+ * and a stop must reach a run started from any of them.
+ */
+function runsInProcess(): Map<string, AbortController> {
+  const g = globalThis as typeof globalThis & { __adrivalManusRuns?: Map<string, AbortController> };
+  return (g.__adrivalManusRuns ??= new Map<string, AbortController>());
+}
+
+const runs = runsInProcess();
 
 function beginRun(competitorId: string): AbortSignal {
   runs.get(competitorId)?.abort();
@@ -568,6 +581,8 @@ export async function runManusRecreation(
     assets?: UserAsset[];
     /** A new reader to write for; omitted keeps the one already on the page. */
     targetIcp?: { icpId: string; stage: AwarenessStage } | null;
+    /** The client's website for this build (a queued job's own); omitted uses the run's. */
+    businessUrl?: string | null;
   } = {},
 ): Promise<CompetitorRecord> {
   if (!hasManusKey()) throw new Error("The design agent is not set up yet: add MANUS_API_KEY to the environment.");
@@ -578,7 +593,7 @@ export async function runManusRecreation(
   }
   const job = await getJob(competitor.runId);
   if (!job) throw new Error("Search job not found for this competitor");
-  const businessUrl = resolveBusinessUrl(job);
+  const businessUrl = resolveBusinessUrl({ businessUrl: options.businessUrl || job.businessUrl, businessProfile: job.businessProfile });
   if (!businessUrl) {
     throw new Error("This search has no business website URL. Re-run search with a business URL so recreation can use your brand.");
   }

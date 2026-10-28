@@ -22,6 +22,10 @@ import { PlatformPicker } from "@/components/PlatformPicker";
 import { BusinessProfileSummary } from "@/components/BusinessProfileSummary";
 import { RunCreditLine, type RunCredits } from "@/components/RunCreditLine";
 import { PLATFORM_META, type AdPlatform } from "@/lib/platforms";
+import { defaultDetails } from "@/lib/recreateClient";
+import { FIND_MODES, parseMode, topTabOf, type Mode } from "@/lib/navModes";
+import { RecreateHub } from "@/components/recreate/RecreateHub";
+import { useRecreateJobs } from "@/components/recreate/useRecreateJobs";
 import type { UnifiedHistoryItem } from "@/lib/historyUnified";
 import type {
   CompetitorRecord,
@@ -30,8 +34,6 @@ import type {
   LookupPageCandidate,
   SearchJob,
 } from "@/lib/types";
-
-type Mode = "search" | "lookup" | "ab" | "history";
 
 /** Stages in which a run is still working (mirrors the server's in-flight list). */
 const SEARCH_BUSY_STAGES = new Set([
@@ -55,7 +57,7 @@ type ResultsView = "website" | "preview" | "brand" | "offers";
 
 
 /** The address parts this page owns; dashboards add their own (DASHBOARD_PARAMS). */
-const PAGE_PARAMS = ["mode", "run", "tab", "lookup", "item"] as const;
+const PAGE_PARAMS = ["mode", "run", "tab", "lookup", "item", "page"] as const;
 const DASHBOARD_PARAMS = ["osec", "offer", "ldash"] as const;
 
 function pageParams(params: URLSearchParams): URLSearchParams {
@@ -72,6 +74,8 @@ function pageParams(params: URLSearchParams): URLSearchParams {
 export default function HomePage() {
   const [platform, setPlatform] = useState<AdPlatform>("facebook");
   const [mode, setMode] = useState<Mode>("search");
+  // The Find sub-tab to return to when the user comes back from Recreate or History.
+  const [lastFindMode, setLastFindMode] = useState<(typeof FIND_MODES)[number]>("search");
   const [resultsView, setResultsView] = useState<ResultsView>("preview");
   const [historyResultsView, setHistoryResultsView] =
     useState<ResultsView>("preview");
@@ -102,6 +106,10 @@ export default function HomePage() {
     clientName: "",
     role: "",
   });
+  // Called once here, so the list keeps polling and the badge stays live on every tab.
+  const recreateJobs = useRecreateJobs(activeSpace.id || null);
+  // ?mode=recreate&page=<source id>: the Recreate tab shows that page's versions ("View versions").
+  const [recreatePage, setRecreatePage] = useState<string | null>(null);
   const [selectedHistory, setSelectedHistory] =
     useState<UnifiedHistoryItem | null>(null);
   const [historyJob, setHistoryJob] = useState<SearchJob | null>(null);
@@ -526,6 +534,10 @@ export default function HomePage() {
   }, [lookupId, pollLookup, lookupBusy]);
 
   useEffect(() => {
+    if (mode === "search" || mode === "lookup" || mode === "ab") setLastFindMode(mode);
+  }, [mode]);
+
+  useEffect(() => {
     if (mode === "history") void loadHistory();
   }, [mode, loadHistory]);
 
@@ -543,9 +555,7 @@ export default function HomePage() {
   const applyViewParams = useCallback((params: URLSearchParams) => {
     applyingUrl.current = true;
     const nextMode = params.get("mode");
-    if (nextMode === "search" || nextMode === "lookup" || nextMode === "ab" || nextMode === "history") {
-      setMode(nextMode);
-    }
+    if (nextMode) setMode(parseMode(nextMode));
     const run = params.get("run");
     if (run && run !== liveSearchId.current) {
       liveSearchId.current = run;
@@ -566,6 +576,7 @@ export default function HomePage() {
       setLookupAds([]);
     }
     pendingHistoryItem.current = params.get("item");
+    setRecreatePage(nextMode === "recreate" ? params.get("page") || null : null);
     lastPushed.current = pageParams(params).toString();
     // If some of the address could not be applied (e.g. a tab with no run),
     // stop waiting for the state to match it.
@@ -612,6 +623,7 @@ export default function HomePage() {
       params.set("tab", resultsView);
     }
     if (mode === "lookup" && lookupId) params.set("lookup", lookupId);
+    if (mode === "recreate" && recreatePage) params.set("page", recreatePage);
     if (mode === "history" && selectedHistory) {
       params.set("item", `${selectedHistory.kind}:${selectedHistory.id}`);
       if (selectedHistory.kind === "search") params.set("tab", historyResultsView);
@@ -666,7 +678,7 @@ export default function HomePage() {
       window.history.pushState(null, "", `?${next}`);
     }
     lastPushed.current = next;
-  }, [mode, jobId, lookupId, resultsView, selectedHistory, historyResultsView]);
+  }, [mode, jobId, lookupId, resultsView, selectedHistory, historyResultsView, recreatePage]);
 
   // Reopen the history item named in the address once the list has loaded.
   useEffect(() => {
@@ -718,6 +730,7 @@ export default function HomePage() {
       generatingHistoryOffers,
   );
   const meta = PLATFORM_META[platform];
+  const topTab = topTabOf(mode);
 
   const refreshAfterStop = useCallback(() => {
     if (jobId) void pollSearch(jobId);
@@ -780,38 +793,70 @@ export default function HomePage() {
         <button
           type="button"
           role="tab"
-          className={`tab-btn ${mode === "search" ? "active" : ""}`}
-          onClick={() => setMode("search")}
+          className={`tab-btn ${topTab === "find" ? "active" : ""}`}
+          onClick={() => {
+            if (topTab !== "find") setMode(lastFindMode);
+          }}
         >
-          Keyword search
+          Find
         </button>
         <button
           type="button"
           role="tab"
-          className={`tab-btn ${mode === "lookup" ? "active" : ""}`}
-          onClick={() => setMode("lookup")}
+          className={`tab-btn ${topTab === "recreate" ? "active" : ""}`}
+          onClick={() => {
+            setMode("recreate");
+            setRecreatePage(null);
+          }}
         >
-          Competitor lookup
+          Recreate
+          {recreateJobs.running + recreateJobs.queued > 0 && (
+            <span className="tab-badge">
+              {recreateJobs.running} running
+              {recreateJobs.queued > 0 ? ` · ${recreateJobs.queued} queued` : ""}
+            </span>
+          )}
         </button>
         <button
           type="button"
           role="tab"
-          className={`tab-btn ${mode === "ab" ? "active" : ""}`}
-          onClick={() => setMode("ab")}
-        >
-          A/B testing
-        </button>
-        <button
-          type="button"
-          role="tab"
-          className={`tab-btn ${mode === "history" ? "active" : ""}`}
+          className={`tab-btn ${topTab === "history" ? "active" : ""}`}
           onClick={() => setMode("history")}
         >
           History
         </button>
       </div>
 
-      {mode !== "history" && mode !== "ab" && (
+      {topTab === "find" && (
+        <div className="tab-bar results-subtabs" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            className={`tab-btn ${mode === "search" ? "active" : ""}`}
+            onClick={() => setMode("search")}
+          >
+            Keyword search
+          </button>
+          <button
+            type="button"
+            role="tab"
+            className={`tab-btn ${mode === "lookup" ? "active" : ""}`}
+            onClick={() => setMode("lookup")}
+          >
+            Competitor lookup
+          </button>
+          <button
+            type="button"
+            role="tab"
+            className={`tab-btn ${mode === "ab" ? "active" : ""}`}
+            onClick={() => setMode("ab")}
+          >
+            A/B testing
+          </button>
+        </div>
+      )}
+
+      {(mode === "search" || mode === "lookup") && (
         <>
           <PlatformPicker
             value={platform}
@@ -823,6 +868,10 @@ export default function HomePage() {
             <strong>{meta.label}</strong> — {meta.description}
           </p>
         </>
+      )}
+
+      {mode === "recreate" && (
+        <RecreateHub jobs={recreateJobs} sourceFilter={recreatePage} onClearSourceFilter={() => setRecreatePage(null)} />
       )}
 
       {mode === "ab" && (
@@ -970,6 +1019,7 @@ export default function HomePage() {
                   );
                 }}
                 onCompetitorsUpdated={setCompetitors}
+                recreateDefaults={defaultDetails(job)}
               />
             ) : resultsView === "brand" ? (
               <BrandReviewPanel
@@ -1260,6 +1310,7 @@ export default function HomePage() {
                       );
                     }}
                     onCompetitorsUpdated={setHistoryCompetitors}
+                    recreateDefaults={defaultDetails(historyJob)}
                   />
                 ) : historyResultsView === "brand" ? (
                   <BrandReviewPanel

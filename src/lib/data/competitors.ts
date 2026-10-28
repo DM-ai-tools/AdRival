@@ -125,6 +125,42 @@ export function getRecreateOnlyPagesByRun(runId: string): Promise<CompetitorReco
   );
 }
 
+/**
+ * A user's recreations: every record they own that holds a recreated page
+ * (versions, and older source records that already had one). Scoped to a
+ * client space through the run's job; a null space means runs with no space.
+ */
+export function listRecreationsForUser(userId: string, spaceId: string | null): Promise<CompetitorRecord[]> {
+  return selectCompetitors(
+    `select c.data from competitors c
+       join jobs j on j.id = c.run_id
+      where c.owner_user_id = $1
+        and j.space_id is not distinct from $2::text
+        and coalesce(c.data->'recreatedPage', 'null'::jsonb) <> 'null'::jsonb
+      order by c.created_at desc, c.id desc`,
+    [userId, spaceId],
+  );
+}
+
+/**
+ * How many recreations each source page of a run has, in one grouped read:
+ * versions count under the page they were made from (`recreateOnly.variantOf`),
+ * and a record that holds a page itself (recreated before versions) counts as
+ * one of its own. Pages with none are left out.
+ */
+export async function getRecreationVersionCounts(runId: string): Promise<Record<string, number>> {
+  const { rows } = await getDb().query<{ source_id: string; n: number }>(
+    `select coalesce(nullif(data->'recreateOnly'->>'variantOf', ''), id) as source_id, count(*)::int as n
+       from competitors
+      where run_id = $1
+        and (coalesce(data->'recreateOnly'->>'variantOf', '') <> ''
+             or coalesce(data->'recreatedPage', 'null'::jsonb) <> 'null'::jsonb)
+      group by 1`,
+    [runId],
+  );
+  return Object.fromEntries(rows.map((r) => [r.source_id, Number(r.n)]));
+}
+
 /** One competitor, with its light page (content via getRecreatedPage). */
 export function getCompetitor(id: string): Promise<CompetitorRecord | null> {
   return storedCompetitor(getDb(), id, false);
@@ -164,6 +200,27 @@ export async function updateCompetitor(id: string, patch: Partial<CompetitorReco
     );
     await applyHeavy(tx, id, action);
     return next;
+  });
+}
+
+/**
+ * Deletes a recreation version that holds no page yet (a queued recreation
+ * removed before it started). Any other record is left alone: false.
+ */
+export async function deleteCompetitor(id: string): Promise<boolean> {
+  return withTx(async (tx) => {
+    const owner = await tx.query<{ run_id: string }>("select run_id from competitors where id = $1", [id]);
+    const runId = owner.rows[0]?.run_id;
+    if (runId === undefined) return false;
+    await lockRun(tx, runId);
+    const { rowCount } = await tx.query(
+      `delete from competitors
+        where id = $1
+          and coalesce(data->'recreateOnly'->>'variantOf', '') <> ''
+          and coalesce(data->'recreatedPage', 'null'::jsonb) = 'null'::jsonb`,
+      [id],
+    );
+    return rowCount > 0;
   });
 }
 

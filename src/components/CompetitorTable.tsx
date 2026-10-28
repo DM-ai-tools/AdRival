@@ -12,8 +12,10 @@ import {
   normalizeWebsiteUrl,
 } from "@/lib/pipeline/linkGuards";
 import { PageAnalysisPanel } from "@/components/PageAnalysisPanel";
-import { ReturnLink } from "@/components/ReturnLink";
+import { AddToRecreateButton } from "@/components/recreate/AddToRecreateButton";
+import { useVersionCounts } from "@/components/recreate/useVersionCounts";
 import { externalUrl } from "@/lib/externalUrl";
+import type { RecreateDetails } from "@/lib/recreateClient";
 
 function countryLabel(c?: string | null) {
   if (!c) return "—";
@@ -148,6 +150,8 @@ interface CompetitorTableProps {
   runId?: string | null;
   onCompetitorUpdated?: (competitor: CompetitorRecord) => void;
   onCompetitorsUpdated?: (competitors: CompetitorRecord[]) => void;
+  /** "Add to Recreate" popup defaults from the run (see defaultDetails). */
+  recreateDefaults?: RecreateDetails;
 }
 
 function SortTh({
@@ -186,6 +190,7 @@ export function CompetitorTable({
   runId = null,
   onCompetitorUpdated,
   onCompetitorsUpdated,
+  recreateDefaults,
 }: CompetitorTableProps) {
   const [sortKey, setSortKey] = useState<SortKey>("activeAdsCount");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
@@ -198,6 +203,8 @@ export function CompetitorTable({
   const [locationNote, setLocationNote] = useState<string | null>(null);
 
   const resolvedRunId = runId || competitors[0]?.runId || null;
+  // Recreations of each competitor's page (versions, or an old page), read once for the run.
+  const versionCounts = useVersionCounts(resolvedRunId ? { runId: resolvedRunId } : null);
 
   async function refreshOneLocation(competitorId: string) {
     setLocationError(null);
@@ -610,17 +617,16 @@ export function CompetitorTable({
                         </button>
                       )}
                       {analysis?.status === "completed" && (
-                        <ReturnLink
-                          className="search-btn lp-analyze-btn lp-recreate-link"
-                          href={`/recreate/${encodeURIComponent(c.id)}`}
-                          title="Recreate this landing page for your client's brand. Nothing is charged until you press Create."
-                        >
-                          {c.recreatedPage?.status === "completed"
-                            ? "View recreated page"
-                            : c.recreatedPage?.status === "content_ready"
-                              ? "Review content draft"
-                              : "Recreate for my brand"}
-                        </ReturnLink>
+                        <AddToRecreateButton
+                          source={{ competitorId: c.id }}
+                          signals={{
+                            daysRunning:
+                              typeof ad.daysRunning === "number" && ad.daysRunning >= 0 ? ad.daysRunning : null,
+                            activeAds: c.activeAdsCount,
+                          }}
+                          versionCount={versionCounts[c.id] ?? 0}
+                          defaults={recreateDefaults}
+                        />
                       )}
                     </div>
                   </td>

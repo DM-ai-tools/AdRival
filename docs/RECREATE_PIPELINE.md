@@ -20,3 +20,12 @@ Recreation is done by the **Manus design agent** (Manus API v2, https://open.man
 | `MANUS_CONNECTORS` | `Firecrawl,OpenAI` | Connectors switched on for each task (names or ids) |
 | `MANUS_AGENT_PROFILE` | `standard` | `standard`, `lite` or `max` |
 | `MANUS_TIMEOUT_MINUTES` | `90` | Run time limit |
+
+## Recreate hub, queue and versions
+
+- **Versions.** Each recreation is its own version record: a competitor-page record with `recreateOnly.variantOf` pointing at the page it recreates, so the same page can be recreated for different businesses without overwriting earlier work.
+- **Queue.** The `recreate_jobs` table (`src/lib/data/recreateJobs.ts`) holds queued and running jobs. The dispatcher in `src/lib/pipeline/recreateQueue.ts` (`dispatchRecreateQueue`) starts queued jobs on the server whenever a slot frees, so it does not depend on the browser being open. `sweepRecreateQueue` picks work up again on server startup (`src/lib/data/startup.ts`) and on every list GET. `stopRecreateJob` stops a job and frees its slot.
+- **Limit.** Recreate builds have their own limit of 3 per user (`maxConcurrentRecreationsPerUser`, admin setting, default 3). The scope is decided in `src/lib/accounting/scope.ts` (`scopeOf`: only `recreate.generate_page` counts as `recreate`), so builds never block searches or other paid tasks. `edit_page` stays on the shared limit.
+- **API.** `POST /api/recreate/jobs` adds pages (starts them, or queues them when the 3 slots are taken); `GET /api/recreate/jobs` lists jobs and versions (and sweeps the queue); `DELETE /api/recreate/jobs/[id]` stops or removes a job.
+- **Archive.** Finished pages are flagged archived 14 days after finishing (`ARCHIVE_AFTER_DAYS` in `src/lib/recreateList.ts`). The flag is computed when the list is read; nothing is ever deleted. The hub's Archived filter shows them.
+- **Navigation.** Top-level tabs are Find, Recreate and History (`src/lib/navModes.ts`); Find holds search, lookup and A/B.

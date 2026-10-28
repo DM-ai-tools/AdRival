@@ -85,7 +85,7 @@ test("runStartup: migrates, recovers interrupted jobs and expired reservations; 
   setClientForTests(fresh);
   try {
     const first = await runStartup();
-    assert.deepEqual(first.migrated, ["001_init.sql", "002_indexes.sql", "003_provider_calls_idempotency.sql"]);
+    assert.deepEqual(first.migrated, ["001_init.sql", "002_indexes.sql", "003_provider_calls_idempotency.sql", "004_recreate_jobs.sql", "005_lookup_recreate_space.sql"]);
     assert.equal(first.interrupted, 0);
 
     const running = job("run-1", "running");

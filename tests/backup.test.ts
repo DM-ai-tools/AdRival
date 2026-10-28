@@ -164,7 +164,13 @@ test("a backup writes one or more objects per table, then the manifest last", as
   assert.equal(puts[puts.length - 1], `${BACKUP_BUCKET}/2026-10-26T0200Z/manifest.json`, "manifest is written last");
 
   const manifest = manifestOf(result.date);
-  assert.deepEqual(manifest.migrations, ["001_init.sql", "002_indexes.sql", "003_provider_calls_idempotency.sql"]);
+  assert.deepEqual(manifest.migrations, [
+    "001_init.sql",
+    "002_indexes.sql",
+    "003_provider_calls_idempotency.sql",
+    "004_recreate_jobs.sql",
+    "005_lookup_recreate_space.sql",
+  ]);
   assert.equal(manifest.tables.length, BACKUP_TABLES.length);
   let rows = 0;
   let bytes = 0;
@@ -186,7 +192,7 @@ test("a backup writes one or more objects per table, then the manifest last", as
   const counts = Object.fromEntries(manifest.tables.map((t) => [t.name, t.rows]));
   assert.equal(counts.recreated_pages, 2);
   assert.equal(counts.users, 2);
-  assert.equal(counts.schema_migrations, 3);
+  assert.equal(counts.schema_migrations, 5);
 
   // Archived content stays in the archive bucket: the row carries only its path.
   const pagesPart = manifest.tables.find((t) => t.name === "recreated_pages")!.parts[0];

@@ -1,0 +1,308 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { ARCHIVE_AFTER_DAYS, buildRecreateList, isArchived } from "../src/lib/recreateList";
+import type { RecreateJob } from "../src/lib/data/recreateJobs";
+import type { CompetitorRecord, RecreatedPageLight } from "../src/lib/types";
+
+/*
+ * The Recreate tab's list (src/lib/recreateList.ts): queue jobs merged with
+ * the recreated pages, newest first, archived 14 days after finishing.
+ */
+
+const DAY = 24 * 60 * 60 * 1000;
+const NOW = new Date("2026-10-28T12:00:00.000Z");
+const daysAgo = (days: number) => new Date(NOW.getTime() - days * DAY).toISOString();
+
+function page(overrides: Partial<RecreatedPageLight> = {}): RecreatedPageLight {
+  return {
+    status: "completed",
+    createdAt: daysAgo(20),
+    updatedAt: daysAgo(20),
+    businessUrl: "https://client.invalid",
+    keyword: "dentist",
+    sourceCompetitorName: "Rival Clinic",
+    sourceAnalyzedUrl: "https://rival.invalid/offer",
+    brandColors: { primary: "#000", secondary: "#111", accent: "#222" },
+    hasPage: true,
+    pageBytes: 10,
+    pageUpdatedAt: daysAgo(20),
+    ...overrides,
+  } as RecreatedPageLight;
+}
+
+function record(id: string, overrides: Partial<CompetitorRecord> = {}): CompetitorRecord {
+  return {
+    id,
+    runId: "run-1",
+    pageId: `page-${id}`,
+    pageName: "Rival Clinic",
+    country: "AU",
+    platform: "facebook",
+    activeAdsCount: 4,
+    services: [],
+    sampleAd: {
+      adArchiveId: "a",
+      title: "t",
+      body: "b",
+      daysRunning: 45,
+      adLibraryUrl: "https://x.invalid",
+      landingPageUrl: "https://rival.invalid/offer",
+    },
+    brand: {},
+    pageAnalysis: { status: "completed", analyzedUrl: "https://rival.invalid/offer", analyzedAt: daysAgo(30) },
+    createdAt: daysAgo(30),
+    ...overrides,
+  } as CompetitorRecord;
+}
+
+function version(id: string, overrides: Partial<CompetitorRecord> = {}): CompetitorRecord {
+  return record(id, {
+    recreateOnly: {
+      sourceUrl: "https://rival.invalid/offer",
+      matchKey: "rival.invalid/offer",
+      fromCompetitorId: "src-1",
+      variantOf: "src-1",
+    },
+    ...overrides,
+  });
+}
+
+function job(id: string, competitorId: string, overrides: Partial<RecreateJob> = {}): RecreateJob {
+  return {
+    id,
+    ownerUserId: "user-1",
+    competitorId,
+    runId: "run-1",
+    spaceId: null,
+    status: "queued",
+    options: { businessUrl: "https://client.invalid", styleDirection: "minimal", userFeedback: null, targetIcp: null },
+    error: null,
+    createdAt: daysAgo(1),
+    startedAt: null,
+    finishedAt: null,
+    ...overrides,
+  };
+}
+
+test("isArchived is false at 13 days and true at 15 days", () => {
+  assert.equal(ARCHIVE_AFTER_DAYS, 14);
+  assert.equal(isArchived(daysAgo(13), NOW), false);
+  assert.equal(isArchived(daysAgo(15), NOW), true);
+  assert.equal(isArchived(null, NOW), false, "not finished: never archived");
+  assert.equal(isArchived("not a date", NOW), false);
+});
+
+test("isArchived uses the finish date, not the creation date", () => {
+  const items = buildRecreateList({
+    jobs: [
+      job("j-old-recent", "rv-1", { status: "finished", createdAt: daysAgo(40), startedAt: daysAgo(40), finishedAt: daysAgo(2) }),
+      job("j-failed-long-ago", "rv-2", { status: "failed", createdAt: daysAgo(20), finishedAt: daysAgo(16), error: "agent broke" }),
+      job("j-queued-long", "rv-3", { status: "queued", createdAt: daysAgo(30) }),
+    ],
+    records: [version("rv-1", { recreatedPage: page() }), version("rv-2", { recreatedPage: page({ status: "failed" }) }), version("rv-3")],
+    now: NOW,
+  });
+  const byId = new Map(items.map((i) => [i.id, i]));
+  assert.equal(byId.get("j-old-recent")?.archived, false, "created 40 days ago, finished 2 days ago");
+  assert.equal(byId.get("j-failed-long-ago")?.archived, true, "failed jobs follow the same rule");
+  assert.equal(byId.get("j-queued-long")?.archived, false, "a queued job is never archived");
+});
+
+test('old source records with a recreatedPage appear as finished items with "—" fields', () => {
+  // A competitor recreated before versions existed: the page lives on the source record itself.
+  const legacy = record("c-legacy", {
+    activeAdsCount: 0,
+    pageAnalysis: null,
+    sampleAd: { adArchiveId: "a", title: "t", body: "b", daysRunning: -1, adLibraryUrl: "https://x.invalid" },
+    recreatedPage: page({
+      createdAt: daysAgo(3),
+      updatedAt: daysAgo(2),
+      businessName: undefined,
+      keyword: "",
+      styleDirection: undefined,
+      targetIcp: undefined,
+      manus: { taskId: "T-secret" } as RecreatedPageLight["manus"],
+    }),
+  });
+  const items = buildRecreateList({ jobs: [], records: [legacy], now: NOW });
+  assert.equal(items.length, 1);
+  const item = items[0];
+  assert.equal(item.state, "finished", "an old page shows by its own status");
+  assert.equal(item.id, "c-legacy");
+  assert.equal(item.sourceId, "c-legacy", "an old page is its own source");
+  assert.equal(item.businessUrl, "https://client.invalid");
+  assert.equal(item.competitorId, "c-legacy");
+  assert.equal(item.jobId, null, "no queue job: nothing to stop");
+  assert.equal(item.businessName, null);
+  assert.equal(item.keyword, null);
+  assert.equal(item.styleDirection, null);
+  assert.equal(item.targetIcp, null);
+  assert.equal(item.daysRunning, null, "unknown days running shows —");
+  assert.equal(item.activeAds, null, "unknown active ads shows —");
+  assert.equal(item.progress, null);
+  assert.equal(item.sourceName, "Rival Clinic");
+  assert.equal(item.sourceUrl, "https://rival.invalid/offer");
+  assert.equal(item.hasPage, true);
+  assert.equal(item.openPath, "/recreate/c-legacy");
+  assert.equal(item.finishedAt, daysAgo(2), "a finished legacy page counts from its last update");
+  assert.equal(item.archived, false);
+  assert.equal(JSON.stringify(items).includes("T-secret"), false, "the design agent's task stays on the server");
+
+  const old = buildRecreateList({
+    jobs: [],
+    records: [record("c-old", { recreatedPage: page({ updatedAt: daysAgo(30) }) })],
+    now: NOW,
+  });
+  assert.equal(old[0].archived, true, "old pages are archived too");
+});
+
+test("jobs merge with their versions, newest first, with the source page's signals", () => {
+  const running = version("rv-run", {
+    recreatedPage: page({
+      status: "design_pending",
+      createdAt: daysAgo(0.5),
+      updatedAt: daysAgo(0.1),
+      businessName: "Bright Smiles",
+      hasPage: false,
+      progress: { phase: "build", message: "Building with Manus", pct: 42 },
+      error: null,
+    }),
+  });
+  const items = buildRecreateList({
+    jobs: [
+      job("j-queued", "rv-queued", {
+        createdAt: daysAgo(0.2),
+        options: {
+          businessUrl: "https://client.invalid",
+          styleDirection: null,
+          userFeedback: "warmer",
+          targetIcp: { icpId: "icp-1", stage: "problem_aware" },
+        },
+      }),
+      job("j-run", "rv-run", { status: "running", createdAt: daysAgo(0.5), startedAt: daysAgo(0.5) }),
+    ],
+    records: [running, version("rv-queued", { activeAdsCount: 9 }), record("c-legacy", { recreatedPage: page() })],
+    runs: new Map([["run-1", { keyword: "dentist sydney", businessName: "Bright Smiles Run" }]]),
+    now: NOW,
+  });
+  assert.deepEqual(
+    items.map((i) => i.id),
+    ["j-queued", "j-run", "c-legacy"],
+    "newest first; the running version is one item, not also a legacy one",
+  );
+  const [queued, run] = items;
+  assert.equal(queued.state, "queued");
+  assert.equal(queued.jobId, "j-queued");
+  assert.equal(queued.competitorId, "rv-queued");
+  assert.equal(queued.daysRunning, 45);
+  assert.equal(queued.activeAds, 9);
+  assert.equal(queued.progress, null);
+  assert.equal(queued.hasPage, false);
+  assert.equal(queued.businessName, "Bright Smiles Run", "before the build, the run's business");
+  assert.equal(queued.keyword, "dentist sydney");
+  assert.deepEqual(queued.targetIcp, { icpId: "icp-1", stage: "problem_aware" });
+  assert.equal(queued.styleDirection, null);
+  assert.equal(queued.openPath, "/recreate/rv-queued");
+
+  assert.equal(run.state, "running");
+  assert.equal(run.businessName, "Bright Smiles", "the page's own business once built");
+  assert.equal(run.keyword, "dentist");
+  assert.equal(run.styleDirection, "minimal");
+  assert.deepEqual(run.progress, { pct: 42, message: "Building with design agent" }, "progress text is masked");
+  assert.equal(run.finishedAt, null);
+});
+
+test("a version whose job is not in the list follows its page, with nothing to stop", () => {
+  // An editor queued these on the user's run: the versions are the run owner's, the jobs the editor's.
+  const building = version("rv-theirs-running", {
+    recreatedPage: page({
+      status: "pending",
+      createdAt: daysAgo(0.1),
+      hasPage: false,
+      progress: { phase: "build", message: "Building", pct: 30 },
+    }),
+  });
+  const done = version("rv-theirs-done", { recreatedPage: page({ createdAt: daysAgo(2), updatedAt: daysAgo(1) }) });
+  const broke = version("rv-theirs-failed", {
+    recreatedPage: page({ status: "failed", createdAt: daysAgo(3), updatedAt: daysAgo(3), error: "agent broke" }),
+  });
+  const items = buildRecreateList({ jobs: [], records: [building, done, broke], now: NOW });
+  const byId = new Map(items.map((i) => [i.id, i]));
+  assert.deepEqual(
+    items.map((i) => [i.id, i.state, i.jobId]),
+    [
+      ["rv-theirs-running", "running", null],
+      ["rv-theirs-done", "finished", null],
+      ["rv-theirs-failed", "failed", null],
+    ],
+    "never shown as legacy pages",
+  );
+  assert.deepEqual(byId.get("rv-theirs-running")?.progress, { pct: 30, message: "Building" });
+  assert.equal(byId.get("rv-theirs-running")?.finishedAt, null);
+  assert.equal(byId.get("rv-theirs-done")?.finishedAt, daysAgo(1));
+  assert.equal(byId.get("rv-theirs-failed")?.error, "agent broke");
+});
+
+test("a real count of 0 active ads stays 0; it is unknown only on a page never analysed", () => {
+  const items = buildRecreateList({
+    jobs: [job("j-zero", "rv-zero"), job("j-unknown", "rv-unknown", { createdAt: daysAgo(2) })],
+    records: [version("rv-zero", { activeAdsCount: 0 }), version("rv-unknown", { activeAdsCount: 0, pageAnalysis: null })],
+    now: NOW,
+  });
+  assert.deepEqual(
+    items.map((i) => [i.id, i.activeAds]),
+    [
+      ["j-zero", 0],
+      ["j-unknown", null],
+    ],
+  );
+});
+
+test("old pages show running, failed or finished by their page status, with the error when failed", () => {
+  const building = record("c-building", {
+    recreatedPage: page({ status: "design_pending", createdAt: daysAgo(0.2), updatedAt: daysAgo(0.1), hasPage: false }),
+  });
+  const broke = record("c-broke", {
+    recreatedPage: page({ status: "failed", createdAt: daysAgo(1), updatedAt: daysAgo(1), error: "agent broke" }),
+  });
+  const content = record("c-content", { recreatedPage: page({ status: "content_ready", createdAt: daysAgo(2), updatedAt: daysAgo(2) }) });
+  // Left building by the old route long ago: nothing will finish it.
+  const stuck = record("c-stuck", {
+    recreatedPage: page({ status: "pending", createdAt: daysAgo(5), updatedAt: daysAgo(5), hasPage: false }),
+  });
+  const items = buildRecreateList({ jobs: [], records: [building, broke, content, stuck], now: NOW });
+  assert.deepEqual(
+    items.map((i) => [i.id, i.state, i.jobId, i.error]),
+    [
+      ["c-building", "running", null, null],
+      ["c-broke", "failed", null, "agent broke"],
+      ["c-content", "finished", null, null],
+      ["c-stuck", "failed", null, "This build stopped before it finished."],
+    ],
+  );
+  assert.equal(items[0].finishedAt, null);
+  assert.equal(items[1].finishedAt, daysAgo(1));
+});
+
+test("every item says which page it is a version of and which website it was built for", () => {
+  const items = buildRecreateList({
+    jobs: [
+      job("j-other-site", "rv-1", {
+        options: { businessUrl: "https://other-client.invalid", styleDirection: null, userFeedback: null, targetIcp: null },
+      }),
+    ],
+    records: [
+      version("rv-1"),
+      version("rv-2", { recreatedPage: page({ businessUrl: "https://page-site.invalid", createdAt: daysAgo(3) }) }),
+    ],
+    now: NOW,
+  });
+  assert.deepEqual(
+    items.map((i) => [i.id, i.sourceId, i.businessUrl]),
+    [
+      ["j-other-site", "src-1", "https://other-client.invalid"],
+      ["rv-2", "src-1", "https://page-site.invalid"],
+    ],
+  );
+});

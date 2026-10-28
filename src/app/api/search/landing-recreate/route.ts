@@ -3,6 +3,7 @@ import { getCompetitor } from "@/lib/db";
 import { errorResponse, requireUser, resolveProjectAccess } from "@/lib/authz";
 import { runBillable } from "@/lib/accounting/run";
 import { isCreditError } from "@/lib/accounting/errors";
+import { getRecreationVersionCounts } from "@/lib/data/competitors";
 import { maskPageAnalysis, maskRecreatedPage } from "@/lib/clientFacing";
 import { analyzeCompetitorLandingPage } from "@/lib/pipeline/landingPageAnalysis";
 import {
@@ -14,14 +15,18 @@ import type { CompetitorRecord } from "@/lib/types";
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-/** What the offers dashboard needs about one landing page's record. */
-function pageView(c: CompetitorRecord) {
+/**
+ * What the offers dashboard needs about one landing page's record.
+ * `versions` is the run's recreations by source page (getRecreationVersionCounts).
+ */
+function pageView(c: CompetitorRecord, versions: Record<string, number>) {
   const page = maskRecreatedPage(c.recreatedPage ?? null);
   return {
     competitorId: c.id,
     pageName: c.pageName,
     analysis: maskPageAnalysis(c.pageAnalysis ?? null),
     recreatedStatus: page?.status ?? null,
+    versionCount: versions[c.id] ?? 0,
     recreatePath: `/recreate/${encodeURIComponent(c.id)}`,
   };
 }
@@ -38,7 +43,8 @@ export async function GET(request: Request) {
     if (!jobId) return NextResponse.json({ error: "jobId is required" }, { status: 400 });
     const access = await resolveProjectAccess("search", jobId, user, "view");
     const pages: Record<string, ReturnType<typeof pageView>> = {};
-    for (const [key, c] of await landingPageRecordsByKey(jobId)) pages[key] = pageView(c);
+    const [records, versions] = await Promise.all([landingPageRecordsByKey(jobId), getRecreationVersionCounts(jobId)]);
+    for (const [key, c] of records) pages[key] = pageView(c, versions);
     return NextResponse.json({ pages, canRun: access.role !== "viewer" });
   } catch (err) {
     return errorResponse(err);
@@ -77,7 +83,7 @@ export async function POST(request: Request) {
       );
     }
     const latest = (await getCompetitor(competitor.id)) || competitor;
-    return NextResponse.json({ page: pageView(latest) });
+    return NextResponse.json({ page: pageView(latest, await getRecreationVersionCounts(jobId)) });
   } catch (err) {
     if (isCreditError(err)) {
       return NextResponse.json(

@@ -387,6 +387,11 @@ export interface CompetitorRecord {
     matchKey: string;
     /** The competitor whose ads point at this page, when known. */
     fromCompetitorId: string | null;
+    /**
+     * Set when this record is one recreation (version) of another record's
+     * page: the source record's id. Versions never stand in for the source.
+     */
+    variantOf?: string | null;
   } | null;
 }
 
@@ -1714,6 +1719,8 @@ export interface AppSettings {
   defaultResetCadence: ResetCadence;
   lowCreditWarningSubunits: number;
   maxConcurrentRunsPerUser: number;
+  /** Landing-page builds one user may have running at once (separate from other tasks). */
+  maxConcurrentRecreationsPerUser: number;
   /** Hard ceiling on a single run's reservation, in subunits. */
   maxRunReservationSubunits: number;
   disabledProviders: ProviderId[];

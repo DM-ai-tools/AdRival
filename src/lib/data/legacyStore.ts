@@ -24,6 +24,7 @@ export function defaultAppSettings(): AppSettings {
     defaultResetCadence: "none",
     lowCreditWarningSubunits: creditsToSubunits(25),
     maxConcurrentRunsPerUser: 3,
+    maxConcurrentRecreationsPerUser: 3,
     maxRunReservationSubunits: creditsToSubunits(500),
     disabledProviders: [],
     disabledModels: [],

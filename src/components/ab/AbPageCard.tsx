@@ -4,6 +4,8 @@ import { useState } from "react";
 import type { AbPage } from "@/lib/pipeline/awareness/abPages";
 import { STAGE_LABELS } from "./CoverageStrip";
 import { formatRunDate } from "@/lib/pipeline/awareness/runLabels";
+import type { RecreateDetails } from "@/lib/recreateClient";
+import { AddToRecreateButton, type RecreateSource } from "@/components/recreate/AddToRecreateButton";
 
 const ORIGIN_LABELS: Record<AbPage["origin"], string> = {
   competitor: "Competitor",
@@ -20,18 +22,19 @@ const AUDIENCE_LABELS: Record<string, string> = {
 
 export function AbPageCard({
   page,
-  onRecreate,
+  recreateSource,
+  recreateDefaults,
   onLabel,
   labelAllCount,
-  recreating,
 }: {
   page: AbPage;
-  onRecreate: (page: AbPage) => void;
+  /** What "Add to Recreate" queues for this page; null hides it. */
+  recreateSource: RecreateSource | null;
+  recreateDefaults?: RecreateDetails;
   /** Starts the label flow (count, then confirm) for this source. */
   onLabel?: () => void;
   /** Labelling covers every unlabelled page of the run, not just this card. */
   labelAllCount?: number;
-  recreating?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const lv = page.levels;
@@ -105,24 +108,19 @@ export function AbPageCard({
         </>
       )}
 
-      <div className="ab-card-actions">
-        <button
-          type="button"
-          className="ghost-btn"
-          disabled={recreating}
-          title={
-            page.origin === "offers"
-              ? "Analyses this page first and uses credits if it has not been analysed for recreation yet"
-              : undefined
-          }
-          onClick={() => onRecreate(page)}
-        >
-          {recreating ? "Opening…" : "Recreate for my brand"}
-        </button>
-        {page.origin === "offers" && !recreating ? (
-          <span className="muted ab-card-credit"> Analyses the page first; uses credits if not yet analysed.</span>
-        ) : null}
-      </div>
+      {recreateSource ? (
+        <div className="ab-card-actions">
+          <AddToRecreateButton
+            source={recreateSource}
+            signals={{ daysRunning: null, activeAds: page.activeAds }}
+            defaults={recreateDefaults}
+            className="ghost-btn"
+          />
+          {page.origin === "offers" ? (
+            <span className="muted ab-card-credit"> Analyses the page first; uses credits if not yet analysed.</span>
+          ) : null}
+        </div>
+      ) : null}
     </li>
   );
 }

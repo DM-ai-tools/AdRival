@@ -60,6 +60,7 @@ export async function PUT(request: Request) {
       defaultResetCadence?: ResetCadence;
       lowCreditWarningCredits?: string | number;
       maxConcurrentRunsPerUser?: number;
+      maxConcurrentRecreationsPerUser?: number;
       maxRunReservationCredits?: string | number;
       disabledProviders?: string[];
       disabledModels?: string[];
@@ -99,6 +100,13 @@ export async function PUT(request: Request) {
         throw new HttpError(400, "Concurrent run limit must be between 1 and 50");
       }
       patch.maxConcurrentRunsPerUser = value;
+    }
+    if (body.maxConcurrentRecreationsPerUser !== undefined) {
+      const value = Number(body.maxConcurrentRecreationsPerUser);
+      if (!Number.isInteger(value) || value < 1 || value > 50) {
+        throw new HttpError(400, "Concurrent recreation limit must be between 1 and 50");
+      }
+      patch.maxConcurrentRecreationsPerUser = value;
     }
     if (body.maxRunReservationCredits !== undefined) {
       const value = parseCreditsInput(body.maxRunReservationCredits);
