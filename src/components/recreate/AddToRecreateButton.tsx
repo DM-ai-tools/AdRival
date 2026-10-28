@@ -1,12 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   RecreateRequestError,
+  addedStatusText,
   bridgeLookupAd,
   enqueueRecreation,
   type EnqueueBody,
+  type LookupBridgeResult,
   type RecreateDetails,
 } from "@/lib/recreateClient";
 import { formatSignal } from "@/lib/recreateSignals";
@@ -38,6 +40,8 @@ export function AddToRecreateButton({
   disabled = false,
   defaults = NO_DEFAULTS,
   className = "search-btn lp-analyze-btn",
+  disabledReason,
+  onLookupBridged,
 }: {
   source: RecreateSource;
   signals?: { daysRunning: number | null; activeAds: number | null };
@@ -48,14 +52,22 @@ export function AddToRecreateButton({
   /** The popup's starting values (see defaultDetails); the website is empty when the host has none. */
   defaults?: RecreateDetails;
   className?: string;
+  /** Tooltip while disabled, e.g. "View-only access". */
+  disabledReason?: string;
+  /** A lookup ad's bridge reply (the lookup and ad as they now stand), for the host to refresh. */
+  onLookupBridged?: (result: LookupBridgeResult) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [added, setAdded] = useState(0);
+  // Set synchronously, so two submits in the same frame cannot bridge or queue twice.
+  const submitting = useRef(false);
 
   async function confirm(details: RecreateDetailsInput) {
+    if (submitting.current) return;
+    submitting.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -67,11 +79,14 @@ export function AddToRecreateButton({
       };
       let target: EnqueueBody;
       if ("competitorId" in source) target = { competitorId: source.competitorId, ...extra };
-      else if ("lookupAdId" in source)
-        target = { competitorId: await bridgeLookupAd(source.lookupAdId, details.businessUrl), ...extra };
-      else target = { jobId: source.runId, url: source.url, ...extra };
-      const { queuedAhead } = await enqueueRecreation(target);
-      setStatus(queuedAhead > 0 ? "Added to queue" : "Started");
+      else if ("lookupAdId" in source) {
+        // The bridge keeps the lookup's own website; the job carries the one typed here.
+        const bridged = await bridgeLookupAd(source.lookupAdId);
+        onLookupBridged?.(bridged);
+        target = { competitorId: bridged.competitorId, ...extra };
+      } else target = { jobId: source.runId, url: source.url, ...extra };
+      const { job } = await enqueueRecreation(target);
+      setStatus(addedStatusText(job));
       setAdded((n) => n + 1);
       setOpen(false);
     } catch (err) {
@@ -79,6 +94,7 @@ export function AddToRecreateButton({
         err instanceof RecreateRequestError ? err.message : "The page could not be added to Recreate. Try again.",
       );
     } finally {
+      submitting.current = false;
       setBusy(false);
     }
   }
@@ -93,7 +109,11 @@ export function AddToRecreateButton({
         type="button"
         className={className}
         disabled={disabled || busy}
-        title="Pick the details, then the page is built for your brand. It uses credits when the build starts."
+        title={
+          disabled && disabledReason
+            ? disabledReason
+            : "Pick the details, then the page is built for your brand. It uses credits when the build starts."
+        }
         onClick={() => {
           setError(null);
           setStatus(null);

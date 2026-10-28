@@ -69,11 +69,13 @@ function AdCard({
   platform,
   job,
   onAdUpdated,
+  onJobUpdated,
 }: {
   ad: LookupAdRecord;
   platform: AdPlatform;
   job: LookupJob;
   onAdUpdated?: (ad: LookupAdRecord) => void;
+  onJobUpdated?: (job: LookupJob) => void;
 }) {
   const [openRaw, setOpenRaw] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
@@ -316,6 +318,10 @@ function AdCard({
             versionCount={ad.recreationCompetitorId ? 1 : 0}
             defaults={defaultDetails(job)}
             className="search-btn lp-recreate-link"
+            onLookupBridged={({ lookupJob, ad: bridgedAd }) => {
+              if (lookupJob) onJobUpdated?.(lookupJob);
+              if (bridgedAd) onAdUpdated?.(bridgedAd);
+            }}
           />
         ) : null}
         <button
@@ -785,6 +791,7 @@ export function LookupResults({
                 platform={platform}
                 job={job}
                 onAdUpdated={onAdUpdated}
+                onJobUpdated={(next) => onJobUpdated?.(next)}
               />
             ))}
           </div>

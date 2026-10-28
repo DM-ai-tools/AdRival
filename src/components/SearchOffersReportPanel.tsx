@@ -1131,6 +1131,7 @@ export function SearchOffersDashboard({
                               versionCount={record?.recreatedStatus ? 1 : 0}
                               defaults={defaultDetails(job)}
                               disabled={!canRunLp || Boolean(lpBusy)}
+                              disabledReason={canRunLp ? undefined : "View-only access"}
                             />
                           ) : null}
                           {analysed ? (

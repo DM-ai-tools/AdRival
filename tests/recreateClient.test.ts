@@ -4,6 +4,8 @@ import {
   RECREATE_CHANGED_EVENT,
   RecreateRequestError,
   STYLE_DIRECTIONS,
+  addedStatusText,
+  bridgeLookupAd,
   defaultDetails,
   enqueueRecreation,
 } from "../src/lib/recreateClient";
@@ -155,6 +157,43 @@ test("a non-JSON error page still gives a readable message", async () => {
   assert.equal(err.status, 502);
   assert.equal(err.code, null);
   assert.equal(err.message, "The page could not be added to Recreate. Try again.");
+});
+
+test("bridgeLookupAd never sends a business website (it would re-brand the lookup and bill)", async () => {
+  const calls: FakeCall[] = [];
+  await bridgeLookupAd("ad-1", fakeFetch(200, { competitorId: "c-9", lookupJob: null, ad: null }, calls));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "/api/lookup/recreate-bridge");
+  const sent = JSON.parse(String(calls[0].init?.body));
+  assert.deepEqual(sent, { adId: "ad-1", confirmRedesign: true });
+  assert.equal("businessUrl" in sent, false);
+});
+
+test("bridgeLookupAd hands back the competitor id, lookup job and ad", async () => {
+  const lookupJob = { id: "lk-1", businessUrl: "https://acme.com" };
+  const ad = { id: "ad-1", recreationCompetitorId: "c-9" };
+  const out = await bridgeLookupAd("ad-1", fakeFetch(200, { competitorId: "c-9", lookupJob, ad }));
+  assert.equal(out.competitorId, "c-9");
+  assert.deepEqual(out.lookupJob, lookupJob);
+  assert.deepEqual(out.ad, ad);
+});
+
+test("bridgeLookupAd gives null job and ad when the reply has none", async () => {
+  const out = await bridgeLookupAd("ad-1", fakeFetch(200, { competitorId: "c-9" }));
+  assert.equal(out.lookupJob, null);
+  assert.equal(out.ad, null);
+});
+
+test("bridgeLookupAd maps failures like enqueue", async () => {
+  await assert.rejects(
+    bridgeLookupAd("ad-1", fakeFetch(402, { error: "Not enough credits.", code: "insufficient_credits" })),
+    (err: unknown) => err instanceof RecreateRequestError && err.status === 402 && err.message === "Not enough credits.",
+  );
+});
+
+test("addedStatusText follows the job's status, not the queue place", () => {
+  assert.equal(addedStatusText({ status: "running" }), "Started");
+  assert.equal(addedStatusText({ status: "queued" }), "Added to queue");
 });
 
 test("a success without a job is an error, not a silent pass", async () => {

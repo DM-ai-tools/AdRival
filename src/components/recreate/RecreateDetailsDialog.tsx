@@ -4,6 +4,9 @@ import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { STYLE_OPTIONS, type RecreateDetails, type StyleDirection } from "@/lib/recreateClient";
 
+const FOCUSABLE =
+  'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 export interface RecreateDetailsInput extends RecreateDetails {
   userFeedback: string;
 }
@@ -33,6 +36,7 @@ export function RecreateDetailsDialog({
 }) {
   const titleId = useId();
   const urlRef = useRef<HTMLInputElement | null>(null);
+  const formRef = useRef<HTMLFormElement | null>(null);
   const [businessUrl, setBusinessUrl] = useState(defaults.businessUrl);
   const [styleDirection, setStyleDirection] = useState<StyleDirection>(defaults.styleDirection);
   const [userFeedback, setUserFeedback] = useState("");
@@ -50,6 +54,11 @@ export function RecreateDetailsDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
+  // While adding, every control is disabled; keep focus (and so the Tab trap) on the dialog itself.
+  useEffect(() => {
+    if (open && busy) formRef.current?.focus();
+  }, [open, busy]);
+
   if (!open || typeof document === "undefined") return null;
 
   const canConfirm = Boolean(businessUrl.trim()) && !busy;
@@ -62,7 +71,28 @@ export function RecreateDetailsDialog({
       // Kept inside: a host dialog (the ICP drawer) must not react to these.
       onKeyDown={(e) => {
         e.stopPropagation();
-        if (e.key === "Escape" && !busy) onCancel();
+        if (e.key === "Escape") {
+          if (!busy) onCancel();
+          return;
+        }
+        // Tab stays inside the dialog (it is portalled out of any host dialog's own trap).
+        if (e.key !== "Tab" || !formRef.current) return;
+        const items = Array.from(formRef.current.querySelectorAll<HTMLElement>(FOCUSABLE));
+        if (!items.length) {
+          e.preventDefault();
+          return;
+        }
+        const first = items[0];
+        const last = items[items.length - 1];
+        const active = document.activeElement;
+        const inside = active instanceof Node && formRef.current.contains(active);
+        if (e.shiftKey && (active === first || !inside)) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && (active === last || !inside)) {
+          e.preventDefault();
+          first.focus();
+        }
       }}
       onMouseDown={(e) => {
         e.stopPropagation();
@@ -70,6 +100,8 @@ export function RecreateDetailsDialog({
       }}
     >
       <form
+        ref={formRef}
+        tabIndex={-1}
         className="confirm-dialog recreate-details-dialog"
         role="dialog"
         aria-modal="true"

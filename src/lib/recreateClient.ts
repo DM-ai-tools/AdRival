@@ -1,4 +1,5 @@
 import type { RecreateJobDto } from "./recreateList";
+import type { LookupAdRecord, LookupJob } from "./types";
 
 /*
  * Browser side of "Add to Recreate": the details a recreation is queued
@@ -129,24 +130,43 @@ export async function enqueueRecreation(
   return { job, queuedAhead: Number.isFinite(queuedAhead) && queuedAhead > 0 ? queuedAhead : 0 };
 }
 
+/** What the button says once a page is added: from the job's own status (queuedAhead is 0 for both). */
+export function addedStatusText(job: Pick<RecreateJobDto, "status">): string {
+  return job.status === "running" ? "Started" : "Added to queue";
+}
+
+/** The lookup bridge's reply: the record to queue, and the lookup and ad as they now stand. */
+export interface LookupBridgeResult {
+  competitorId: string;
+  lookupJob: LookupJob | null;
+  ad: LookupAdRecord | null;
+}
+
 /**
- * Makes a lookup ad's page recreatable (the record the queue builds from) and
- * returns its id. Brands the lookup with `businessUrl` first, which can use
- * credits. Another version is always allowed, so no "already recreated" stop.
+ * Makes a lookup ad's page recreatable (the record the queue builds from).
+ * Sends no business website on purpose: a different one would re-brand the
+ * whole lookup (billed) for every later use. The queued job carries the
+ * website it is built for. Another version is always allowed, so no
+ * "already recreated" stop.
  */
 export async function bridgeLookupAd(
   adId: string,
-  businessUrl: string,
   fetchImpl: typeof fetch = (...args) => globalThis.fetch(...args),
-): Promise<string> {
+): Promise<LookupBridgeResult> {
   const res = await fetchImpl("/api/lookup/recreate-bridge", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ adId, businessUrl, confirmRedesign: true }),
+    body: JSON.stringify({ adId, confirmRedesign: true }),
   });
   const data = await readJson(res);
   if (!res.ok) throw requestError(res.status, data);
   const competitorId = text(data.competitorId);
   if (!competitorId) throw new RecreateRequestError(res.status, null, GENERIC_FAILURE);
-  return competitorId;
+  const objectOrNull = <T>(value: unknown): T | null =>
+    value && typeof value === "object" && !Array.isArray(value) ? (value as T) : null;
+  return {
+    competitorId,
+    lookupJob: objectOrNull<LookupJob>(data.lookupJob),
+    ad: objectOrNull<LookupAdRecord>(data.ad),
+  };
 }
