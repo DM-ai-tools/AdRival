@@ -66,6 +66,7 @@ export const BACKUP_TABLES = [
   "lookup_jobs",
   "competitors",
   "recreated_pages",
+  "recreate_jobs",
   "lookup_ads",
   "search_competitor_ads",
   "icps",
