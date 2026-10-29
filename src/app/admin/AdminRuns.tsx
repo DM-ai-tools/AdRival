@@ -24,7 +24,125 @@ interface RunRow {
   createdAt: string;
 }
 
+interface RecreationRow {
+  ownerUserId: string;
+  username: string | null;
+  displayName: string | null;
+  total: number;
+  finished: number;
+  failed: number;
+  stopped: number;
+  inProgress: number;
+  lastAt: string;
+}
+
 const PAGE_SIZE = 50;
+
+/** Landing-page recreations per user, most active first. */
+function RecreationCounts({
+  q,
+  owner,
+  onOpenUser,
+}: {
+  q: string;
+  owner: string;
+  onOpenUser?: (userId: string) => void;
+}) {
+  const [rows, setRows] = useState<RecreationRow[]>([]);
+  const [days, setDays] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    setLoading(true);
+    void adminFetch<{ rows: RecreationRow[] }>(`/api/admin/recreations${days ? `?days=${days}` : ""}`)
+      .then((d) => live && (setRows(d.rows ?? []), setError(null)))
+      .catch((err) => live && setError((err as Error).message))
+      .finally(() => live && setLoading(false));
+    return () => {
+      live = false;
+    };
+  }, [days]);
+
+  const needle = q.trim().toLowerCase();
+  const shown = rows.filter(
+    (r) =>
+      (!owner || r.ownerUserId === owner) &&
+      (!needle || `${r.username ?? ""} ${r.displayName ?? ""}`.toLowerCase().includes(needle)),
+  );
+  const total = shown.reduce((n, r) => n + r.total, 0);
+
+  return (
+    <>
+      <div className="credits-filter-row">
+        <label className="credits-filter">
+          <span className="search-label">Period</span>
+          <select className="search-input" value={days} onChange={(e) => setDays(e.target.value)}>
+            <option value="">All time</option>
+            <option value="7">Last 7 days</option>
+            <option value="30">Last 30 days</option>
+            <option value="90">Last 90 days</option>
+          </select>
+        </label>
+        <span className="muted">
+          {total} recreation{total === 1 ? "" : "s"} by {shown.length} user{shown.length === 1 ? "" : "s"}
+        </span>
+      </div>
+      {error ? (
+        <p className="error-text" role="alert">
+          {error}
+        </p>
+      ) : null}
+      {loading && !rows.length ? (
+        <p className="muted">Loading…</p>
+      ) : shown.length === 0 ? (
+        <p className="empty-hint">No landing page recreations match.</p>
+      ) : (
+        <div className="table-wrap">
+          <table className="comp-table">
+            <thead>
+              <tr>
+                <th>User</th>
+                <th>Recreations</th>
+                <th>Finished</th>
+                <th>Failed</th>
+                <th>Stopped</th>
+                <th>In progress</th>
+                <th>Latest</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((r) => (
+                <tr key={r.ownerUserId}>
+                  <td>
+                    {r.username && onOpenUser ? (
+                      <button type="button" className="link-btn" onClick={() => onOpenUser(r.ownerUserId)}>
+                        @{r.username}
+                      </button>
+                    ) : r.username ? (
+                      `@${r.username}`
+                    ) : (
+                      <span className="muted">Unknown user</span>
+                    )}
+                  </td>
+                  <td>
+                    <strong>{r.total}</strong>
+                  </td>
+                  <td>{r.finished}</td>
+                  <td>{r.failed}</td>
+                  <td>{r.stopped}</td>
+                  <td>{r.inProgress}</td>
+                  <td className="admin-nowrap">{formatDateTime(r.lastAt)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
+  );
+}
 
 /** Every search and lookup across all users, with a link to open each one. */
 export default function AdminRuns({ onOpenUser }: { onOpenUser?: (userId: string) => void }) {
@@ -47,12 +165,15 @@ export default function AdminRuns({ onOpenUser }: { onOpenUser?: (userId: string
       .catch(() => undefined);
   }, []);
 
+  const recreations = kind === "recreation";
+
   useEffect(() => {
+    if (recreations) return;
     const mine = ++seq.current;
     const p = new URLSearchParams({ limit: "2000" });
     if (query.trim()) p.set("q", query.trim());
     if (owner) p.set("owner", owner);
-    if (kind) p.set("kind", kind);
+    if (kind && !recreations) p.set("kind", kind);
     if (status) p.set("status", status);
     setLoading(true);
     void adminFetch<{ runs: RunRow[]; total: number }>(`/api/admin/runs?${p}`)
@@ -65,7 +186,7 @@ export default function AdminRuns({ onOpenUser }: { onOpenUser?: (userId: string
       })
       .catch((err) => mine === seq.current && setError((err as Error).message))
       .finally(() => mine === seq.current && setLoading(false));
-  }, [query, owner, kind, status]);
+  }, [query, owner, kind, status, recreations]);
 
   const pageCount = Math.max(1, Math.ceil(runs.length / PAGE_SIZE));
   const pageRows = useMemo(() => runs.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE), [runs, page]);
@@ -74,12 +195,17 @@ export default function AdminRuns({ onOpenUser }: { onOpenUser?: (userId: string
     <section className="panel glow-panel admin-panel">
       <div className="progress-head">
         <h2>Runs</h2>
-        <span className="muted">{total} searches and lookups</span>
+        <span className="muted">{recreations ? "Landing page recreations by user" : `${total} searches and lookups`}</span>
       </div>
       <div className="credits-filter-row">
         <label className="credits-filter">
           <span className="search-label">Search</span>
-          <input className="search-input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Keyword or brand" />
+          <input
+            className="search-input"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder={recreations ? "Username" : "Keyword or brand"}
+          />
         </label>
         <label className="credits-filter">
           <span className="search-label">Owner</span>
@@ -98,9 +224,10 @@ export default function AdminRuns({ onOpenUser }: { onOpenUser?: (userId: string
             <option value="">Searches and lookups</option>
             <option value="search">Searches</option>
             <option value="lookup">Lookups</option>
+            <option value="recreation">Landing page recreations</option>
           </select>
         </label>
-        <label className="credits-filter">
+        <label className="credits-filter" hidden={recreations}>
           <span className="search-label">Status</span>
           <select className="search-input" value={status} onChange={(e) => setStatus(e.target.value)}>
             <option value="">Any</option>
@@ -111,12 +238,15 @@ export default function AdminRuns({ onOpenUser }: { onOpenUser?: (userId: string
           </select>
         </label>
       </div>
-      {error ? (
+      {recreations ? (
+        <RecreationCounts q={q} owner={owner} onOpenUser={onOpenUser} />
+      ) : null}
+      {recreations ? null : error ? (
         <p className="error-text" role="alert">
           {error}
         </p>
       ) : null}
-      {loading && !runs.length ? (
+      {recreations ? null : loading && !runs.length ? (
         <p className="muted">Loading…</p>
       ) : runs.length === 0 ? (
         <p className="empty-hint">No runs match these filters.</p>
@@ -128,7 +258,6 @@ export default function AdminRuns({ onOpenUser }: { onOpenUser?: (userId: string
                 <tr>
                   <th>Run</th>
                   <th>Owner</th>
-                  <th>Client space</th>
                   <th>Status</th>
                   <th>Results</th>
                   <th>Credits</th>
@@ -145,6 +274,7 @@ export default function AdminRuns({ onOpenUser }: { onOpenUser?: (userId: string
                       <span className="muted">
                         {run.kind === "search" ? "Search" : "Lookup"}
                         {run.platform ? ` · ${run.platform}` : ""}
+                        {run.clientName ? ` · ${run.clientName}` : ""}
                         {run.archivedAt ? " · archived" : ""}
                       </span>
                     </td>
@@ -159,7 +289,6 @@ export default function AdminRuns({ onOpenUser }: { onOpenUser?: (userId: string
                         <span className="muted">Unassigned</span>
                       )}
                     </td>
-                    <td>{run.clientName ?? <span className="muted">—</span>}</td>
                     <td>
                       <span className={`status-pill status-${run.status}`}>{statusLabel(run.status)}</span>
                       {run.status === "running" && run.stage ? <span className="muted"> {stageLabel(run.stage)}</span> : null}
