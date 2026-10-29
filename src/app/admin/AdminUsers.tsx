@@ -27,6 +27,9 @@ export interface AdminUserRow extends AppUserPublic {
   loginLocked: boolean;
   /** Client organisation name; null for platform-level accounts. */
   orgName?: string | null;
+  email?: string | null;
+  /** Invited but has not set a password yet. */
+  invitePending?: boolean;
 }
 
 type SortKey = "name" | "credits" | "lastLogin" | "created" | "runs";
@@ -167,7 +170,7 @@ export default function AdminUsers({ initialUserId }: { initialUserId?: string |
               className="search-input"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Username or name"
+              placeholder="Name, username or email"
             />
           </label>
           <label className="credits-filter">
@@ -247,10 +250,14 @@ export default function AdminUsers({ initialUserId }: { initialUserId?: string |
                       <td>
                         <strong>{user.displayName}</strong>
                         <br />
-                        <span className="muted">@{user.username}</span>
+                        <span className="muted">@{user.username}{user.email ? ` · ${user.email}` : ""}</span>
                         {user.orgName ? <span className="admin-org-badge">{user.orgName}</span> : null}
                         {user.loginLocked ? <span className="admin-flag"> Locked out</span> : null}
-                        {user.mustChangePassword ? <span className="admin-flag is-quiet"> Must change password</span> : null}
+                        {user.invitePending ? (
+                          <span className="admin-flag is-quiet"> Invited, not accepted yet</span>
+                        ) : user.mustChangePassword ? (
+                          <span className="admin-flag is-quiet"> Must change password</span>
+                        ) : null}
                       </td>
                       <td>
                         <span className={user.role === "admin" ? "admin-role-pill is-admin" : "admin-role-pill"}>
@@ -359,7 +366,7 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
 }
 
 function CreateUserDialog({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [role, setRole] = useState("user");
   const [allowance, setAllowance] = useState("");
@@ -367,7 +374,13 @@ function CreateUserDialog({ onClose, onCreated }: { onClose: () => void; onCreat
   const [orgs, setOrgs] = useState<Array<{ id: string; name: string }> | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [created, setCreated] = useState<{ username: string; password: string; notice?: string } | null>(null);
+  const [created, setCreated] = useState<{
+    username: string;
+    email: string;
+    emailSent: boolean;
+    inviteLink?: string;
+    emailError?: string;
+  } | null>(null);
 
   // Only platform admins may place a user in an organisation; for anyone else this list is refused.
   useEffect(() => {
@@ -381,11 +394,16 @@ function CreateUserDialog({ onClose, onCreated }: { onClose: () => void; onCreat
     setBusy(true);
     setError(null);
     try {
-      const json = await adminFetch<{ user: { username: string }; temporaryPassword: string; notice?: string }>(
-        "/api/admin/users",
-        { method: "POST", json: { username, displayName, role, allowanceCredits: allowance, orgId: orgId || null } },
-      );
-      setCreated({ username: json.user.username, password: json.temporaryPassword, notice: json.notice });
+      const json = await adminFetch<{
+        user: { username: string };
+        emailSent: boolean;
+        inviteLink?: string;
+        emailError?: string;
+      }>("/api/admin/users", {
+        method: "POST",
+        json: { email, displayName, role, allowanceCredits: allowance, orgId: orgId || null },
+      });
+      setCreated({ username: json.user.username, email: email.trim(), emailSent: json.emailSent, inviteLink: json.inviteLink, emailError: json.emailError });
       onCreated();
     } catch (err) {
       setError((err as Error).message);
@@ -395,18 +413,23 @@ function CreateUserDialog({ onClose, onCreated }: { onClose: () => void; onCreat
   }
 
   return (
-    <Modal title={created ? "User created" : "New user"} onClose={onClose}>
+    <Modal title={created ? (created.emailSent ? "Invitation sent" : "User created") : "Invite a user"} onClose={onClose}>
       {created ? (
         <>
-          <p className="confirm-desc">
-            @{created.username} can sign in with this temporary password and must choose a new one straight away.
-          </p>
-          <CopyValue
-            label="Temporary password"
-            value={created.password}
-            hint="It is shown only once. Send it to the user through a private channel."
-          />
-          {created.notice ? <p className="form-hint">{created.notice}</p> : null}
+          {created.emailSent ? (
+            <p className="confirm-desc">
+              We emailed {created.email}. They choose their own password from the link, then sign in as @{created.username}. The link works for 7 days.
+            </p>
+          ) : (
+            <>
+              <p className="confirm-desc">
+                @{created.username} was created, but the email could not be sent{created.emailError ? `: ${created.emailError}` : "."} Send them this link yourself instead.
+              </p>
+              {created.inviteLink ? (
+                <CopyValue label="Invitation link" value={created.inviteLink} hint="Shown only once. It works for 7 days." />
+              ) : null}
+            </>
+          )}
           <div className="confirm-actions">
             <button type="button" className="chip-btn confirm-primary" onClick={onClose}>
               Done
@@ -417,8 +440,8 @@ function CreateUserDialog({ onClose, onCreated }: { onClose: () => void; onCreat
         <form onSubmit={(e) => void submit(e)}>
           <div className="admin-form-grid">
             <label className="admin-field">
-              <span className="search-label">Username</span>
-              <input className="search-input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="jane_doe" autoComplete="off" required disabled={busy} autoFocus />
+              <span className="search-label">Email</span>
+              <input className="search-input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="jane@company.com" autoComplete="off" required disabled={busy} autoFocus />
             </label>
             <label className="admin-field">
               <span className="search-label">Display name</span>
@@ -459,7 +482,7 @@ function CreateUserDialog({ onClose, onCreated }: { onClose: () => void; onCreat
               Cancel
             </button>
             <button type="submit" className="chip-btn confirm-primary" disabled={busy}>
-              {busy ? "Creating…" : "Create user"}
+              {busy ? "Creating…" : "Send invitation"}
             </button>
           </div>
         </form>

@@ -13,11 +13,8 @@ import {
 import { adminScope, errorResponse, requireAdmin, userInScope } from "@/lib/authz";
 import { hashPassword } from "@/lib/auth/password";
 import { generateTemporaryPassword } from "@/lib/auth/bootstrap";
-import {
-  normalizeUsername,
-  validateDisplayName,
-  validateUsername,
-} from "@/lib/auth/validation";
+import { newInvite, sendInvite, usernameFromEmail } from "@/lib/auth/invite";
+import { validateDisplayName } from "@/lib/auth/validation";
 import { initializeUserCredits, getCreditSummary } from "@/lib/accounting/service";
 import { recordAudit } from "@/lib/accounting/records";
 import { parseCreditsInput } from "@/lib/accounting/units";
@@ -48,6 +45,7 @@ export async function GET(request: Request) {
         if (
           search &&
           !user.username.includes(search) &&
+          !(user.email ?? "").toLowerCase().includes(search) &&
           !user.displayName.toLowerCase().includes(search)
         ) {
           return false;
@@ -59,6 +57,8 @@ export async function GET(request: Request) {
     const rows = await Promise.all(
       listed.map(async (user) => ({
         ...toPublicUser(user),
+        email: user.email ?? null,
+        invitePending: Boolean(user.invite),
         maxConcurrentRuns: user.maxConcurrentRuns ?? null,
         suspendedAt: user.suspendedAt ?? null,
         deletedAt: user.deletedAt ?? null,
@@ -89,15 +89,16 @@ export async function GET(request: Request) {
 }
 
 /**
- * Create a user. The generated temporary password is returned once, in this
- * response only, and is never stored in plaintext or written to the audit log.
+ * Invite a user by email. They get a link to choose their own password; no
+ * password is generated or shown. If the email cannot be sent, the link is
+ * returned once so the admin can pass it on.
  */
 export async function POST(request: Request) {
   try {
     const admin = await requireAdmin();
 
     let body: {
-      username?: string;
+      email?: string;
       displayName?: string;
       role?: UserRole;
       status?: UserStatus;
@@ -111,19 +112,20 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
     }
 
-    const usernameErr = validateUsername(String(body.username ?? ""));
-    if (usernameErr) {
-      return NextResponse.json({ error: usernameErr }, { status: 400 });
+    const email = String(body.email ?? "").trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+      return NextResponse.json({ error: "Enter a valid email address" }, { status: 400 });
     }
     const nameErr = validateDisplayName(String(body.displayName ?? ""));
     if (nameErr) {
       return NextResponse.json({ error: nameErr }, { status: 400 });
     }
-
-    const username = normalizeUsername(String(body.username ?? ""));
-    if (await getUserByUsername(username)) {
-      return NextResponse.json({ error: "Username already taken" }, { status: 409 });
+    const existing = await listUsers({ includeDeleted: true });
+    if (existing.some((u) => u.status !== "deleted" && u.email?.toLowerCase() === email)) {
+      return NextResponse.json({ error: "Someone already has that email address" }, { status: 409 });
     }
+    const usernames = new Set(existing.map((u) => u.username.toLowerCase()));
+    const username = usernameFromEmail(email, (u) => usernames.has(u));
 
     const role: UserRole = body.role === "admin" ? "admin" : "user";
     // Organisation admins always create users inside their own organisation.
@@ -147,8 +149,9 @@ export async function POST(request: Request) {
       );
     }
 
-    const temporaryPassword = generateTemporaryPassword();
-    const passwordHash = await hashPassword(temporaryPassword);
+    // Nobody knows this password: the invited person chooses theirs when they accept.
+    const passwordHash = await hashPassword(generateTemporaryPassword());
+    const { token, invite } = newInvite();
     let user;
     try {
       user = await createUser({
@@ -160,6 +163,8 @@ export async function POST(request: Request) {
         mustChangePassword: true,
         createdByUserId: admin.id,
         orgId,
+        email,
+        invite,
       });
     } catch (err) {
       // Taken between the check above and the insert (checked again under the users lock).
@@ -178,15 +183,17 @@ export async function POST(request: Request) {
       actorUsername: admin.username,
       action: "admin.user.create",
       targetUserId: user.id,
-      details: { username, role, allowanceSubunits: allowance, orgId },
+      details: { username, email, role, allowanceSubunits: allowance, orgId, invited: true },
     });
 
+    const mail = await sendInvite({ request, user, token, invitedBy: admin.displayName || admin.username });
     return NextResponse.json({
       ok: true,
       user: toPublicUser(user),
-      temporaryPassword,
-      notice:
-        "Share this temporary password with the user now — it is not stored and cannot be shown again.",
+      emailSent: mail.sent,
+      // Only when the email could not be sent: the admin passes the link on.
+      inviteLink: mail.sent ? undefined : mail.link,
+      emailError: mail.error,
     });
   } catch (err) {
     return errorResponse(err, { audience: "admin" });

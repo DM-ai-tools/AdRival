@@ -715,18 +715,28 @@ describe("soft deletion", () => {
 
     // A throwaway account with a project of its own.
     const created = await admin.post("/api/admin/users", {
-      username: "tempuser",
+      email: "tempuser@example.com",
       displayName: "Temp User",
       allowanceCredits: "10",
     });
     assert.equal(created.status, 200);
-    const { user, temporaryPassword } = (await created.json()) as {
-      user: { id: string };
-      temporaryPassword: string;
+    // No email service in tests, so the invitation link comes back for the admin to pass on.
+    const { user, inviteLink } = (await created.json()) as {
+      user: { id: string; username: string };
+      inviteLink: string;
     };
+    assert.equal(user.username, "tempuser");
+    const token = new URL(inviteLink).searchParams.get("token");
 
     const temp = client();
-    assert.equal((await temp.login("tempuser", temporaryPassword)).status, 200);
+    const accepted = await temp.post("/api/auth/accept-invite", {
+      token,
+      password: "chosen-pass-123",
+      confirmPassword: "chosen-pass-123",
+    });
+    assert.equal(accepted.status, 200);
+    assert.equal((await temp.post("/api/auth/accept-invite", { token, password: "x-pass-1234", confirmPassword: "x-pass-1234" })).status, 410);
+    assert.equal((await temp.login("tempuser", "chosen-pass-123")).status, 200);
 
     // The admin must say what happens to the projects — no silent default.
     const noAction = await admin.delete(`/api/admin/users/${user.id}`);
@@ -744,7 +754,7 @@ describe("soft deletion", () => {
 
     assert.equal((await temp.get("/api/auth/me")).status, 401);
     const relogin = client();
-    assert.equal((await relogin.login("tempuser", temporaryPassword)).status, 401);
+    assert.equal((await relogin.login("tempuser", "chosen-pass-123")).status, 401);
     assert.equal(relogin.hasSession, false);
 
     // The account is retained for billing history rather than erased.

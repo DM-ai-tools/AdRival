@@ -119,7 +119,7 @@ test("a signed-in non-admin gets 403 on the admin user routes, and nothing chang
   assert.equal((await identity.getUserById(admin.id))?.status, "active");
 
   const create = await asUser(plain, async () =>
-    readJson(await usersRoute.POST(jsonRequest(BASE, "POST", { username: "sneaky", displayName: "Sneaky" }))),
+    readJson(await usersRoute.POST(jsonRequest(BASE, "POST", { email: "sneaky@example.com", displayName: "Sneaky" }))),
   );
   assert.equal(create.status, 403);
   assert.equal(await identity.getUserByUsername("sneaky"), null);
