@@ -5,9 +5,11 @@ import { parseSessionToken, SESSION_COOKIE } from "@/lib/auth/session";
 const PUBLIC_PATHS = [
   "/login",
   "/register",
+  "/accept-invite",
   "/setup",
   "/api/auth/login",
   "/api/auth/register",
+  "/api/auth/accept-invite",
   "/api/auth/status",
   "/api/admin/bootstrap",
   "/api/health",

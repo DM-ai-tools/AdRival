@@ -1443,6 +1443,10 @@ export interface AppUser {
   lastLoginAt?: string | null;
   /** Client organisation. Absent/null = platform level (sees every organisation when admin). */
   orgId?: string | null;
+  /** Where the invitation was sent. */
+  email?: string | null;
+  /** Set while an invitation is waiting to be accepted; cleared when the user sets a password. */
+  invite?: { tokenHash: string; expiresAt: string; sentAt: string } | null;
 }
 
 export type AppUserPublic = Pick<

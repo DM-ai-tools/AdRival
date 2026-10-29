@@ -144,7 +144,7 @@ export default function AdminUserDrawer({
           ) : tab === "credits" ? (
             <CreditsTab detail={detail} userId={userId} onSaved={refresh} />
           ) : tab === "account" ? (
-            <AccountTab detail={detail} userId={userId} isMe={meId === userId} onSaved={refresh} onDeleted={onDeleted} />
+            <AccountTab detail={detail} userId={userId} isMe={meId === userId} invitePending={Boolean(row?.invitePending)} onSaved={refresh} onDeleted={onDeleted} />
           ) : tab === "limits" ? (
             <LimitsTab detail={detail} userId={userId} onSaved={refresh} />
           ) : (
@@ -330,12 +330,14 @@ function AccountTab({
   detail,
   userId,
   isMe,
+  invitePending,
   onSaved,
   onDeleted,
 }: {
   detail: UserDetail;
   userId: string;
   isMe: boolean;
+  invitePending: boolean;
   onSaved: () => Promise<void>;
   onDeleted: (text: string) => void;
 }) {
@@ -386,6 +388,27 @@ function AccountTab({
     } finally {
       setBusy(false);
       setPending(null);
+    }
+  }
+
+  async function resendInvite() {
+    setBusy(true);
+    setNotice(null);
+    try {
+      const json = await adminFetch<{ emailSent: boolean; inviteLink?: string; emailError?: string }>(
+        `/api/admin/users/${userId}/invite`,
+        { method: "POST", json: {} },
+      );
+      setNotice(
+        json.emailSent
+          ? { tone: "ok", text: "Invitation sent again." }
+          : { tone: "error", text: `Email not sent${json.emailError ? ` (${json.emailError})` : ""}. Link to pass on: ${json.inviteLink}` },
+      );
+      await onSaved();
+    } catch (err) {
+      setNotice({ tone: "error", text: (err as Error).message });
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -484,6 +507,11 @@ function AccountTab({
         <button type="button" className="chip-btn" disabled={busy} onClick={() => setPending({ kind: "password" })}>
           Reset password
         </button>
+        {invitePending ? (
+          <button type="button" className="chip-btn" disabled={busy} onClick={() => void resendInvite()}>
+            Resend invitation
+          </button>
+        ) : null}
         {detail.loginLocked ? (
           <button type="button" className="chip-btn" disabled={busy} onClick={() => void patch({ unlockLogin: true }, "Sign-in unlocked.")}>
             Unlock sign-in

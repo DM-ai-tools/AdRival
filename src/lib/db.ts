@@ -75,6 +75,7 @@ export {
   getUserById,
   getUsersByIds,
   getUserByUsername,
+  getUserByInviteHash,
   countActiveAdmins,
   countActiveOrgAdmins,
   countUsers,

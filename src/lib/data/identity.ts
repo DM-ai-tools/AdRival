@@ -90,6 +90,15 @@ export async function countUsers(userIds?: Set<string> | null): Promise<UserCoun
   return rows[0];
 }
 
+/** The user an invitation token (by its hash) belongs to, or null. */
+export async function getUserByInviteHash(tokenHash: string): Promise<AppUser | null> {
+  const { rows } = await getDb().query<{ data: AppUser }>(
+    "select data from users where data->'invite'->>'tokenHash' = $1 and status <> 'deleted' limit 1",
+    [tokenHash],
+  );
+  return rows[0]?.data ?? null;
+}
+
 /** Case-insensitive (usernames are stored lowercased; the unique index is on lower(username)). */
 export async function getUserByUsername(username: string): Promise<AppUser | null> {
   const key = username.trim().toLowerCase();
@@ -127,6 +136,8 @@ export async function createUser(
     mustChangePassword?: boolean;
     createdByUserId?: string | null;
     orgId?: string | null;
+    email?: string | null;
+    invite?: AppUser["invite"];
   },
   options?: {
     /** Runs inside the transaction under the users lock; throw to refuse. */
@@ -156,6 +167,8 @@ export async function createUser(
       updatedAt: now,
       createdByUserId: input.createdByUserId ?? null,
       orgId: input.orgId ?? null,
+      email: input.email ?? null,
+      invite: input.invite ?? null,
     };
     await upsertUser(tx, user);
     return user;
@@ -177,6 +190,8 @@ export type UserPatch = Partial<
     | "deletedAt"
     | "lastLoginAt"
     | "orgId"
+    | "email"
+    | "invite"
   >
 > & {
   /** Invalidates every existing session for this user. */
