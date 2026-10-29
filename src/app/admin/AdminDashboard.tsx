@@ -15,17 +15,27 @@ import { adminFetch } from "./adminUi";
 
 type Tab = "overview" | "alerts" | "users" | "runs" | "usage" | "projects" | "audit" | "orgs" | "settings";
 
-/** platformOnly tabs are hidden from a client organisation's admins. */
-const TABS: Array<{ id: Tab; label: string; platformOnly?: boolean }> = [
+/** platformOnly views are hidden from a client organisation's admins. */
+const VIEWS: Array<{ id: Tab; label: string; platformOnly?: boolean }> = [
   { id: "overview", label: "Overview" },
   { id: "alerts", label: "Alerts" },
   { id: "users", label: "Users" },
+  { id: "orgs", label: "Organisations", platformOnly: true },
   { id: "runs", label: "Runs" },
   { id: "usage", label: "Usage" },
-  { id: "projects", label: "Client spaces" },
   { id: "audit", label: "Audit log" },
-  { id: "orgs", label: "Organisations", platformOnly: true },
+  { id: "projects", label: "Client spaces" },
   { id: "settings", label: "Settings", platformOnly: true },
+];
+
+/** The top bar: related views share one entry and switch with the small pills under it. */
+const NAV: Array<{ label: string; views: Tab[] }> = [
+  { label: "Overview", views: ["overview"] },
+  { label: "Alerts", views: ["alerts"] },
+  { label: "People", views: ["users", "orgs"] },
+  { label: "Activity", views: ["runs", "usage", "audit"] },
+  { label: "Client spaces", views: ["projects"] },
+  { label: "Settings", views: ["settings"] },
 ];
 
 function readUrl(): { tab: Tab; user: string | null } {
@@ -33,7 +43,7 @@ function readUrl(): { tab: Tab; user: string | null } {
   const p = new URLSearchParams(window.location.search);
   const tab = p.get("tab") as Tab | null;
   return {
-    tab: tab && TABS.some((t) => t.id === tab) ? tab : "overview",
+    tab: tab && VIEWS.some((t) => t.id === tab) ? tab : "overview",
     user: p.get("user"),
   };
 }
@@ -50,7 +60,9 @@ export default function AdminDashboard() {
       .then((d) => setMe({ platformAdmin: Boolean(d.platformAdmin), orgName: d.orgName ?? null }))
       .catch(() => setMe({ platformAdmin: false, orgName: null }));
   }, []);
-  const tabs = TABS.filter((t) => !t.platformOnly || me?.platformAdmin);
+  const visible = new Set(VIEWS.filter((v) => !v.platformOnly || me?.platformAdmin).map((v) => v.id));
+  const nav = NAV.map((n) => ({ ...n, views: n.views.filter((v) => visible.has(v)) })).filter((n) => n.views.length);
+  const group = nav.find((n) => n.views.includes(tab));
 
   // The tab (and an open user) live in the address, so refresh, Back and
   // shared links return to the same place.
@@ -95,11 +107,6 @@ export default function AdminDashboard() {
         <div className="product-brand-block">
           <p className="brand">AdRival</p>
           <h1>Administration{me?.orgName ? ` · ${me.orgName}` : ""}</h1>
-          <p className="lede">
-            {me?.orgName
-              ? `Your organisation's accounts, credits, runs, usage and client spaces.`
-              : "Accounts, credit allowances, runs, usage, and client spaces."}
-          </p>
         </div>
         <div className="header-link-row">
           <Link href="/credits" className="ghost-btn">
@@ -112,17 +119,17 @@ export default function AdminDashboard() {
       </header>
 
       <div className="tab-bar tab-bar-wide admin-tab-bar" role="tablist">
-        {tabs.map((t) => (
+        {nav.map((n) => (
           <button
-            key={t.id}
+            key={n.label}
             type="button"
             role="tab"
-            aria-selected={tab === t.id}
-            className={`tab-btn ${tab === t.id ? "active" : ""}`}
-            onClick={() => go(t.id)}
+            aria-selected={group === n}
+            className={`tab-btn ${group === n ? "active" : ""}`}
+            onClick={() => go(group === n ? tab : n.views[0])}
           >
-            {t.label}
-            {t.id === "alerts" && alertCount ? (
+            {n.label}
+            {n.views.includes("alerts") && alertCount ? (
               <span className="admin-tab-badge" aria-label={`${alertCount} open`}>
                 {alertCount}
               </span>
@@ -130,6 +137,22 @@ export default function AdminDashboard() {
           </button>
         ))}
       </div>
+      {group && group.views.length > 1 ? (
+        <div className="admin-subnav" role="tablist" aria-label={group.label}>
+          {group.views.map((v) => (
+            <button
+              key={v}
+              type="button"
+              role="tab"
+              aria-selected={tab === v}
+              className={`chip-btn ${tab === v ? "active" : ""}`}
+              onClick={() => go(v)}
+            >
+              {VIEWS.find((x) => x.id === v)?.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       {tab === "overview" ? <AdminOverview onOpenUser={showUser} /> : null}
       {tab === "alerts" ? <AdminAlerts onOpenUser={showUser} onChanged={refreshAlerts} /> : null}

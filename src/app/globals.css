@@ -6298,3 +6298,11 @@ select.search-input {
 .recreate-preview-state.is-error {
   color: var(--danger);
 }
+
+/* Admin — second-level pills under a grouped tab (People, Activity) */
+.admin-subnav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.25rem 0 1rem;
+}

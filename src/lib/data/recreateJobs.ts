@@ -201,3 +201,56 @@ export async function listRunning(): Promise<RecreateJob[]> {
   );
   return rows.map(toJob);
 }
+
+export interface RecreationCounts {
+  ownerUserId: string;
+  total: number;
+  finished: number;
+  failed: number;
+  stopped: number;
+  inProgress: number;
+  lastAt: string;
+}
+
+/**
+ * How many landing-page recreations each user has started, by outcome, most
+ * active first. `ownerUserIds` limits it to those users (null = everyone).
+ * `since` keeps only jobs created at or after that time.
+ */
+export async function countJobsByOwner(
+  ownerUserIds: string[] | null,
+  since?: string,
+): Promise<RecreationCounts[]> {
+  const { rows } = await getDb().query<{
+    owner_user_id: string;
+    total: number;
+    finished: number;
+    failed: number;
+    stopped: number;
+    in_progress: number;
+    last_at: string | Date;
+  }>(
+    `select owner_user_id,
+            count(*)::int as total,
+            (count(*) filter (where status = 'finished'))::int as finished,
+            (count(*) filter (where status = 'failed'))::int as failed,
+            (count(*) filter (where status = 'stopped'))::int as stopped,
+            (count(*) filter (where status in ('queued', 'running')))::int as in_progress,
+            max(created_at) as last_at
+       from recreate_jobs
+      where ($1::text[] is null or owner_user_id = any($1::text[]))
+        and ($2::timestamptz is null or created_at >= $2::timestamptz)
+      group by owner_user_id
+      order by total desc, last_at desc`,
+    [ownerUserIds, since ?? null],
+  );
+  return rows.map((r) => ({
+    ownerUserId: r.owner_user_id,
+    total: r.total,
+    finished: r.finished,
+    failed: r.failed,
+    stopped: r.stopped,
+    inProgress: r.in_progress,
+    lastAt: iso(r.last_at),
+  }));
+}
